@@ -33,6 +33,7 @@ const SCHEMA_TASKS: &str = "timeline.tasks.v1";
 const SCHEMA_CHECKS: &str = "fugit.checks.v1";
 const SCHEMA_CHECK_RUNS: &str = "fugit.check_runs.v1";
 const SCHEMA_PROJECTS: &str = "fugit.projects.v1";
+const SCHEMA_TASK_VIEWS: &str = "fugit.task_views.v1";
 const SCHEMA_BRIDGE_AUTH: &str = "timeline.bridge_auth.v1";
 const SCHEMA_BRIDGE_AUTO_SYNC: &str = "timeline.bridge_auto_sync.v1";
 const SCHEMA_BRIDGE_AUTO_SYNC_LOCK: &str = "timeline.bridge_auto_sync_lock.v1";
@@ -50,12 +51,14 @@ const QUALITY_CHECK_BACKEND_GITHUB_CI: &str = "github_ci";
 const AUTO_REPLENISH_SOURCE_PLAN: &str = ".fugit:auto_replenish";
 const GITHUB_CI_FAILURE_SOURCE_PLAN: &str = ".fugit:github_ci_failures";
 const GITHUB_ISSUE_SOURCE_PLAN: &str = ".fugit:github_issues";
+const CODE_COMMENT_SOURCE_PLAN: &str = ".fugit:code_comments";
 const ADVISOR_AUTO_PLAN_FILE: &str = ".fugit/advisor/auto_backlog.tsv";
 const ADVISOR_WORKFLOW_FILE: &str = "FUGIT_WORKFLOW.md";
 const SYSTEM_AGENT_ID: &str = "fugit.system";
 const AUTO_BRIDGE_SYNC_STALE_MINUTES: i64 = 30;
 const ADVISOR_WORKER_STALE_MINUTES: i64 = 45;
 const TASK_GUI_MAX_REQUEST_BYTES: usize = 1024 * 1024;
+const COMMENT_SYNC_MAX_FILE_BYTES: u64 = 512 * 1024;
 const FUGIT_SKILL_ID: &str = "fugit";
 const FUGIT_SKILL_MD: &str = include_str!("../skills/fugit/SKILL.md");
 const FUGIT_SKILL_OPENAI_YAML: &str = include_str!("../skills/fugit/agents/openai.yaml");
@@ -81,6 +84,13 @@ const IGNORE_ROOT_ENTRIES: &[&str] = &[
     ".idea",
     ".vscode",
 ];
+
+const COMMENT_PREFIX_HASH: &[&str] = &["#"];
+const COMMENT_PREFIX_SLASH: &[&str] = &["//"];
+const COMMENT_PREFIX_DASH: &[&str] = &["--"];
+const COMMENT_PREFIX_SEMI: &[&str] = &[";"];
+const COMMENT_BLOCK_C_STYLE: &[(&str, &str)] = &[("/*", "*/")];
+const COMMENT_BLOCK_HTML: &[(&str, &str)] = &[("<!--", "-->")];
 
 #[derive(Debug, Parser)]
 #[command(name = "fugit")]
@@ -1364,13 +1374,54 @@ struct TaskEditPatch {
     blocked: TaskTextPatch,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct TaskQueryFilter {
     required_tags: Vec<String>,
     focus: Option<String>,
     prefix: Option<String>,
     contains: Option<String>,
     title_contains: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct SavedTaskListOptions {
+    status: Option<TaskStatusArg>,
+    agent: Option<String>,
+    mine: bool,
+    ready_only: bool,
+    fields: Vec<String>,
+    limit: Option<usize>,
+    format: Option<TaskListFormatArg>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TaskViewDefinition {
+    name: String,
+    description: Option<String>,
+    query: TaskQueryFilter,
+    list: SavedTaskListOptions,
+    created_at_utc: String,
+    updated_at_utc: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TaskViewState {
+    schema_version: String,
+    updated_at_utc: String,
+    views: Vec<TaskViewDefinition>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedTaskListOptions {
+    view_name: Option<String>,
+    render_mode: TaskListRenderMode,
+    status: Option<TaskStatusArg>,
+    agent: Option<String>,
+    mine: bool,
+    ready_only: bool,
+    fields: Vec<String>,
+    limit: usize,
+    filters: TaskQueryFilter,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1411,6 +1462,36 @@ struct TaskPlanContext {
     context_lines: Vec<String>,
     previous_task: Option<TaskPlanNeighbor>,
     next_task: Option<TaskPlanNeighbor>,
+}
+
+#[derive(Debug, Clone)]
+struct CommentSyntax {
+    line_prefixes: &'static [&'static str],
+    block_pairs: &'static [(&'static str, &'static str)],
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CommentTaskMatch {
+    path: String,
+    line: usize,
+    marker: String,
+    text: String,
+    title: String,
+    priority: i32,
+    source_key: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CommentSyncReport {
+    schema_version: String,
+    generated_at_utc: String,
+    plan: String,
+    markers: Vec<String>,
+    scanned_files: usize,
+    matched_comments: usize,
+    marker_counts: BTreeMap<String, usize>,
+    matches: Vec<CommentTaskMatch>,
+    sync: TaskSyncReport,
 }
 
 #[derive(Debug, Clone)]
@@ -1610,6 +1691,8 @@ struct TaskArgs {
 enum TaskAction {
     #[command(visible_aliases = ["search", "scan"])]
     List {
+        #[arg(long)]
+        view: Option<String>,
         #[arg(long, value_enum)]
         format: Option<TaskListFormatArg>,
         #[arg(long, default_value_t = false)]
@@ -1638,8 +1721,12 @@ enum TaskAction {
         ready_only: bool,
         #[arg(long, value_delimiter = ',')]
         fields: Vec<String>,
-        #[arg(long, default_value_t = 200)]
-        limit: usize,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    View {
+        #[command(subcommand)]
+        action: TaskViewAction,
     },
     Status {
         #[arg(long)]
@@ -1665,6 +1752,8 @@ enum TaskAction {
         task_id: Option<String>,
         #[arg(value_name = "TASK_ID")]
         task_id_arg: Option<String>,
+        #[arg(long)]
+        view: Option<String>,
         #[arg(long = "tag")]
         tags: Vec<String>,
         #[arg(long)]
@@ -1806,6 +1895,8 @@ enum TaskAction {
         agent: Option<String>,
         #[arg(long)]
         task_id: Option<String>,
+        #[arg(long)]
+        view: Option<String>,
         #[arg(long = "tag")]
         tags: Vec<String>,
         #[arg(long)]
@@ -1836,6 +1927,21 @@ enum TaskAction {
         peek_open: usize,
         #[arg(long, default_value_t = false)]
         include_context: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    #[command(visible_aliases = ["sync-todos", "sync-todo-comments"])]
+    SyncComments {
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long = "marker")]
+        markers: Vec<String>,
+        #[arg(long)]
+        default_priority: Option<i32>,
+        #[arg(long, default_value_t = false)]
+        keep_missing: bool,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -2012,7 +2118,60 @@ enum TaskAction {
     },
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Subcommand)]
+enum TaskViewAction {
+    Save {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long, value_enum)]
+        status: Option<TaskStatusArg>,
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        #[arg(long)]
+        focus: Option<String>,
+        #[arg(long)]
+        prefix: Option<String>,
+        #[arg(long)]
+        contains: Option<String>,
+        #[arg(long)]
+        title_contains: Option<String>,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, default_value_t = false)]
+        mine: bool,
+        #[arg(long, default_value_t = false)]
+        ready_only: bool,
+        #[arg(long, value_delimiter = ',')]
+        fields: Vec<String>,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long, value_enum)]
+        format: Option<TaskListFormatArg>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    List {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Show {
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Remove {
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
 enum TaskStatusArg {
     Open,
     #[value(alias = "in_progress")]
@@ -2020,7 +2179,8 @@ enum TaskStatusArg {
     Done,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
 enum TaskListFormatArg {
     Table,
     Compact,
@@ -3088,7 +3248,12 @@ fn fugit_skill_bundle(include_skill_body: bool, include_openai_yaml: bool) -> se
                 "fugit_task_approve",
                 "fugit_task_policy_show",
                 "fugit_task_policy_set",
+                "fugit_task_view_list",
+                "fugit_task_view_show",
+                "fugit_task_view_save",
+                "fugit_task_view_remove",
                 "fugit_task_sync",
+                "fugit_task_sync_comments",
                 "fugit_task_import",
                 "fugit_task_list",
                 "fugit_task_request",
@@ -7395,6 +7560,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
 
     match args.action {
         TaskAction::List {
+            view,
             format,
             json,
             jsonl,
@@ -7419,22 +7585,36 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 state.updated_at_utc = now_utc();
                 write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
             }
-            let render_mode =
-                resolve_task_list_render_mode(format, json, jsonl, !fields.is_empty())?;
+            let resolved = resolve_task_list_options(
+                repo_root,
+                view,
+                format,
+                json,
+                jsonl,
+                status,
+                tags,
+                focus,
+                prefix,
+                contains,
+                title_contains,
+                agent,
+                mine,
+                ready_only,
+                fields,
+                limit,
+            )?;
             let status_map = task_status_map(&state);
-            let mine_agent_id = if mine {
-                Some(normalize_agent_id(agent.clone()))
+            let mine_agent_id = if resolved.mine {
+                Some(normalize_agent_id(resolved.agent.clone()))
             } else {
                 None
             };
-            let filters =
-                normalize_task_query_filter(tags, focus, prefix, contains, title_contains)?;
             let mut indices: Vec<usize> = (0..state.tasks.len()).collect();
             sort_task_indices(&state, &mut indices);
             let mut rows = Vec::<serde_json::Value>::new();
             for idx in indices {
                 let task = &state.tasks[idx];
-                if let Some(filter) = status
+                if let Some(filter) = resolved.status
                     && !filter.matches(&task.status)
                 {
                     continue;
@@ -7444,8 +7624,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 {
                     continue;
                 }
-                if let Some(agent_filter) = agent.as_deref() {
-                    let matches_agent = if mine {
+                if let Some(agent_filter) = resolved.agent.as_deref() {
+                    let matches_agent = if resolved.mine {
                         task.claimed_by_agent_id.as_deref() == Some(agent_filter)
                     } else {
                         task.created_by_agent_id == agent_filter
@@ -7456,11 +7636,11 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                         continue;
                     }
                 }
-                if !task_matches_query_filter(task, &filters) {
+                if !task_matches_query_filter(task, &resolved.filters) {
                     continue;
                 }
                 let payload = task_to_json_payload(task, &status_map);
-                if ready_only
+                if resolved.ready_only
                     && !payload
                         .get("ready")
                         .and_then(serde_json::Value::as_bool)
@@ -7468,20 +7648,20 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 {
                     continue;
                 }
-                rows.push(select_task_payload_fields(&payload, &fields));
-                if rows.len() >= limit {
+                rows.push(select_task_payload_fields(&payload, &resolved.fields));
+                if rows.len() >= resolved.limit {
                     break;
                 }
             }
 
-            if render_mode == TaskListRenderMode::Json {
+            if resolved.render_mode == TaskListRenderMode::Json {
                 println!("{}", serde_json::to_string_pretty(&rows)?);
-            } else if render_mode == TaskListRenderMode::Jsonl {
+            } else if resolved.render_mode == TaskListRenderMode::Jsonl {
                 for row in rows {
                     println!("{}", serde_json::to_string(&row)?);
                 }
-            } else if render_mode == TaskListRenderMode::Table {
-                let header_fields = if fields.is_empty() {
+            } else if resolved.render_mode == TaskListRenderMode::Table {
+                let header_fields = if resolved.fields.is_empty() {
                     vec![
                         "task_id".to_string(),
                         "status".to_string(),
@@ -7491,7 +7671,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                         "title".to_string(),
                     ]
                 } else {
-                    fields.clone()
+                    resolved.fields.clone()
                 };
                 println!("{}", header_fields.join("\t"));
                 for row in rows {
@@ -7506,7 +7686,12 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     println!("{}", values.join("\t"));
                 }
             } else {
-                println!("[fugit-task] count={}", rows.len());
+                let view_note = resolved
+                    .view_name
+                    .as_deref()
+                    .map(|name| format!(" view={name}"))
+                    .unwrap_or_default();
+                println!("[fugit-task]{} count={}", view_note, rows.len());
                 for row in rows {
                     let task_id = row
                         .get("task_id")
@@ -7539,6 +7724,84 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 }
             }
         }
+        TaskAction::View { action } => match action {
+            TaskViewAction::Save {
+                name,
+                description,
+                status,
+                tags,
+                focus,
+                prefix,
+                contains,
+                title_contains,
+                agent,
+                mine,
+                ready_only,
+                fields,
+                limit,
+                format,
+                json,
+            } => {
+                let query =
+                    normalize_task_query_filter(tags, focus, prefix, contains, title_contains)?;
+                let view = save_task_view(
+                    repo_root,
+                    name,
+                    description,
+                    query,
+                    SavedTaskListOptions {
+                        status,
+                        agent: normalize_optional_text(agent, "task view agent")?,
+                        mine,
+                        ready_only,
+                        fields,
+                        limit,
+                        format,
+                    },
+                )?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&view)?);
+                } else {
+                    println!("[fugit-task-view] saved {}", view.name);
+                }
+            }
+            TaskViewAction::List { json } => {
+                let mut state = load_task_view_state(repo_root)?;
+                state.views.sort_by(|left, right| left.name.cmp(&right.name));
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&state)?);
+                } else {
+                    println!("[fugit-task-view] count={}", state.views.len());
+                    for view in state.views {
+                        println!(
+                            "{} ready_only={} mine={} tags={} description={}",
+                            view.name,
+                            view.list.ready_only,
+                            view.list.mine,
+                            view.query.required_tags.join(","),
+                            view.description.unwrap_or_default()
+                        );
+                    }
+                }
+            }
+            TaskViewAction::Show { name, json } => {
+                let normalized_name = normalize_task_view_name(name)?;
+                let state = load_task_view_state(repo_root)?;
+                let Some(view) = find_task_view(&state, &normalized_name) else {
+                    bail!("task view not found: {}", normalized_name);
+                };
+                let _ = json;
+                println!("{}", serde_json::to_string_pretty(view)?);
+            }
+            TaskViewAction::Remove { name, json } => {
+                let removed = remove_task_view(repo_root, name)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&removed)?);
+                } else {
+                    println!("[fugit-task-view] removed {}", removed.name);
+                }
+            }
+        },
         TaskAction::Status { agent, json } => {
             if state_changed {
                 state.updated_at_utc = now_utc();
@@ -7595,6 +7858,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             agent,
             task_id,
             task_id_arg,
+            view,
             tags,
             focus,
             prefix,
@@ -7623,8 +7887,14 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 (None, Some(task_id)) => Some(task_id),
                 (None, None) => None,
             };
-            let filters =
+            let resolved_view = load_named_task_view(repo_root, view)?;
+            let explicit_filter =
                 normalize_task_query_filter(tags, focus, prefix, contains, title_contains)?;
+            let filters = if let Some(view) = resolved_view.as_ref() {
+                merge_task_query_filter(&view.query, &explicit_filter)
+            } else {
+                explicit_filter
+            };
             if requested_task_id.is_none() {
                 if state_changed {
                     state.updated_at_utc = now_utc();
@@ -7693,6 +7963,9 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             if let Some(object) = payload.as_object_mut() {
                 object.insert("schema_version".to_string(), json!("fugit.task.start.v1"));
                 object.insert("start_mode".to_string(), json!("request_next"));
+                if let Some(view) = resolved_view.as_ref() {
+                    object.insert("view".to_string(), json!(view.name));
+                }
             }
             print_task_request_payload(&payload, json)?;
         }
@@ -8229,6 +8502,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
         TaskAction::Request {
             agent,
             task_id,
+            view,
             tags,
             focus,
             prefix,
@@ -8248,9 +8522,15 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
         } => {
             let agent_id = agent.unwrap_or_else(default_agent_id);
             let requested_task_id = normalize_optional_text(task_id, "task id")?;
-            let filters =
+            let resolved_view = load_named_task_view(repo_root, view)?;
+            let explicit_filter =
                 normalize_task_query_filter(tags, focus, prefix, contains, title_contains)?;
-            let payload = execute_task_request(
+            let filters = if let Some(view) = resolved_view.as_ref() {
+                merge_task_query_filter(&view.query, &explicit_filter)
+            } else {
+                explicit_filter
+            };
+            let mut payload = execute_task_request(
                 repo_root,
                 &mut state,
                 state_changed,
@@ -8270,7 +8550,120 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     include_context: json || include_context,
                 },
             )?;
+            if let Some(object) = payload.as_object_mut()
+                && let Some(view) = resolved_view.as_ref()
+            {
+                object.insert("view".to_string(), json!(view.name));
+            }
             print_task_request_payload(&payload, json)?;
+        }
+        TaskAction::SyncComments {
+            agent,
+            markers,
+            default_priority,
+            keep_missing,
+            dry_run,
+            json,
+        } => {
+            let agent_id = normalize_agent_id(agent);
+            let (next_state, report) = build_comment_sync_report(
+                repo_root,
+                &state,
+                &agent_id,
+                markers,
+                default_priority,
+                keep_missing,
+                dry_run,
+            )?;
+            if !dry_run {
+                write_pretty_json(&timeline_tasks_path(repo_root), &next_state)?;
+                for task in &report.sync.created {
+                    if let Some(full_task) = next_state
+                        .tasks
+                        .iter()
+                        .find(|row| row.task_id == task.task_id)
+                    {
+                        append_task_timeline_event(repo_root, full_task, &agent_id, "add", None)?;
+                    }
+                }
+                for task in &report.sync.reopened {
+                    if let Some(full_task) = next_state
+                        .tasks
+                        .iter()
+                        .find(|row| row.task_id == task.task_id)
+                    {
+                        append_task_timeline_event(
+                            repo_root, full_task, &agent_id, "reopen", None,
+                        )?;
+                    }
+                }
+                for task in &report.sync.updated {
+                    if let Some(full_task) = next_state
+                        .tasks
+                        .iter()
+                        .find(|row| row.task_id == task.task_id)
+                    {
+                        append_task_timeline_event(repo_root, full_task, &agent_id, "edit", None)?;
+                    }
+                }
+                for task in &report.sync.removed {
+                    append_task_timeline_event(
+                        repo_root,
+                        &FugitTask {
+                            task_id: task.task_id.clone(),
+                            title: task.title.clone(),
+                            detail: None,
+                            priority: 0,
+                            tags: Vec::new(),
+                            depends_on: Vec::new(),
+                            status: TaskStatus::Open,
+                            created_at_utc: now_utc(),
+                            updated_at_utc: now_utc(),
+                            created_by_agent_id: agent_id.clone(),
+                            claimed_by_agent_id: None,
+                            claim_started_at_utc: None,
+                            claim_expires_at_utc: None,
+                            completed_at_utc: None,
+                            completed_by_agent_id: None,
+                            completed_summary: None,
+                            completion_notes: Vec::new(),
+                            completion_artifacts: Vec::new(),
+                            completion_commands: Vec::new(),
+                            progress_entries: Vec::new(),
+                            artifact_entries: Vec::new(),
+                            source_key: task.source_key.clone(),
+                            source_plan: Some(CODE_COMMENT_SOURCE_PLAN.to_string()),
+                            awaiting_confirmation: false,
+                            approved_at_utc: None,
+                            approved_by_agent_id: None,
+                            blocked_at_utc: None,
+                            blocked_by_agent_id: None,
+                            blocked_reason: None,
+                            canceled_at_utc: None,
+                            canceled_by_agent_id: None,
+                            canceled_reason: None,
+                        },
+                        &agent_id,
+                        "remove",
+                        None,
+                    )?;
+                }
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "[fugit-task] sync-comments markers={} scanned_files={} matched={} created={} updated={} reopened={} removed={} dry_run={}",
+                    report.markers.join(","),
+                    report.scanned_files,
+                    report.matched_comments,
+                    report.sync.created.len(),
+                    report.sync.updated.len(),
+                    report.sync.reopened.len(),
+                    report.sync.removed.len(),
+                    dry_run
+                );
+            }
         }
         TaskAction::Claim {
             task_id,
@@ -12471,6 +12864,60 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
+            "name": "fugit_task_view_list",
+            "description": "List saved task views for the repository.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }),
+        json!({
+            "name": "fugit_task_view_show",
+            "description": "Read a saved task view by name.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                    "name": { "type": "string" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_task_view_save",
+            "description": "Create or update a reusable saved task view.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                    "name": { "type": "string" },
+                    "description": { "type": "string" },
+                    "status": { "type": "string", "enum": ["open", "claimed", "done"] },
+                    "tags": { "type": "array", "items": { "type": "string" } },
+                    "focus": { "type": "string" },
+                    "prefix": { "type": "string" },
+                    "contains": { "type": "string" },
+                    "title_contains": { "type": "string" },
+                    "agent": { "type": "string" },
+                    "mine": { "type": "boolean" },
+                    "ready_only": { "type": "boolean" },
+                    "fields": { "type": "array", "items": { "type": "string" } },
+                    "limit": { "type": "integer", "minimum": 1 },
+                    "format": { "type": "string", "enum": ["table", "compact", "json", "jsonl"] }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_task_view_remove",
+            "description": "Delete a saved task view.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                    "name": { "type": "string" }
+                }
+            }
+        }),
+        json!({
             "name": "fugit_task_sync",
             "description": "Reconcile a markdown/TSV plan file or markdown payload with the task queue.",
             "inputSchema": {
@@ -12480,6 +12927,20 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "markdown": { "type": "string" },
                     "format": { "type": "string", "enum": ["auto", "tsv", "markdown"] },
                     "agent": { "type": "string" },
+                    "default_priority": { "type": "integer" },
+                    "keep_missing": { "type": "boolean" },
+                    "dry_run": { "type": "boolean" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_task_sync_comments",
+            "description": "Scan supported source files for TODO/FIXME-style comments and sync them into managed backlog tasks.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent": { "type": "string" },
+                    "markers": { "type": "array", "items": { "type": "string" } },
                     "default_priority": { "type": "integer" },
                     "keep_missing": { "type": "boolean" },
                     "dry_run": { "type": "boolean" }
@@ -12508,6 +12969,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "view": { "type": "string" },
                     "status": { "type": "string", "enum": ["open", "claimed", "done"] },
                     "tags": { "type": "array", "items": { "type": "string" } },
                     "focus": { "type": "string" },
@@ -12530,6 +12992,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                 "properties": {
                     "agent": { "type": "string" },
                     "task_id": { "type": "string" },
+                    "view": { "type": "string" },
                     "tags": { "type": "array", "items": { "type": "string" } },
                     "focus": { "type": "string" },
                     "prefix": { "type": "string" },
@@ -12556,6 +13019,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                 "properties": {
                     "agent": { "type": "string" },
                     "task_id": { "type": "string" },
+                    "view": { "type": "string" },
                     "tags": { "type": "array", "items": { "type": "string" } },
                     "focus": { "type": "string" },
                     "prefix": { "type": "string" },
@@ -13558,6 +14022,141 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
+        "fugit_task_view_list" => run_self_cli_json(
+            repo_root,
+            &[
+                "task".to_string(),
+                "view".to_string(),
+                "list".to_string(),
+                "--json".to_string(),
+            ],
+        )?,
+        "fugit_task_view_show" => {
+            let name = args
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_task_view_show requires name"))?;
+            run_self_cli_json(
+                repo_root,
+                &[
+                    "task".to_string(),
+                    "view".to_string(),
+                    "show".to_string(),
+                    "--name".to_string(),
+                    name.to_string(),
+                    "--json".to_string(),
+                ],
+            )?
+        }
+        "fugit_task_view_save" => {
+            let name = args
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_task_view_save requires name"))?;
+            let mut cli_args = vec![
+                "task".to_string(),
+                "view".to_string(),
+                "save".to_string(),
+                "--name".to_string(),
+                name.to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(description) = args
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+            {
+                cli_args.push("--description".to_string());
+                cli_args.push(description.to_string());
+            }
+            if let Some(status) = args.get("status").and_then(serde_json::Value::as_str) {
+                cli_args.push("--status".to_string());
+                cli_args.push(status.to_string());
+            }
+            if let Some(tags) = args.get("tags").and_then(serde_json::Value::as_array) {
+                for tag in tags {
+                    if let Some(tag_value) = tag.as_str() {
+                        cli_args.push("--tag".to_string());
+                        cli_args.push(tag_value.to_string());
+                    }
+                }
+            }
+            if let Some(focus) = args.get("focus").and_then(serde_json::Value::as_str) {
+                cli_args.push("--focus".to_string());
+                cli_args.push(focus.to_string());
+            }
+            if let Some(prefix) = args.get("prefix").and_then(serde_json::Value::as_str) {
+                cli_args.push("--prefix".to_string());
+                cli_args.push(prefix.to_string());
+            }
+            if let Some(contains) = args.get("contains").and_then(serde_json::Value::as_str) {
+                cli_args.push("--contains".to_string());
+                cli_args.push(contains.to_string());
+            }
+            if let Some(title_contains) = args
+                .get("title_contains")
+                .and_then(serde_json::Value::as_str)
+            {
+                cli_args.push("--title-contains".to_string());
+                cli_args.push(title_contains.to_string());
+            }
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            if args
+                .get("mine")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--mine".to_string());
+            }
+            if args
+                .get("ready_only")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--ready-only".to_string());
+            }
+            if let Some(fields) = args.get("fields").and_then(serde_json::Value::as_array) {
+                let joined = fields
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|field| !field.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                if !joined.is_empty() {
+                    cli_args.push("--fields".to_string());
+                    cli_args.push(joined);
+                }
+            }
+            if let Some(limit) = args.get("limit").and_then(serde_json::Value::as_u64) {
+                cli_args.push("--limit".to_string());
+                cli_args.push(limit.to_string());
+            }
+            if let Some(format) = args.get("format").and_then(serde_json::Value::as_str) {
+                cli_args.push("--format".to_string());
+                cli_args.push(format.to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_task_view_remove" => {
+            let name = args
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_task_view_remove requires name"))?;
+            run_self_cli_json(
+                repo_root,
+                &[
+                    "task".to_string(),
+                    "view".to_string(),
+                    "remove".to_string(),
+                    "--name".to_string(),
+                    name.to_string(),
+                    "--json".to_string(),
+                ],
+            )?
+        }
         "fugit_task_sync" => {
             let mut cli_args = vec!["task".to_string(), "sync".to_string(), "--json".to_string()];
             let mut temp_file_to_remove: Option<PathBuf> = None;
@@ -13618,6 +14217,47 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 let _ = fs::remove_file(&temp_file);
             }
             sync_result?
+        }
+        "fugit_task_sync_comments" => {
+            let mut cli_args = vec![
+                "task".to_string(),
+                "sync-comments".to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            if let Some(markers) = args.get("markers").and_then(serde_json::Value::as_array) {
+                for marker in markers {
+                    if let Some(value) = marker.as_str() {
+                        cli_args.push("--marker".to_string());
+                        cli_args.push(value.to_string());
+                    }
+                }
+            }
+            if let Some(priority) = args
+                .get("default_priority")
+                .and_then(serde_json::Value::as_i64)
+            {
+                cli_args.push("--default-priority".to_string());
+                cli_args.push(priority.to_string());
+            }
+            if args
+                .get("keep_missing")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--keep-missing".to_string());
+            }
+            if args
+                .get("dry_run")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--dry-run".to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
         }
         "fugit_task_import" => {
             let mut cli_args = vec![
@@ -13685,6 +14325,10 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
         }
         "fugit_task_list" => {
             let mut cli_args = vec!["task".to_string(), "list".to_string(), "--json".to_string()];
+            if let Some(view) = args.get("view").and_then(serde_json::Value::as_str) {
+                cli_args.push("--view".to_string());
+                cli_args.push(view.to_string());
+            }
             if let Some(status) = args.get("status").and_then(serde_json::Value::as_str) {
                 cli_args.push("--status".to_string());
                 cli_args.push(status.to_string());
@@ -13866,6 +14510,10 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 cli_args.push("--task-id".to_string());
                 cli_args.push(task_id.to_string());
             }
+            if let Some(view) = args.get("view").and_then(serde_json::Value::as_str) {
+                cli_args.push("--view".to_string());
+                cli_args.push(view.to_string());
+            }
             if let Some(tags) = args.get("tags").and_then(serde_json::Value::as_array) {
                 for tag in tags {
                     if let Some(tag_value) = tag.as_str() {
@@ -13947,6 +14595,10 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             if let Some(task_id) = args.get("task_id").and_then(serde_json::Value::as_str) {
                 cli_args.push("--task-id".to_string());
                 cli_args.push(task_id.to_string());
+            }
+            if let Some(view) = args.get("view").and_then(serde_json::Value::as_str) {
+                cli_args.push("--view".to_string());
+                cli_args.push(view.to_string());
             }
             if let Some(tags) = args.get("tags").and_then(serde_json::Value::as_array) {
                 for tag in tags {
@@ -18960,6 +19612,19 @@ fn load_task_state(repo_root: &Path) -> Result<TaskState> {
     Ok(state)
 }
 
+fn load_task_view_state(repo_root: &Path) -> Result<TaskViewState> {
+    let path = timeline_task_views_path(repo_root);
+    let mut state = load_json_optional::<TaskViewState>(&path)?.unwrap_or(TaskViewState {
+        schema_version: SCHEMA_TASK_VIEWS.to_string(),
+        updated_at_utc: now_utc(),
+        views: Vec::new(),
+    });
+    if state.schema_version.trim().is_empty() {
+        state.schema_version = SCHEMA_TASK_VIEWS.to_string();
+    }
+    Ok(state)
+}
+
 fn load_check_state(repo_root: &Path) -> Result<CheckState> {
     let path = timeline_checks_path(repo_root);
     let mut state = load_json_optional::<CheckState>(&path)?.unwrap_or(CheckState {
@@ -19911,6 +20576,156 @@ fn task_policy_payload(state: &TaskState, config: &TimelineConfig) -> serde_json
         "pending_confirmation_count": pending_confirmation_task_ids.len(),
         "pending_confirmation_task_ids": pending_confirmation_task_ids
     })
+}
+
+fn normalize_task_view_name(name: String) -> Result<String> {
+    let normalized = normalize_required_text(name, "task view name")?;
+    for ch in normalized.chars() {
+        let allowed = ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/');
+        if !allowed {
+            bail!(
+                "task view name '{}' contains unsupported character '{}': use [a-zA-Z0-9._/-]",
+                normalized,
+                ch
+            );
+        }
+    }
+    Ok(normalized)
+}
+
+fn find_task_view<'a>(state: &'a TaskViewState, name: &str) -> Option<&'a TaskViewDefinition> {
+    state.views.iter().find(|view| view.name == name)
+}
+
+fn merge_task_query_filter(base: &TaskQueryFilter, override_filter: &TaskQueryFilter) -> TaskQueryFilter {
+    let mut tags = base.required_tags.clone();
+    tags.extend(override_filter.required_tags.clone());
+    TaskQueryFilter {
+        required_tags: dedupe_keep_order(tags),
+        focus: override_filter.focus.clone().or_else(|| base.focus.clone()),
+        prefix: override_filter.prefix.clone().or_else(|| base.prefix.clone()),
+        contains: override_filter
+            .contains
+            .clone()
+            .or_else(|| base.contains.clone()),
+        title_contains: override_filter
+            .title_contains
+            .clone()
+            .or_else(|| base.title_contains.clone()),
+    }
+}
+
+fn load_named_task_view(repo_root: &Path, name: Option<String>) -> Result<Option<TaskViewDefinition>> {
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    let normalized_name = normalize_task_view_name(name)?;
+    let state = load_task_view_state(repo_root)?;
+    let Some(view) = find_task_view(&state, &normalized_name) else {
+        bail!("task view not found: {}", normalized_name);
+    };
+    Ok(Some(view.clone()))
+}
+
+fn resolve_task_list_options(
+    repo_root: &Path,
+    view: Option<String>,
+    format: Option<TaskListFormatArg>,
+    json: bool,
+    jsonl: bool,
+    status: Option<TaskStatusArg>,
+    tags: Vec<String>,
+    focus: Option<String>,
+    prefix: Option<String>,
+    contains: Option<String>,
+    title_contains: Option<String>,
+    agent: Option<String>,
+    mine: bool,
+    ready_only: bool,
+    fields: Vec<String>,
+    limit: Option<usize>,
+) -> Result<ResolvedTaskListOptions> {
+    let resolved_view = load_named_task_view(repo_root, view)?;
+    let explicit_filter =
+        normalize_task_query_filter(tags, focus, prefix, contains, title_contains)?;
+    let filters = if let Some(view) = resolved_view.as_ref() {
+        merge_task_query_filter(&view.query, &explicit_filter)
+    } else {
+        explicit_filter
+    };
+    let saved_list = resolved_view
+        .as_ref()
+        .map(|view| view.list.clone())
+        .unwrap_or_default();
+    let resolved_fields = if fields.is_empty() {
+        saved_list.fields
+    } else {
+        fields
+    };
+    let render_mode = resolve_task_list_render_mode(
+        format.or(saved_list.format),
+        json,
+        jsonl,
+        !resolved_fields.is_empty(),
+    )?;
+    Ok(ResolvedTaskListOptions {
+        view_name: resolved_view.as_ref().map(|view| view.name.clone()),
+        render_mode,
+        status: status.or(saved_list.status),
+        agent: agent.or(saved_list.agent),
+        mine: mine || saved_list.mine,
+        ready_only: ready_only || saved_list.ready_only,
+        fields: resolved_fields,
+        limit: limit.or(saved_list.limit).unwrap_or(200).max(1),
+        filters,
+    })
+}
+
+fn save_task_view(
+    repo_root: &Path,
+    name: String,
+    description: Option<String>,
+    query: TaskQueryFilter,
+    list: SavedTaskListOptions,
+) -> Result<TaskViewDefinition> {
+    let mut state = load_task_view_state(repo_root)?;
+    let name = normalize_task_view_name(name)?;
+    let description = normalize_optional_text(description, "task view description")?;
+    let now = now_utc();
+    if let Some(index) = state.views.iter().position(|view| view.name == name) {
+        state.views[index].description = description;
+        state.views[index].query = query;
+        state.views[index].list = list;
+        state.views[index].updated_at_utc = now.clone();
+        state.updated_at_utc = now;
+        write_pretty_json(&timeline_task_views_path(repo_root), &state)?;
+        return Ok(state.views[index].clone());
+    }
+    let view = TaskViewDefinition {
+        name,
+        description,
+        query,
+        list,
+        created_at_utc: now.clone(),
+        updated_at_utc: now.clone(),
+    };
+    state.views.push(view.clone());
+    state.views.sort_by(|left, right| left.name.cmp(&right.name));
+    state.updated_at_utc = now;
+    write_pretty_json(&timeline_task_views_path(repo_root), &state)?;
+    Ok(view)
+}
+
+fn remove_task_view(repo_root: &Path, name: String) -> Result<TaskViewDefinition> {
+    let mut state = load_task_view_state(repo_root)?;
+    let name = normalize_task_view_name(name)?;
+    let Some(index) = state.views.iter().position(|view| view.name == name) else {
+        bail!("task view not found: {}", name);
+    };
+    let removed = state.views.remove(index);
+    state.updated_at_utc = now_utc();
+    write_pretty_json(&timeline_task_views_path(repo_root), &state)?;
+    Ok(removed)
 }
 
 #[derive(Debug, Clone)]
@@ -21418,6 +22233,398 @@ fn add_task_artifact_entries(
     Ok(state.tasks[task_index].clone())
 }
 
+fn default_comment_sync_markers() -> Vec<String> {
+    vec![
+        "TODO".to_string(),
+        "FIXME".to_string(),
+        "BUG".to_string(),
+        "HACK".to_string(),
+    ]
+}
+
+fn normalize_comment_sync_markers(markers: Vec<String>) -> Result<Vec<String>> {
+    let input = if markers.is_empty() {
+        default_comment_sync_markers()
+    } else {
+        markers
+    };
+    let mut out = Vec::<String>::new();
+    for marker in input {
+        let normalized = normalize_required_text(marker, "comment marker")?.to_ascii_uppercase();
+        if !normalized
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+        {
+            bail!(
+                "comment marker '{}' contains unsupported characters: use [a-zA-Z0-9_-]",
+                normalized
+            );
+        }
+        if !out.contains(&normalized) {
+            out.push(normalized);
+        }
+    }
+    Ok(out)
+}
+
+fn comment_marker_priority(marker: &str, default_priority: Option<i32>) -> i32 {
+    match marker {
+        "BUG" => 50,
+        "FIXME" => 40,
+        "TODO" => 10,
+        "HACK" => 5,
+        _ => default_priority.unwrap_or(0),
+    }
+}
+
+fn comment_syntax_for_path(rel_path: &str) -> Option<CommentSyntax> {
+    let path = Path::new(rel_path);
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if matches!(
+        file_name.as_str(),
+        "dockerfile"
+            | "makefile"
+            | ".env"
+            | ".bashrc"
+            | ".zshrc"
+            | ".zprofile"
+            | ".gitignore"
+            | ".fugitignore"
+    ) {
+        return Some(CommentSyntax {
+            line_prefixes: COMMENT_PREFIX_HASH,
+            block_pairs: &[],
+        });
+    }
+
+    match ext.as_str() {
+        "rs" | "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "java" | "kt" | "kts"
+        | "swift" | "go" | "js" | "jsx" | "ts" | "tsx" | "php" | "scala" | "dart" => {
+            Some(CommentSyntax {
+                line_prefixes: COMMENT_PREFIX_SLASH,
+                block_pairs: COMMENT_BLOCK_C_STYLE,
+            })
+        }
+        "css" | "scss" | "less" => Some(CommentSyntax {
+            line_prefixes: &[],
+            block_pairs: COMMENT_BLOCK_C_STYLE,
+        }),
+        "html" | "htm" | "xml" | "svg" | "md" | "markdown" => Some(CommentSyntax {
+            line_prefixes: &[],
+            block_pairs: COMMENT_BLOCK_HTML,
+        }),
+        "py" | "rb" | "sh" | "bash" | "zsh" | "yaml" | "yml" | "toml" | "ini" | "cfg"
+        | "conf" | "properties" | "mk" => Some(CommentSyntax {
+            line_prefixes: COMMENT_PREFIX_HASH,
+            block_pairs: &[],
+        }),
+        "sql" | "lua" | "hs" => Some(CommentSyntax {
+            line_prefixes: COMMENT_PREFIX_DASH,
+            block_pairs: COMMENT_BLOCK_C_STYLE,
+        }),
+        "lisp" | "el" | "clj" | "cljs" | "edn" => Some(CommentSyntax {
+            line_prefixes: COMMENT_PREFIX_SEMI,
+            block_pairs: &[],
+        }),
+        _ => None,
+    }
+}
+
+fn normalize_comment_segment_text(value: &str) -> String {
+    let mut trimmed = value.trim();
+    loop {
+        let next = trimmed.trim_start_matches(|ch: char| matches!(ch, '*' | '-' | ':' | ' ' | '\t'));
+        if next == trimmed {
+            break;
+        }
+        trimmed = next;
+    }
+    trimmed.trim().to_string()
+}
+
+fn is_marker_boundary(ch: Option<char>) -> bool {
+    ch.map(|value| !value.is_ascii_alphanumeric() && value != '_')
+        .unwrap_or(true)
+}
+
+fn find_comment_marker(text: &str, markers: &[String]) -> Option<(String, String)> {
+    let upper = text.to_ascii_uppercase();
+    let mut best: Option<(usize, String)> = None;
+    for marker in markers {
+        let mut offset = 0usize;
+        while let Some(found) = upper[offset..].find(marker) {
+            let pos = offset + found;
+            let before = upper[..pos].chars().last();
+            let after = upper[pos + marker.len()..].chars().next();
+            if is_marker_boundary(before) && is_marker_boundary(after) {
+                match &best {
+                    Some((best_pos, _)) if *best_pos <= pos => {}
+                    _ => best = Some((pos, marker.clone())),
+                }
+                break;
+            }
+            offset = pos + marker.len();
+        }
+    }
+    let (marker_start, marker) = best?;
+    let remainder = text[marker_start + marker.len()..]
+        .trim_start_matches(|ch: char| matches!(ch, ':' | '-' | ' ' | '\t'))
+        .trim();
+    let summary = if remainder.is_empty() {
+        marker.clone()
+    } else {
+        remainder.to_string()
+    };
+    Some((marker, summary))
+}
+
+fn extract_comment_segments_from_line<'a>(
+    line: &'a str,
+    syntax: &CommentSyntax,
+    active_block_end: &mut Option<&'static str>,
+) -> Vec<&'a str> {
+    let mut segments = Vec::<&'a str>::new();
+    let mut cursor = 0usize;
+    while cursor < line.len() {
+        if let Some(end_token) = *active_block_end {
+            if let Some(end_idx) = line[cursor..].find(end_token) {
+                let end = cursor + end_idx;
+                if end > cursor {
+                    segments.push(&line[cursor..end]);
+                }
+                cursor = end + end_token.len();
+                *active_block_end = None;
+                continue;
+            }
+            segments.push(&line[cursor..]);
+            break;
+        }
+
+        let next_line_prefix = syntax
+            .line_prefixes
+            .iter()
+            .filter_map(|prefix| line[cursor..].find(prefix).map(|idx| (cursor + idx, *prefix)))
+            .min_by_key(|(idx, _)| *idx);
+        let next_block = syntax
+            .block_pairs
+            .iter()
+            .filter_map(|(start, end)| {
+                line[cursor..]
+                    .find(start)
+                    .map(|idx| (cursor + idx, *start, *end))
+            })
+            .min_by_key(|(idx, _, _)| *idx);
+
+        match (next_line_prefix, next_block) {
+            (Some((line_idx, prefix)), Some((block_idx, start, end))) if line_idx <= block_idx => {
+                segments.push(&line[line_idx + prefix.len()..]);
+                let _ = start;
+                let _ = end;
+                break;
+            }
+            (Some((line_idx, prefix)), None) => {
+                segments.push(&line[line_idx + prefix.len()..]);
+                break;
+            }
+            (_, Some((block_idx, start, end))) => {
+                let body_start = block_idx + start.len();
+                if let Some(end_idx) = line[body_start..].find(end) {
+                    let body_end = body_start + end_idx;
+                    if body_end > body_start {
+                        segments.push(&line[body_start..body_end]);
+                    }
+                    cursor = body_end + end.len();
+                } else {
+                    segments.push(&line[body_start..]);
+                    *active_block_end = Some(end);
+                    break;
+                }
+            }
+            (None, None) => break,
+        }
+    }
+    segments
+}
+
+fn normalize_comment_identity_text(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn comment_scope_tag(path: &str) -> Option<String> {
+    path.split('/')
+        .next()
+        .filter(|token| !token.trim().is_empty())
+        .map(|token| format!("scope:{}", token))
+}
+
+fn build_comment_task_rows(
+    repo_root: &Path,
+    markers: &[String],
+    default_priority: Option<i32>,
+) -> Result<(Vec<TaskImportRow>, Vec<CommentTaskMatch>, usize, BTreeMap<String, usize>)> {
+    let mut rows = Vec::<TaskImportRow>::new();
+    let mut matches = Vec::<CommentTaskMatch>::new();
+    let mut marker_counts = BTreeMap::<String, usize>::new();
+    let mut scanned_files = 0usize;
+    let ignore_matcher = build_ignore_matcher(repo_root)?;
+    let walker = WalkDir::new(repo_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| should_descend(repo_root, entry.path(), &ignore_matcher));
+
+    for entry in walker {
+        let entry = entry.with_context(|| "failed walking repo tree for comment sync")?;
+        if entry.file_type().is_dir() {
+            continue;
+        }
+        let abs_path = entry.path();
+        if !abs_path.is_file() {
+            continue;
+        }
+        let rel_path = abs_path
+            .strip_prefix(repo_root)
+            .with_context(|| format!("failed strip-prefix for {}", abs_path.display()))?;
+        if ignore_matcher.matched(rel_path, false).is_ignore() {
+            continue;
+        }
+        let rel_norm = normalize_relpath(rel_path);
+        if rel_norm.is_empty() {
+            continue;
+        }
+        let Some(syntax) = comment_syntax_for_path(&rel_norm) else {
+            continue;
+        };
+        let metadata = fs::metadata(abs_path)
+            .with_context(|| format!("failed reading metadata {}", abs_path.display()))?;
+        if metadata.len() > COMMENT_SYNC_MAX_FILE_BYTES {
+            continue;
+        }
+        let Ok(content) = fs::read_to_string(abs_path) else {
+            continue;
+        };
+        scanned_files += 1;
+        let mut active_block_end = None;
+        let mut duplicate_counts = BTreeMap::<(String, String), usize>::new();
+        for (line_idx, line) in content.lines().enumerate() {
+            for segment in extract_comment_segments_from_line(line, &syntax, &mut active_block_end) {
+                let cleaned = normalize_comment_segment_text(segment);
+                if cleaned.is_empty() {
+                    continue;
+                }
+                let Some((marker, summary)) = find_comment_marker(&cleaned, markers) else {
+                    continue;
+                };
+                let identity = normalize_comment_identity_text(&summary);
+                let duplicate_entry = duplicate_counts
+                    .entry((marker.clone(), identity.clone()))
+                    .or_insert(0);
+                *duplicate_entry += 1;
+                let occurrence = *duplicate_entry;
+                let source_key = format!(
+                    "comment:{}",
+                    &hash_bytes(
+                        format!("{rel_norm}\n{marker}\n{occurrence}\n{identity}").as_bytes()
+                    )[..16]
+                );
+                let line_number = line_idx + 1;
+                let truncated = truncate_issue_body(&summary, 72);
+                let title = if truncated == marker {
+                    format!("{marker} {rel_norm}:{line_number}")
+                } else {
+                    format!("{marker} {rel_norm}:{line_number} {truncated}")
+                };
+                let priority = comment_marker_priority(&marker, default_priority);
+                let mut tags = vec![
+                    "source:code-comment".to_string(),
+                    format!("comment:{}", marker.to_ascii_lowercase()),
+                ];
+                if let Some(scope_tag) = comment_scope_tag(&rel_norm) {
+                    tags.push(scope_tag);
+                }
+                rows.push(TaskImportRow {
+                    key: source_key.clone(),
+                    source_key: Some(source_key.clone()),
+                    title: title.clone(),
+                    detail: Some(format!(
+                        "Source: {rel_norm}:{line_number}\nMarker: {marker}\nComment: {cleaned}"
+                    )),
+                    priority: Some(priority),
+                    tags,
+                    depends_on_keys: Vec::new(),
+                    agent: None,
+                });
+                *marker_counts.entry(marker.clone()).or_insert(0) += 1;
+                matches.push(CommentTaskMatch {
+                    path: rel_norm.clone(),
+                    line: line_number,
+                    marker,
+                    text: cleaned,
+                    title,
+                    priority,
+                    source_key,
+                });
+            }
+        }
+    }
+
+    Ok((rows, matches, scanned_files, marker_counts))
+}
+
+fn build_comment_sync_report(
+    repo_root: &Path,
+    state: &TaskState,
+    agent_id: &str,
+    markers: Vec<String>,
+    default_priority: Option<i32>,
+    keep_missing: bool,
+    dry_run: bool,
+) -> Result<(TaskState, CommentSyncReport)> {
+    let normalized_markers = normalize_comment_sync_markers(markers)?;
+    let (rows, matches, scanned_files, marker_counts) =
+        build_comment_task_rows(repo_root, &normalized_markers, default_priority)?;
+    let mut next_state = state.clone();
+    let mut sync = sync_plan_into_task_state(
+        &mut next_state,
+        rows,
+        CODE_COMMENT_SOURCE_PLAN,
+        agent_id,
+        default_priority.unwrap_or(0),
+        keep_missing,
+    )?;
+    sync.generated_at_utc = now_utc();
+    sync.plan = CODE_COMMENT_SOURCE_PLAN.to_string();
+    sync.format = "comment_scan".to_string();
+    sync.dry_run = dry_run;
+    Ok((
+        next_state,
+        CommentSyncReport {
+            schema_version: "fugit.task.sync_comments.v1".to_string(),
+            generated_at_utc: now_utc(),
+            plan: CODE_COMMENT_SOURCE_PLAN.to_string(),
+            markers: normalized_markers,
+            scanned_files,
+            matched_comments: matches.len(),
+            marker_counts,
+            matches,
+            sync,
+        },
+    ))
+}
+
 fn parse_task_import_rows(file: &Path, format: TaskImportFormatArg) -> Result<Vec<TaskImportRow>> {
     let content = fs::read_to_string(file)
         .with_context(|| format!("failed reading task import file {}", file.display()))?;
@@ -22279,6 +23486,7 @@ fn detect_project_last_activity(repo_root: &Path) -> Option<String> {
     let mut latest = None;
     let candidate_paths = [
         timeline_tasks_path(repo_root),
+        timeline_task_views_path(repo_root),
         timeline_checks_path(repo_root),
         timeline_check_runs_path(repo_root),
         timeline_config_path(repo_root),
@@ -23524,6 +24732,10 @@ fn timeline_tasks_path(repo_root: &Path) -> PathBuf {
     timeline_root(repo_root).join("tasks.json")
 }
 
+fn timeline_task_views_path(repo_root: &Path) -> PathBuf {
+    timeline_root(repo_root).join("task_views.json")
+}
+
 fn timeline_checks_path(repo_root: &Path) -> PathBuf {
     timeline_root(repo_root).join("checks.json")
 }
@@ -23849,6 +25061,131 @@ mod tests {
         )
         .expect("query filter");
         assert!(task_matches_query_filter(&task, &filter));
+    }
+
+    #[test]
+    fn resolve_task_list_options_applies_saved_view_defaults() {
+        let repo = TestRepo::new("task-view-defaults");
+        let saved = save_task_view(
+            repo.path(),
+            "semantic/compiler".to_string(),
+            Some("semantic compiler queue".to_string()),
+            normalize_task_query_filter(
+                vec!["semantic".to_string()],
+                None,
+                None,
+                None,
+                Some("compiler".to_string()),
+            )
+            .expect("saved query"),
+            SavedTaskListOptions {
+                status: Some(TaskStatusArg::Open),
+                agent: Some("agent.seed".to_string()),
+                mine: false,
+                ready_only: true,
+                fields: vec!["task_id".to_string(), "title".to_string()],
+                limit: Some(12),
+                format: Some(TaskListFormatArg::Table),
+            },
+        )
+        .expect("save task view");
+        assert_eq!(saved.name, "semantic/compiler");
+
+        let resolved = resolve_task_list_options(
+            repo.path(),
+            Some("semantic/compiler".to_string()),
+            None,
+            false,
+            false,
+            None,
+            vec!["seed".to_string()],
+            None,
+            None,
+            Some("tree-sitter".to_string()),
+            None,
+            None,
+            false,
+            false,
+            Vec::new(),
+            None,
+        )
+        .expect("resolve task list options");
+
+        assert_eq!(resolved.view_name.as_deref(), Some("semantic/compiler"));
+        assert_eq!(resolved.status, Some(TaskStatusArg::Open));
+        assert!(resolved.ready_only);
+        assert_eq!(resolved.limit, 12);
+        assert_eq!(resolved.fields, vec!["task_id".to_string(), "title".to_string()]);
+        assert_eq!(
+            resolved.filters.required_tags,
+            vec!["semantic".to_string(), "seed".to_string()]
+        );
+        assert_eq!(
+            resolved.filters.title_contains.as_deref(),
+            Some("compiler")
+        );
+        assert_eq!(resolved.filters.contains.as_deref(), Some("tree-sitter"));
+    }
+
+    #[test]
+    fn build_comment_task_rows_extracts_line_and_block_markers() {
+        let repo = TestRepo::new("comment-task-rows");
+        repo.write_file(
+            "src/lib.rs",
+            "// TODO normalize payload\nfn main() {}\n/* FIXME: handle stale claim */\n",
+        );
+        repo.write_file("README.md", "<!-- TODO document task views -->\n");
+
+        let markers = vec!["TODO".to_string(), "FIXME".to_string()];
+        let (_rows, matches, scanned_files, marker_counts) =
+            build_comment_task_rows(repo.path(), &markers, None).expect("scan comment tasks");
+
+        assert_eq!(scanned_files, 2);
+        assert_eq!(matches.len(), 3);
+        assert_eq!(marker_counts.get("TODO"), Some(&2_usize));
+        assert_eq!(marker_counts.get("FIXME"), Some(&1_usize));
+        assert!(matches.iter().any(|row| row.path == "src/lib.rs" && row.line == 1));
+        assert!(matches.iter().any(|row| row.path == "src/lib.rs" && row.marker == "FIXME"));
+        assert!(matches.iter().any(|row| row.path == "README.md" && row.marker == "TODO"));
+    }
+
+    #[test]
+    fn build_comment_sync_report_removes_stale_managed_comment_tasks() {
+        let repo = TestRepo::new("comment-sync-report");
+        repo.write_file("src/lib.rs", "// TODO first thing\n");
+        let state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: Vec::new(),
+        };
+
+        let (next_state, first_report) = build_comment_sync_report(
+            repo.path(),
+            &state,
+            "agent.runner",
+            vec!["TODO".to_string()],
+            None,
+            false,
+            false,
+        )
+        .expect("first comment sync");
+        assert_eq!(first_report.sync.created.len(), 1);
+        assert_eq!(first_report.sync.removed.len(), 0);
+
+        repo.write_file("src/lib.rs", "fn main() {}\n");
+        let (_final_state, second_report) = build_comment_sync_report(
+            repo.path(),
+            &next_state,
+            "agent.runner",
+            vec!["TODO".to_string()],
+            None,
+            false,
+            false,
+        )
+        .expect("second comment sync");
+        assert_eq!(second_report.sync.created.len(), 0);
+        assert_eq!(second_report.sync.removed.len(), 1);
+        assert_eq!(second_report.matched_comments, 0);
     }
 
     #[test]

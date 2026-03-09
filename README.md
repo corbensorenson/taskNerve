@@ -166,6 +166,10 @@ After migration, use fugit for daily coordination (`task`, `checkpoint`, `log`),
 ```bash
 fugit --repo-root . task import --file /path/to/tasks.tsv
 fugit --repo-root . task sync --plan /path/to/the_final_plan.md
+fugit --repo-root . task view save --name compiler-open --status open --tag semantic --title-contains compiler --ready-only --limit 25
+fugit --repo-root . task list --view compiler-open
+fugit --repo-root . task start --agent agent.worker --view compiler-open --peek-open 3 --json
+fugit --repo-root . task sync-comments --json
 fugit --repo-root . task search --status open --contains compiler --jsonl --fields task_id,title,priority,tags
 fugit --repo-root . task list --format table --limit 10
 fugit --repo-root . task start --agent agent.worker
@@ -192,6 +196,10 @@ fugit --repo-root . task add --title "Implement feature X" --priority 10 --tag f
 `task list --format table|compact|json|jsonl` gives an explicit render mode so agents do not need to infer output shape from a mix of flags.
 
 For backlog shaping, prefer `task list` / `task search` filters such as `--tag`, `--focus`, `--contains`, and `--title-contains` over reading `.fugit/tasks.json` directly.
+
+For repeated queue scans, save those filters as a named view once and reuse them with `task list --view ...`, `task request --view ...`, or `task start --view ...`.
+
+When you want more deterministic backlog without spending model tokens, use `task sync-comments`. It scans supported source files for comment markers like `TODO`, `FIXME`, `BUG`, and `HACK`, then reconciles them into managed tasks under `.fugit:code_comments`.
 
 When an agent already owns a claim, `task request` now returns that owned claim without silently shrinking its lease. If the agent explicitly wants an additional claim, use `--max-new-claims 1` (or higher) and branch on `selection_reason` / `claim_ttl_remaining_seconds` from the JSON payload.
 
@@ -340,6 +348,30 @@ Notes:
 - `detail` and `agent` columns are optional.
 - Markdown import consumes unchecked checklist lines (`- [ ] ...` / `* [ ] ...`) and skips completed lines (`[x]`).
 
+## Saved Views and Comment Sync
+
+Reusable task views:
+
+```bash
+fugit --repo-root . task view save --name compiler-open --status open --tag semantic --title-contains compiler --ready-only --limit 25
+fugit --repo-root . task view list --json
+fugit --repo-root . task view show --name compiler-open --json
+fugit --repo-root . task list --view compiler-open
+fugit --repo-root . task request --agent agent.worker --view compiler-open --no-claim --json
+```
+
+Deterministic code-comment backlog sync:
+
+```bash
+fugit --repo-root . task sync-comments --json
+fugit --repo-root . task sync-comments --marker TODO --marker FIXME --dry-run --json
+```
+
+Notes:
+- Saved views preserve common query and list settings so agents can stop rediscovering the same queue slices.
+- `task request|start --view ...` only use the saved query portion of the view, not list-only render settings.
+- `task sync-comments` respects `.gitignore` / `.fugitignore`, skips oversized or unsupported files, and removes stale managed comment tasks unless `--keep-missing` is set.
+
 ## Task + Timeline GUI
 
 ```bash
@@ -448,7 +480,7 @@ fugit --repo-root . bridge sync-github --no-push --repair-journal
 - `fugit branch list|create|switch`
 - `fugit lock add|list|remove`
 - `fugit check add|list|run|deprecate|policy`
-- `fugit task add|show|current|edit|update|remove|approve|policy|sync|import|list|request|claim|heartbeat|progress|note|done|reopen|release|cancel|gui`
+- `fugit task add|show|current|edit|update|remove|approve|policy|view|sync|sync-comments|import|list|request|start|advance|claim|heartbeat|progress|note|done|reopen|release|cancel|gui`
 - `fugit project add|list|use|remove`
 - `fugit backend show|set`
 - `fugit bridge summary|auth|auto-sync|sync-github|pull-github`
@@ -460,7 +492,7 @@ fugit --repo-root . bridge sync-github --no-push --repair-journal
 Key tools include:
 - `fugit_status`, `fugit_checkpoint`, `fugit_log`, `fugit_checkout`
 - `fugit_lock_add`, `fugit_lock_list`
-- `fugit_task_show`, `fugit_task_current`, `fugit_task_add`, `fugit_task_edit`, `fugit_task_remove`, `fugit_task_approve`, `fugit_task_policy_show`, `fugit_task_policy_set`, `fugit_task_sync`, `fugit_task_list`, `fugit_task_request`, `fugit_task_claim`, `fugit_task_done`, `fugit_task_progress`, `fugit_task_note`, `fugit_task_reopen`, `fugit_task_release`, `fugit_task_cancel`, `fugit_task_heartbeat`, `fugit_task_gui_launch`
+- `fugit_task_show`, `fugit_task_current`, `fugit_task_add`, `fugit_task_edit`, `fugit_task_remove`, `fugit_task_approve`, `fugit_task_policy_show`, `fugit_task_policy_set`, `fugit_task_view_list`, `fugit_task_view_show`, `fugit_task_view_save`, `fugit_task_view_remove`, `fugit_task_sync`, `fugit_task_sync_comments`, `fugit_task_list`, `fugit_task_request`, `fugit_task_start`, `fugit_task_advance`, `fugit_task_claim`, `fugit_task_done`, `fugit_task_progress`, `fugit_task_note`, `fugit_task_reopen`, `fugit_task_release`, `fugit_task_cancel`, `fugit_task_heartbeat`, `fugit_task_gui_launch`
 - `fugit_check_list`, `fugit_check_add`, `fugit_check_deprecate`, `fugit_check_run`, `fugit_check_policy_show`, `fugit_check_policy_set`
 - `fugit_task_import` (supports file/tsv/markdown payload import)
 - `fugit_project_list`, `fugit_project_add`, `fugit_project_use`, `fugit_project_remove`

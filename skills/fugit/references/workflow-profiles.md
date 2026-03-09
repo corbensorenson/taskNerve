@@ -25,11 +25,15 @@ Use when multiple agents should coordinate by pulling from a shared queue.
 - `fugit skill doctor --json`
 - `fugit update check --json`
 - `fugit --repo-root . task search --status open --contains compiler --jsonl --fields task_id,title,priority,tags`
+- `fugit --repo-root . task view save --name compiler-open --status open --tag semantic --title-contains compiler --ready-only --limit 25`
+- `fugit --repo-root . task list --view compiler-open`
 - `fugit --repo-root . task list --format table --limit 10`
 - `fugit --repo-root . task start --agent <agent_id> --claim-ttl-minutes 30 --steal-after-minutes 90`
 - `fugit task start --repo-root . --agent <agent_id> --json`
+- `fugit --repo-root . task start --agent <agent_id> --view compiler-open --json`
 - `fugit --repo-root . task request --agent <agent_id> --focus compiler --claim-ttl-minutes 30 --steal-after-minutes 90`
 - `fugit --repo-root . task request --agent <agent_id> --title-contains "compiler" --json`
+- `fugit --repo-root . task request --agent <agent_id> --view compiler-open --json`
 - `fugit --repo-root . task request --agent <agent_id> --task-id <task_id> --json`
 - `fugit --repo-root . task request --agent <agent_id> --max-new-claims 1 --json`
 - `fugit --repo-root . task request --agent <agent_id> --peek-open 3 --include-context --json`
@@ -37,10 +41,13 @@ Use when multiple agents should coordinate by pulling from a shared queue.
 - `fugit --repo-root . task show <task_id>`
 - `fugit --repo-root . task list --jsonl --fields task_id,title,status`
 - `fugit --repo-root . task list --tag semantic --title-contains "compiler" --json`
+- `fugit --repo-root . task view list --json`
 - `fugit --repo-root . task list --agent <agent_id> --mine --json`
 - `fugit --repo-root . task status --agent <agent_id> --json`
 - `fugit --repo-root . status --json --summary-only`
 - `fugit --repo-root . task request --agent <agent_id> --no-claim --max 3 --json`
+- `fugit --repo-root . task sync-comments --json`
+- `fugit --repo-root . task sync-comments --marker TODO --marker FIXME --dry-run --json`
 - `task request --json` returns `selection_reason`, `claim_ttl_remaining_seconds`, optional `peek_open`, and plan-derived `context` for agent-side branching.
 - `fugit --repo-root . task policy show --json`
 - `fugit --repo-root . task approve --all-pending-auto-replenish --agent <agent_id>`
@@ -65,6 +72,7 @@ Characteristics:
 - built-in updater visibility via `update check --json`, with approval-gated `update apply` unless auto-apply is enabled,
 - one-command resume-or-claim flow via `task start`,
 - one-command complete-and-continue flow via `task advance`,
+- reusable saved queue slices via `task view save|list|show|remove`,
 - lease-based claims with default stale-claim work stealing,
 - default-on date-gate filtering for tasks with `not_before:` tags or date windows in their text,
 - default-on auto-replenish scout tasks when no real work is dispatchable,
@@ -72,6 +80,7 @@ Characteristics:
 - default-on background bridge sync after task completion,
 - default-on GitHub CI verification on GitHub remotes, with deterministic CI-failure tasks,
 - default-on low-task GitHub issue monitoring with deterministic issue-to-task sync and reviewer follow-up when configured,
+- deterministic code-comment backlog harvesting via `task sync-comments`,
 - local/non-GitHub repos keep the registered regression/benchmark gate,
 - explicit release path for fast agent handoff,
 - easy plan maintenance through `task edit` / `task remove`.

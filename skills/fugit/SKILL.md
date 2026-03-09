@@ -48,6 +48,9 @@ Use this skill when any of the following are true:
 - For backlog scans, use native queue search/filtering instead of reading `.fugit/tasks.json` directly:
 - `fugit --repo-root . task search --status open --contains compiler --jsonl --fields task_id,title,priority,tags`
 - `fugit --repo-root . task list --tag semantic --title-contains "compiler" --json`
+- For repeated queue slices, save a reusable view once and reuse it:
+- `fugit --repo-root . task view save --name compiler-open --status open --tag semantic --title-contains compiler --ready-only --limit 25`
+- `fugit --repo-root . task list --view compiler-open`
 - For explicit human-readable queue triage, request a stable render mode:
 - `fugit --repo-root . task list --format table --limit 10`
 - Prefer bulk backlog migration through import first:
@@ -56,6 +59,9 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . task import --file /path/to/the_final_plan.md --format markdown`
 - For a living plan file, reconcile queue state directly:
 - `fugit --repo-root . task sync --plan /path/to/the_final_plan.md --json`
+- For deterministic backlog harvesting from source comments before escalating to advisor work:
+- `fugit --repo-root . task sync-comments --json`
+- `fugit --repo-root . task sync-comments --marker TODO --marker FIXME --dry-run --json`
 - Edit or remove tasks when plans change:
 - `fugit --repo-root . task edit --task-id <task_id> --title "Updated X"`
 - `fugit --repo-root . task remove --task-id <task_id>`
@@ -67,6 +73,7 @@ Use this skill when any of the following are true:
 - Use `task request` when you need preview mode (`--no-claim`, `--max`), explicit scheduling diagnostics, or `--skip-owned`.
 - `fugit --repo-root . task request --agent <agent_id> --claim-ttl-minutes 30 --steal-after-minutes 90`
 - Optional routing hints: `--focus <token>`, `--prefix <token>`, `--contains <token>`, `--title-contains <token>`, plus `--tag <tag>`
+- Saved views can be reused at dispatch time with `--view <name>`; only the saved query portion is applied to `task request|start`.
 - When the queue is genuinely exhausted, `task request` will auto-seed per-agent scout tasks by default so agents can replenish backlog instead of stalling.
 - When standard work gets low, `task request` can also queue advisor review/task-manager runs in the background so backlog generation does not stall.
 - Date gates are respected by default when tasks carry `not_before:` tags or date windows in title/detail text. Use `--ignore-date-gates` only when you intentionally want to bypass that schedule gate.
@@ -150,6 +157,8 @@ Use this skill when any of the following are true:
 - For compact queue scans:
 - `fugit --repo-root . task list --jsonl --fields task_id,title,status`
 - `fugit --repo-root . task search --contains compiler --status open --jsonl --fields task_id,title,priority,tags`
+- `fugit --repo-root . task view list --json`
+- `fugit --repo-root . task view show --name compiler-open --json`
 - `fugit --repo-root . task list --status in_progress --json`
 - `fugit --repo-root . task list --agent <agent_id> --mine --json`
 - Inspect or change auto-replenish policy:

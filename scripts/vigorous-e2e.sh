@@ -241,6 +241,20 @@ if lines[0].split("\t") != ["task_id", "status", "priority", "ready", "claimed_b
 PY
 "$BIN" --repo-root "$REPO_A" task search --tag root --contains "root task" --json >"$TMP_ROOT/task-search.json"
 json_assert "$TMP_ROOT/task-search.json" 'len(payload) == 1 and payload[0].get("task_id") == "'"$TASK_A"'"' "task search should filter by tags and contains text without reading tasks.json directly"
+"$BIN" --repo-root "$REPO_A" task view save --name root-open --status open --tag root --limit 5 --json >"$TMP_ROOT/task-view-save.json"
+json_assert "$TMP_ROOT/task-view-save.json" 'payload.get("name") == "root-open" and payload.get("list", {}).get("status") == "open"' "task view save should persist reusable queue filters"
+"$BIN" --repo-root "$REPO_A" task list --view root-open --json >"$TMP_ROOT/task-view-list.json"
+json_assert "$TMP_ROOT/task-view-list.json" 'len(payload) == 1 and payload[0].get("task_id") == "'"$TASK_A"'"' "task list --view should reuse the saved task view filters"
+"$BIN" --repo-root "$REPO_A" task request --agent agent.viewer --view root-open --no-claim --json >"$TMP_ROOT/task-view-request.json"
+json_assert "$TMP_ROOT/task-view-request.json" 'payload.get("task", {}).get("task_id") == "'"$TASK_A"'" and payload.get("view") == "root-open"' "task request --view should reuse the saved query portion"
+mkdir -p "$REPO_A/src"
+cat >"$REPO_A/src/comment_scan.rs" <<'RS'
+// TODO stabilize queue search
+fn main() {}
+/* FIXME: tighten sync report */
+RS
+"$BIN" --repo-root "$REPO_A" task sync-comments --marker TODO --marker FIXME --json >"$TMP_ROOT/task-sync-comments.json"
+json_assert "$TMP_ROOT/task-sync-comments.json" 'payload.get("matched_comments") == 2 and len(payload.get("sync", {}).get("created", [])) == 2 and payload.get("marker_counts", {}).get("TODO") == 1' "task sync-comments should create managed tasks from supported source comments"
 "$BIN" --repo-root "$REPO_A" task add --title "task-c" --priority 1 --agent agent.c --json >"$TMP_ROOT/task-c.json"
 TASK_C="$(python3 - "$TMP_ROOT/task-c.json" <<'PY'
 import json,sys
