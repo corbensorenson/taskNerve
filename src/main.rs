@@ -23309,6 +23309,10 @@ mod tests {
             quality_checks_github_require_checks: true,
             quality_checks_github_auto_task_on_failure: true,
             quality_checks_github_failure_task_priority: 95,
+            github_issue_monitor_enabled: true,
+            github_issue_monitor_low_task_threshold: 3,
+            github_issue_monitor_cooldown_minutes: 60,
+            github_issue_monitor_max_issues: 25,
         };
 
         let result = ensure_auto_replenish_tasks(&mut state, &config, "agent.alpha");
