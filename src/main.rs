@@ -13,7 +13,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use globset::Glob;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use rayon::prelude::*;
@@ -2141,40 +2141,43 @@ enum TaskAction {
     },
 }
 
+#[derive(Debug, Args)]
+struct TaskViewSaveArgs {
+    #[arg(long)]
+    name: String,
+    #[arg(long)]
+    description: Option<String>,
+    #[arg(long, value_enum)]
+    status: Option<TaskStatusArg>,
+    #[arg(long = "tag")]
+    tags: Vec<String>,
+    #[arg(long)]
+    focus: Option<String>,
+    #[arg(long)]
+    prefix: Option<String>,
+    #[arg(long)]
+    contains: Option<String>,
+    #[arg(long)]
+    title_contains: Option<String>,
+    #[arg(long)]
+    agent: Option<String>,
+    #[arg(long, default_value_t = false)]
+    mine: bool,
+    #[arg(long, default_value_t = false)]
+    ready_only: bool,
+    #[arg(long, value_delimiter = ',')]
+    fields: Vec<String>,
+    #[arg(long)]
+    limit: Option<usize>,
+    #[arg(long, value_enum)]
+    format: Option<TaskListFormatArg>,
+    #[arg(long, default_value_t = false)]
+    json: bool,
+}
+
 #[derive(Debug, Subcommand)]
 enum TaskViewAction {
-    Save {
-        #[arg(long)]
-        name: String,
-        #[arg(long)]
-        description: Option<String>,
-        #[arg(long, value_enum)]
-        status: Option<TaskStatusArg>,
-        #[arg(long = "tag")]
-        tags: Vec<String>,
-        #[arg(long)]
-        focus: Option<String>,
-        #[arg(long)]
-        prefix: Option<String>,
-        #[arg(long)]
-        contains: Option<String>,
-        #[arg(long)]
-        title_contains: Option<String>,
-        #[arg(long)]
-        agent: Option<String>,
-        #[arg(long, default_value_t = false)]
-        mine: bool,
-        #[arg(long, default_value_t = false)]
-        ready_only: bool,
-        #[arg(long, value_delimiter = ',')]
-        fields: Vec<String>,
-        #[arg(long)]
-        limit: Option<usize>,
-        #[arg(long, value_enum)]
-        format: Option<TaskListFormatArg>,
-        #[arg(long, default_value_t = false)]
-        json: bool,
-    },
+    Save(Box<TaskViewSaveArgs>),
     List {
         #[arg(long, default_value_t = false)]
         json: bool,
@@ -7752,23 +7755,24 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             }
         }
         TaskAction::View { action } => match action {
-            TaskViewAction::Save {
-                name,
-                description,
-                status,
-                tags,
-                focus,
-                prefix,
-                contains,
-                title_contains,
-                agent,
-                mine,
-                ready_only,
-                fields,
-                limit,
-                format,
-                json,
-            } => {
+            TaskViewAction::Save(args) => {
+                let TaskViewSaveArgs {
+                    name,
+                    description,
+                    status,
+                    tags,
+                    focus,
+                    prefix,
+                    contains,
+                    title_contains,
+                    agent,
+                    mine,
+                    ready_only,
+                    fields,
+                    limit,
+                    format,
+                    json,
+                } = *args;
                 let query =
                     normalize_task_query_filter(tags, focus, prefix, contains, title_contains)?;
                 let view = save_task_view(
