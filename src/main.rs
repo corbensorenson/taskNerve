@@ -1158,7 +1158,12 @@ fn resolve_codex_home() -> Result<PathBuf> {
     {
         return Ok(PathBuf::from(home.trim()).join(".codex"));
     }
-    bail!("unable to resolve CODEX_HOME; set CODEX_HOME or HOME")
+    if let Ok(profile) = std::env::var("USERPROFILE")
+        && !profile.trim().is_empty()
+    {
+        return Ok(PathBuf::from(profile.trim()).join(".codex"));
+    }
+    bail!("unable to resolve CODEX_HOME; set CODEX_HOME, HOME, or USERPROFILE")
 }
 
 fn write_text_file_with_overwrite(path: &Path, content: &str, overwrite: bool) -> Result<()> {

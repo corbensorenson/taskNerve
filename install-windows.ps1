@@ -72,6 +72,13 @@ if (-not $NoPathUpdate) {
 
 if ($WithSkill) {
     Write-Host "[installer] installing bundled Codex skill..."
+    if (-not $env:CODEX_HOME) {
+        if ($env:HOME) {
+            $env:CODEX_HOME = Join-Path $env:HOME ".codex"
+        } elseif ($env:USERPROFILE) {
+            $env:CODEX_HOME = Join-Path $env:USERPROFILE ".codex"
+        }
+    }
     $skillArgs = @("skill", "install-codex")
     if ($OverwriteSkill) {
         $skillArgs += "--overwrite"
