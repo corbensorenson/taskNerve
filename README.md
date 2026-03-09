@@ -136,7 +136,7 @@ fugit --repo-root . task start --agent agent.worker --task-id <task_id>
 fugit --repo-root . task progress --task-id <task_id> --agent agent.worker --note "landed parser wiring"
 fugit --repo-root . task note --task-id <task_id> --agent agent.worker --message "captured benchmark delta" --artifact artifacts/report.json
 fugit --repo-root . checkpoint --summary "implemented feature X" --agent agent.worker --tag feature
-fugit --repo-root . task done --task-id <task_id> --agent agent.worker --summary "validated feature X" --command "cargo test" --regression "cargo test" --claim-next
+fugit --repo-root . task done --task-id <task_id> --agent agent.worker --summary "validated feature X" --command "cargo test" --claim-next
 fugit --repo-root . log --limit 20
 ```
 
@@ -158,7 +158,7 @@ By default, `task request` also auto-seeds one queue-scout task per known agent 
 
 By default, `task request` respects date gates discovered from tags like `not_before:2026-04-21` or from task text like `2026-04-21 through 2026-06-01`. Use `--ignore-date-gates` only when you intentionally want to bypass that scheduling guard.
 
-By default, `task done` requires at least one regression or benchmark check (`--regression ...` / `--benchmark ...`) unless the task already has an active registered check. Those checks are then executed automatically before `bridge sync-github`, including background auto-sync after task completion. Use `fugit check deprecate --check-id ...` when a test is obsolete instead of silently deleting the record.
+By default, fugit uses GitHub CI verification when the repo's `origin` points at GitHub, and local registered checks elsewhere. On GitHub-backed repos, `bridge sync-github` waits for the pushed commit's Actions runs, reports the result, and deterministically opens or refreshes CI-failure tasks when verification fails. On non-GitHub or fully local repos, the existing registered regression/benchmark checks stay available through `check add|run|deprecate|policy`.
 
 By default, low-task requests can also queue advisor runs in the background. The advisor can use different providers/models for the reviewer and smart task-manager roles, then sync generated backlog through managed plan files instead of mutating the queue ad hoc.
 
@@ -317,6 +317,8 @@ fugit --repo-root . check add --kind regression --task-id <task_id> --command "c
 fugit --repo-root . check run --json
 fugit --repo-root . check deprecate --check-id <check_id> --reason "obsolete"
 fugit --repo-root . check policy show --json
+fugit --repo-root . check policy set --backend local --require-on-task-done true
+fugit --repo-root . check policy set --backend github-ci --github-timeout-minutes 30 --github-auto-task-on-failure true
 fugit --repo-root . advisor show --json
 fugit --repo-root . advisor policy show --json
 fugit --repo-root . advisor review --background
@@ -338,6 +340,14 @@ fugit --repo-root . task done --task-id <task_id> --claim-next --json
 fugit --repo-root . task done --task-id <task_id> --state blocked --reason "needs schema decision" --claim-next --json
 fugit --repo-root . task reopen --task-id <task_id>
 ```
+
+## CI Verification
+
+- `fugit --repo-root . check policy show --json` shows the active verification backend plus GitHub CI timing and failure-task policy.
+- `fugit --repo-root . bridge sync-github --remote origin --branch <branch>` now returns only after the active backend has verified the pushed commit, unless you explicitly disable that wait.
+- `fugit --repo-root . bridge sync-github --skip-remote-verification` bypasses the GitHub wait for one sync.
+- `fugit --repo-root . check run --json` follows the active backend: local registered checks on local repos, or GitHub CI status for the current `HEAD` commit on GitHub-backed repos.
+- Failed GitHub CI runs automatically create or refresh deterministic follow-up tasks under the managed source `.fugit:github_ci_failures`, without needing advisor/model involvement.
 
 Recoverability repair:
 

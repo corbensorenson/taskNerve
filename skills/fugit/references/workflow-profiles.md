@@ -11,6 +11,7 @@ Use when local resource usage should stay minimal.
 Characteristics:
 - single-worker local scan/object operations,
 - lowest background load,
+- GitHub remotes default to GitHub CI verification while non-GitHub/local remotes stay on local checks,
 - best default for laptops/shared dev boxes.
 
 ## Persistent Task Queue (Multi-Agent)
@@ -37,12 +38,12 @@ Use when multiple agents should coordinate by pulling from a shared queue.
 - `fugit --repo-root . task policy show --json`
 - `fugit --repo-root . task approve --all-pending-auto-replenish --agent <agent_id>`
 - `fugit --repo-root . bridge auto-sync show --json`
-- `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --summary "done summary" --regression "<test command>"`
+- `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --summary "done summary"`
 - `fugit --repo-root . task progress <task_id> --agent <agent_id> --note "implemented parser wiring"`
 - `fugit --repo-root . task note <task_id> --agent <agent_id> --message "captured handoff notes" --artifact artifacts/report.json`
 - `fugit --repo-root . task heartbeat <task_id> --agent <agent_id> --claim-ttl-minutes 60 --note "reran flaky benchmark"`
 - `fugit --repo-root . task claim <task_id> --agent <agent_id> --extend-only --claim-ttl-minutes 60`
-- `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --claim-next --regression "<test command>"`
+- `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --claim-next`
 - `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --state blocked --reason "waiting on upstream API" --claim-next`
 - `fugit --repo-root . task release --task-id <task_id> --agent <agent_id> --state blocked --reason "handoff blocked on schema"`
 - `fugit --repo-root . task cancel --task-id <task_id> --agent <agent_id> --reason "superseded"`
@@ -57,7 +58,8 @@ Characteristics:
 - default-on auto-replenish scout tasks when no real work is dispatchable,
 - optional confirmation gate before scout tasks can start,
 - default-on background bridge sync after task completion,
-- default-on regression/benchmark gate before bridge sync,
+- default-on GitHub CI verification on GitHub remotes, with deterministic CI-failure tasks,
+- local/non-GitHub repos keep the registered regression/benchmark gate,
 - explicit release path for fast agent handoff,
 - easy plan maintenance through `task edit` / `task remove`.
 - explicit unblock path through `task update --clear-blocked`.

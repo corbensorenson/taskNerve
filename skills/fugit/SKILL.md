@@ -75,7 +75,7 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . checkpoint --summary "<what changed>" --json`
 
 7. Mark tasks done or release claim:
-- `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --summary "<what finished>" --regression "<test command>"`
+- `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --summary "<what finished>"`
 - To leave a lightweight execution breadcrumb without changing task state:
 - `fugit --repo-root . task progress <task_id> --agent <agent_id> --note "<what changed>"`
 - To attach machine-readable artifact breadcrumbs for handoff/resume:
@@ -84,7 +84,7 @@ Use this skill when any of the following are true:
 - To renew a long-running claim and log progress in one round trip:
 - `fugit --repo-root . task heartbeat <task_id> --agent <agent_id> --claim-ttl-minutes 60 --note "<what changed>"`
 - To close work and pull the next ready item in one round trip:
-- `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --claim-next --regression "<test command>"`
+- `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --claim-next`
 - To block work and move on without faking completion:
 - `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --state blocked --reason "<why blocked>" --claim-next`
 - To release a task back to the queue with explicit blocker context:
@@ -93,13 +93,14 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . task cancel --task-id <task_id> --agent <agent_id> --reason "<why canceled>"`
 - To renew ownership on a long-running claim without re-claim side effects:
 - `fugit --repo-root . task claim <task_id> --agent <agent_id> --extend-only --claim-ttl-minutes 60`
-- Default quality gate is on: every completed task should carry at least one regression or benchmark check, and active checks run before bridge sync.
+- Default quality gate is on: GitHub-backed repos verify pushed commits through GitHub CI by default, while local/non-GitHub repos keep using registered regression/benchmark checks. Failed GitHub CI runs deterministically create or refresh follow-up tasks without advisor/model help.
 - Register or retire checks explicitly when needed:
 - `fugit --repo-root . check add --kind regression --task-id <task_id> --command "<test command>"`
 - `fugit --repo-root . check deprecate --check-id <check_id> --reason "<why obsolete>"`
 - Inspect or tune check policy with:
 - `fugit --repo-root . check policy show --json`
-- `fugit --repo-root . check policy set --require-on-task-done false`
+- `fugit --repo-root . check policy set --backend local --require-on-task-done true`
+- `fugit --repo-root . check policy set --backend github-ci --github-timeout-minutes 30 --github-auto-task-on-failure true`
 - By default this also queues a background bridge sync so the completed-task note is pushed without blocking the agent on network I/O.
 - Inspect that worker with:
 - `fugit --repo-root . bridge auto-sync show --json`
@@ -131,7 +132,7 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . task policy set --auto-replenish-enabled false --agent <agent_id>`
 - For preview scheduling without claiming:
 - `fugit --repo-root . task request --agent <agent_id> --no-claim --max 3 --json`
-- Run the active regression/benchmark suite manually:
+- Run the active verification backend manually:
 - `fugit --repo-root . check run --json`
 - Inspect or run advisor automation:
 - `fugit --repo-root . advisor show --json`
@@ -158,6 +159,7 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . bridge auth status`
 - `fugit --repo-root . bridge auth login --token "$FUGIT_GIT_TOKEN" --helper <helper>`
 - `fugit --repo-root . bridge sync-github --remote origin --branch <branch>`
+- `fugit --repo-root . bridge sync-github --skip-remote-verification`
 - Manual detached push is also available:
 - `fugit --repo-root . bridge sync-github --background --note "manual backup sweep"`
 

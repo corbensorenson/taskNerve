@@ -26,7 +26,8 @@
 - Added `status --summary-only` / `--no-changes`, and included consistent claim lease metadata on task claim/request/show/list JSON payloads.
 - Added default-on task auto-replenish fallback: when no real work is dispatchable, `task request` seeds per-agent scout tasks, with `task policy show|set`, `task approve`, GUI approval controls, and MCP tools for operating the flow.
 - Added default-on background bridge auto-sync after `task done`, with task-note commit subjects, `bridge auto-sync show|set`, and manual detached `bridge sync-github --background`.
-- Added default-on quality gates: `task done` now registers regression/benchmark checks, `check add|list|run|deprecate|policy` manages them, and bridge sync runs active checks before commit/push.
+- Added default-on quality gates: `check add|list|run|deprecate|policy` manages registered regression/benchmark checks, local repos can gate sync on them, and GitHub-backed repos can gate sync on GitHub Actions instead.
+- Added GitHub-CI-backed verification as the default for GitHub remotes, with `check policy set --backend ...`, `bridge sync-github --skip-remote-verification`, `check run` following the active backend, and deterministic CI-failure task creation from GitHub Actions results.
 - Added targeted task pickup with `task request --task-id <task_id>`, including MCP support, so agents can request a specific queue item after inspecting the backlog.
 - Added project discovery with recent-activity ordering, `task gui --background --port 0`, and an installed `fugit-gui` desktop launcher (`~/Applications/Fugit GUI.app` on macOS, `.desktop` entry on Linux).
 - Added advisor automation with provider discovery/assignment, distinct reviewer vs task-manager model selection, safe command-wrapper support for Codex/Claude/local runners, low-task background queueing from `task request`, GUI controls, and MCP tools.

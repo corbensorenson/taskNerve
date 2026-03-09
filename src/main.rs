@@ -43,7 +43,10 @@ const SCHEMA_ADVISOR_WORKER_STATE: &str = "fugit.advisor_worker_state.v1";
 const SCHEMA_ADVISOR_WORKER_LOCK: &str = "fugit.advisor_worker_lock.v1";
 const BACKEND_MODE_GIT_BRIDGE: &str = "git_bridge";
 const BACKEND_MODE_FUGIT_CLOUD: &str = "fugit_cloud";
+const QUALITY_CHECK_BACKEND_LOCAL: &str = "local";
+const QUALITY_CHECK_BACKEND_GITHUB_CI: &str = "github_ci";
 const AUTO_REPLENISH_SOURCE_PLAN: &str = ".fugit:auto_replenish";
+const GITHUB_CI_FAILURE_SOURCE_PLAN: &str = ".fugit:github_ci_failures";
 const ADVISOR_AUTO_PLAN_FILE: &str = ".fugit/advisor/auto_backlog.tsv";
 const ADVISOR_WORKFLOW_FILE: &str = "FUGIT_WORKFLOW.md";
 const SYSTEM_AGENT_ID: &str = "fugit.system";
@@ -314,6 +317,12 @@ enum BridgeAction {
         repair_journal: bool,
         #[arg(long)]
         note: Option<String>,
+        #[arg(long, default_value_t = false)]
+        skip_remote_verification: bool,
+        #[arg(long)]
+        verification_timeout_minutes: Option<u64>,
+        #[arg(long)]
+        verification_poll_seconds: Option<u64>,
         #[arg(long, default_value_t = false)]
         background: bool,
         #[arg(long, hide = true, default_value_t = false)]
@@ -774,12 +783,24 @@ enum CheckPolicyAction {
         json: bool,
     },
     Set {
+        #[arg(long, value_enum)]
+        backend: Option<CheckBackendArg>,
         #[arg(long)]
         enabled: Option<bool>,
         #[arg(long)]
         require_on_task_done: Option<bool>,
         #[arg(long)]
         run_before_sync: Option<bool>,
+        #[arg(long)]
+        github_timeout_minutes: Option<u64>,
+        #[arg(long)]
+        github_poll_seconds: Option<u64>,
+        #[arg(long)]
+        github_require_checks: Option<bool>,
+        #[arg(long)]
+        github_auto_task_on_failure: Option<bool>,
+        #[arg(long)]
+        github_failure_task_priority: Option<i32>,
         #[arg(long)]
         agent: Option<String>,
         #[arg(long, default_value_t = false)]
@@ -823,11 +844,26 @@ enum CheckKindArg {
     Benchmark,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CheckBackendArg {
+    Local,
+    GithubCi,
+}
+
 impl CheckKindArg {
     fn into_check_kind(self) -> CheckKind {
         match self {
             CheckKindArg::Regression => CheckKind::Regression,
             CheckKindArg::Benchmark => CheckKind::Benchmark,
+        }
+    }
+}
+
+impl CheckBackendArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            CheckBackendArg::Local => QUALITY_CHECK_BACKEND_LOCAL,
+            CheckBackendArg::GithubCi => QUALITY_CHECK_BACKEND_GITHUB_CI,
         }
     }
 }
@@ -2000,10 +2036,22 @@ struct TimelineConfig {
     auto_replenish_agents: Vec<String>,
     #[serde(default = "default_quality_checks_enabled")]
     quality_checks_enabled: bool,
+    #[serde(default)]
+    quality_checks_backend: String,
     #[serde(default = "default_quality_checks_require_on_task_done")]
     quality_checks_require_on_task_done: bool,
     #[serde(default = "default_quality_checks_run_before_sync")]
     quality_checks_run_before_sync: bool,
+    #[serde(default = "default_quality_checks_github_timeout_minutes")]
+    quality_checks_github_timeout_minutes: u64,
+    #[serde(default = "default_quality_checks_github_poll_seconds")]
+    quality_checks_github_poll_seconds: u64,
+    #[serde(default = "default_quality_checks_github_require_checks")]
+    quality_checks_github_require_checks: bool,
+    #[serde(default = "default_quality_checks_github_auto_task_on_failure")]
+    quality_checks_github_auto_task_on_failure: bool,
+    #[serde(default = "default_quality_checks_github_failure_task_priority")]
+    quality_checks_github_failure_task_priority: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2099,6 +2147,18 @@ struct BridgeAutoSyncState {
     last_branch: Option<String>,
     last_result: Option<String>,
     last_error: Option<String>,
+    #[serde(default)]
+    last_verified_commit: Option<String>,
+    #[serde(default)]
+    last_verification_backend: Option<String>,
+    #[serde(default)]
+    last_verification_status: Option<String>,
+    #[serde(default)]
+    last_verification_summary: Option<String>,
+    #[serde(default)]
+    last_verification_url: Option<String>,
+    #[serde(default)]
+    last_failure_task_ids: Vec<String>,
     pending_trigger: bool,
     pending_note: Option<String>,
 }
@@ -2121,6 +2181,57 @@ struct BridgeSyncGithubOptions {
     repair_journal: bool,
     note: Option<String>,
     trigger: Option<String>,
+    skip_remote_verification: bool,
+    verification_timeout_minutes: Option<u64>,
+    verification_poll_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GithubActionsRunsResponse {
+    #[serde(default)]
+    workflow_runs: Vec<GithubActionsRun>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GithubActionsRun {
+    id: u64,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    html_url: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    conclusion: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GithubActionsJobsResponse {
+    #[serde(default)]
+    jobs: Vec<GithubActionsJob>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GithubActionsJob {
+    id: u64,
+    name: String,
+    #[serde(default)]
+    html_url: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    conclusion: Option<String>,
+    #[serde(default)]
+    steps: Vec<GithubActionsStep>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GithubActionsStep {
+    name: String,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    conclusion: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -3378,13 +3489,23 @@ fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else {
                     println!(
-                        "[fugit-bridge-auto-sync] enabled={} on_task_done={} status={} pending={} remote={} branch={}",
+                        "[fugit-bridge-auto-sync] enabled={} on_task_done={} status={} pending={} remote={} branch={} verification_backend={} verification_status={} failure_tasks={}",
                         payload["enabled"].as_bool().unwrap_or(true),
                         payload["on_task_done"].as_bool().unwrap_or(true),
                         payload["status"].as_str().unwrap_or("unknown"),
                         payload["pending_trigger"].as_bool().unwrap_or(false),
                         config.default_bridge_remote,
-                        config.default_bridge_branch
+                        config.default_bridge_branch,
+                        payload["last_verification_backend"]
+                            .as_str()
+                            .unwrap_or("n/a"),
+                        payload["last_verification_status"]
+                            .as_str()
+                            .unwrap_or("n/a"),
+                        payload["last_failure_task_ids"]
+                            .as_array()
+                            .map(|rows| rows.len())
+                            .unwrap_or(0)
                     );
                 }
             }
@@ -3451,6 +3572,9 @@ fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
             burst_push,
             repair_journal,
             note,
+            skip_remote_verification,
+            verification_timeout_minutes,
+            verification_poll_seconds,
             background,
             background_worker,
             trigger,
@@ -3465,6 +3589,9 @@ fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
                 repair_journal,
                 note: normalize_optional_text(note, "bridge sync note")?,
                 trigger: normalize_optional_text(trigger, "bridge sync trigger")?,
+                skip_remote_verification,
+                verification_timeout_minutes,
+                verification_poll_seconds,
             };
             if background {
                 let payload = queue_bridge_auto_sync_background(repo_root, &config, &options)?;
@@ -3494,7 +3621,29 @@ fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
             } else {
                 let report =
                     perform_bridge_sync_github(repo_root, &branches.active_branch, &options)?;
-                if !report["committed"].as_bool().unwrap_or(false) {
+                if !report["ok"].as_bool().unwrap_or(true) {
+                    let failure_task_count = report["quality_gate"]["failure_tasks"]["task_ids"]
+                        .as_array()
+                        .map(|rows| rows.len())
+                        .unwrap_or(0);
+                    bail!(
+                        "bridge sync {} for commit {}; GitHub verification status={}{}",
+                        if report["pushed"].as_bool().unwrap_or(false) {
+                            "pushed but did not verify cleanly"
+                        } else {
+                            "did not complete"
+                        },
+                        report["commit_sha"].as_str().unwrap_or("unknown"),
+                        report["quality_gate"]["status"]
+                            .as_str()
+                            .unwrap_or("unknown"),
+                        if failure_task_count > 0 {
+                            format!(" and queued {} CI follow-up task(s)", failure_task_count)
+                        } else {
+                            String::new()
+                        }
+                    );
+                } else if !report["committed"].as_bool().unwrap_or(false) {
                     println!(
                         "[fugit-bridge] {}",
                         report["message"]
@@ -3503,15 +3652,20 @@ fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
                     );
                 } else if report["pushed"].as_bool().unwrap_or(false) {
                     println!(
-                        "[fugit-bridge] committed+pushed remote={} branch={}",
+                        "[fugit-bridge] committed+pushed remote={} branch={} verification_backend={} verification_status={}",
                         report["remote"].as_str().unwrap_or("origin"),
-                        report["branch"].as_str().unwrap_or("trunk")
+                        report["branch"].as_str().unwrap_or("trunk"),
+                        report["verification_backend"].as_str().unwrap_or("local"),
+                        report["quality_gate"]["status"]
+                            .as_str()
+                            .unwrap_or("unknown")
                     );
                 } else {
                     println!(
-                        "[fugit-bridge] committed locally (push skipped): remote={} branch={}",
+                        "[fugit-bridge] committed locally (push skipped): remote={} branch={} verification_backend={}",
                         report["remote"].as_str().unwrap_or("origin"),
-                        report["branch"].as_str().unwrap_or("trunk")
+                        report["branch"].as_str().unwrap_or("trunk"),
+                        report["verification_backend"].as_str().unwrap_or("local")
                     );
                 }
             }
@@ -3935,6 +4089,570 @@ fn parse_git_credential_output(stdout: &str) -> Option<GitCredential> {
     }
 }
 
+fn quality_checks_backend(config: &TimelineConfig) -> &str {
+    match config.quality_checks_backend.trim() {
+        QUALITY_CHECK_BACKEND_LOCAL => QUALITY_CHECK_BACKEND_LOCAL,
+        QUALITY_CHECK_BACKEND_GITHUB_CI => QUALITY_CHECK_BACKEND_GITHUB_CI,
+        _ => QUALITY_CHECK_BACKEND_GITHUB_CI,
+    }
+}
+
+fn quality_checks_use_github_ci(config: &TimelineConfig) -> bool {
+    quality_checks_backend(config) == QUALITY_CHECK_BACKEND_GITHUB_CI
+}
+
+fn default_quality_checks_backend_for_repo(repo_root: &Path) -> String {
+    let Some(remote_url) = git_remote_url(repo_root, "origin").ok().flatten() else {
+        return QUALITY_CHECK_BACKEND_LOCAL.to_string();
+    };
+    let Some(host) = parse_git_host(&remote_url) else {
+        return QUALITY_CHECK_BACKEND_LOCAL.to_string();
+    };
+    if host.eq_ignore_ascii_case("github.com") || host.to_ascii_lowercase().contains("github") {
+        QUALITY_CHECK_BACKEND_GITHUB_CI.to_string()
+    } else {
+        QUALITY_CHECK_BACKEND_LOCAL.to_string()
+    }
+}
+
+fn git_head_commit_sha(repo_root: &Path) -> Result<String> {
+    let output = ProcessCommand::new("git")
+        .current_dir(repo_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .with_context(|| "failed resolving git HEAD commit")?;
+    if !output.status.success() {
+        bail!("failed resolving git HEAD commit");
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if sha.is_empty() {
+        bail!("git HEAD commit is empty");
+    }
+    Ok(sha)
+}
+
+fn parse_github_repo_slug(remote_url: &str) -> Option<(String, String)> {
+    let trimmed = remote_url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let path = if let Some((_, tail)) = trimmed.split_once("://") {
+        let without_user = tail.rsplit('@').next().unwrap_or(tail);
+        let (_, rest) = without_user.split_once('/')?;
+        rest
+    } else if trimmed.contains('@') && trimmed.contains(':') {
+        let tail = trimmed.split('@').nth(1).unwrap_or_default();
+        let (_, rest) = tail.split_once(':')?;
+        rest
+    } else {
+        return None;
+    };
+
+    let cleaned = path.trim_matches('/').trim_end_matches(".git");
+    let mut parts = cleaned.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    if owner.is_empty() || repo.is_empty() {
+        None
+    } else {
+        Some((owner.to_string(), repo.to_string()))
+    }
+}
+
+fn slugify_ci_task_token(raw: &str) -> String {
+    let mut out = String::new();
+    let mut last_was_sep = false;
+    for ch in raw.trim().chars() {
+        let normalized = if ch.is_ascii_alphanumeric() {
+            Some(ch.to_ascii_lowercase())
+        } else if ch.is_whitespace()
+            || matches!(ch, '-' | '_' | '.' | '/' | ':' | '(' | ')' | '[' | ']')
+        {
+            Some('-')
+        } else {
+            None
+        };
+        if let Some(candidate) = normalized {
+            if candidate == '-' {
+                if !last_was_sep {
+                    out.push(candidate);
+                    last_was_sep = true;
+                }
+            } else {
+                out.push(candidate);
+                last_was_sep = false;
+            }
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "unknown".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn github_api_base_url_for_host(host: &str) -> String {
+    if host.eq_ignore_ascii_case("github.com") {
+        "https://api.github.com".to_string()
+    } else {
+        format!("https://{}/api/v3", host.trim())
+    }
+}
+
+fn resolve_github_api_token(repo_root: &Path, host: &str) -> Result<Option<String>> {
+    for key in ["FUGIT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] {
+        if let Ok(value) = std::env::var(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Ok(Some(trimmed.to_string()));
+            }
+        }
+    }
+
+    if let Ok(output) = ProcessCommand::new("gh").args(["auth", "token"]).output()
+        && output.status.success()
+    {
+        let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !token.is_empty() {
+            return Ok(Some(token));
+        }
+    }
+
+    Ok(git_credential_fill(repo_root, host, None)?.and_then(|cred| cred.password))
+}
+
+fn github_api_get_json(
+    repo_root: &Path,
+    api_base_url: &str,
+    api_path: &str,
+    token: Option<&str>,
+) -> Result<(u16, serde_json::Value)> {
+    let url = format!(
+        "{}/{}",
+        api_base_url.trim_end_matches('/'),
+        api_path.trim_start_matches('/')
+    );
+    let mut cmd = ProcessCommand::new("curl");
+    cmd.arg("-sS")
+        .arg("-L")
+        .arg("-w")
+        .arg("\n%{http_code}")
+        .arg("-H")
+        .arg("Accept: application/vnd.github+json")
+        .arg("-H")
+        .arg("User-Agent: fugit-alpha")
+        .arg("-H")
+        .arg("X-GitHub-Api-Version: 2022-11-28")
+        .arg(&url);
+    if let Some(token) = token.filter(|value| !value.trim().is_empty()) {
+        cmd.arg("-H")
+            .arg(format!("Authorization: Bearer {}", token.trim()));
+    }
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed querying GitHub API at {}", url))?;
+    if !output.status.success() {
+        bail!(
+            "GitHub API request failed for {}: {}",
+            url,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let Some((body, status_line)) = stdout.rsplit_once('\n') else {
+        bail!("GitHub API response did not include an HTTP status code");
+    };
+    let status = status_line
+        .trim()
+        .parse::<u16>()
+        .with_context(|| format!("invalid GitHub API HTTP status '{}'", status_line.trim()))?;
+    let body = body.trim();
+    let payload = if body.is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str::<serde_json::Value>(body).unwrap_or_else(|_| json!({ "raw": body }))
+    };
+    Ok((status, payload))
+}
+
+fn github_ci_conclusion_is_success_like(conclusion: Option<&str>) -> bool {
+    matches!(conclusion, Some("success" | "neutral" | "skipped"))
+}
+
+fn github_ci_conclusion_is_failure(conclusion: Option<&str>) -> bool {
+    match conclusion {
+        Some(value) => !github_ci_conclusion_is_success_like(Some(value)),
+        None => false,
+    }
+}
+
+fn github_ci_failed_step_name(job: &GithubActionsJob) -> Option<String> {
+    job.steps
+        .iter()
+        .find(|step| {
+            step.status.as_deref() == Some("completed")
+                && github_ci_conclusion_is_failure(step.conclusion.as_deref())
+        })
+        .map(|step| step.name.clone())
+}
+
+fn github_ci_run_name(run: &GithubActionsRun) -> String {
+    run.name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("GitHub Actions")
+        .to_string()
+}
+
+fn sync_github_ci_failure_tasks(
+    repo_root: &Path,
+    config: &TimelineConfig,
+    api_base_url: &str,
+    api_token: Option<&str>,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    commit_sha: &str,
+    runs: &[GithubActionsRun],
+) -> Result<serde_json::Value> {
+    if !config.quality_checks_github_auto_task_on_failure {
+        return Ok(json!({
+            "enabled": false,
+            "created_count": 0,
+            "updated_count": 0,
+            "reopened_count": 0,
+            "blocked_count": 0,
+            "task_ids": []
+        }));
+    }
+
+    let mut rows_by_key = BTreeMap::<String, TaskImportRow>::new();
+    for run in runs {
+        let path = format!(
+            "repos/{owner}/{repo}/actions/runs/{}/jobs?per_page=100",
+            run.id
+        );
+        let (status, payload) = github_api_get_json(repo_root, api_base_url, &path, api_token)?;
+        let jobs = if (200..300).contains(&status) {
+            serde_json::from_value::<GithubActionsJobsResponse>(payload)
+                .unwrap_or(GithubActionsJobsResponse { jobs: Vec::new() })
+                .jobs
+        } else {
+            Vec::new()
+        };
+        let failed_jobs = jobs
+            .iter()
+            .filter(|job| {
+                job.status.as_deref() == Some("completed")
+                    && github_ci_conclusion_is_failure(job.conclusion.as_deref())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if failed_jobs.is_empty() {
+            let workflow_slug = slugify_ci_task_token(&github_ci_run_name(run));
+            let branch_slug = slugify_ci_task_token(branch);
+            let key = format!("ghci-{}-{}", branch_slug, workflow_slug);
+            rows_by_key.entry(key.clone()).or_insert_with(|| TaskImportRow {
+                source_key: Some(key.clone()),
+                key,
+                title: format!("Fix GitHub CI failure: {}", github_ci_run_name(run)),
+                detail: Some(format!(
+                    "Repository: {owner}/{repo}\nBranch: {branch}\nCommit: {commit_sha}\nWorkflow: {}\nConclusion: {}\nRun URL: {}",
+                    github_ci_run_name(run),
+                    run.conclusion.as_deref().unwrap_or("failed"),
+                    run.html_url.as_deref().unwrap_or("n/a")
+                )),
+                priority: Some(config.quality_checks_github_failure_task_priority),
+                tags: vec![
+                    "ci-failure".to_string(),
+                    "workflow:github-actions".to_string(),
+                    format!("branch:{}", branch_slug),
+                ],
+                depends_on_keys: Vec::new(),
+                agent: Some(SYSTEM_AGENT_ID.to_string()),
+            });
+            continue;
+        }
+
+        for job in failed_jobs {
+            let workflow_slug = slugify_ci_task_token(&github_ci_run_name(run));
+            let job_slug = slugify_ci_task_token(&job.name);
+            let branch_slug = slugify_ci_task_token(branch);
+            let key = format!("ghci-{}-{}-{}", branch_slug, workflow_slug, job_slug);
+            rows_by_key.entry(key.clone()).or_insert_with(|| {
+                let failed_step = github_ci_failed_step_name(&job);
+                TaskImportRow {
+                    source_key: Some(key.clone()),
+                    key,
+                    title: format!(
+                        "Fix GitHub CI failure: {} / {}",
+                        github_ci_run_name(run),
+                        job.name
+                    ),
+                    detail: Some(format!(
+                        "Repository: {owner}/{repo}\nBranch: {branch}\nCommit: {commit_sha}\nWorkflow: {}\nJob: {}\nConclusion: {}\nFailed step: {}\nRun URL: {}\nJob URL: {}",
+                        github_ci_run_name(run),
+                        job.name,
+                        job.conclusion.as_deref().unwrap_or("failed"),
+                        failed_step.as_deref().unwrap_or("n/a"),
+                        run.html_url.as_deref().unwrap_or("n/a"),
+                        job.html_url.as_deref().unwrap_or("n/a")
+                    )),
+                    priority: Some(config.quality_checks_github_failure_task_priority),
+                    tags: vec![
+                        "ci-failure".to_string(),
+                        "workflow:github-actions".to_string(),
+                        format!("branch:{}", branch_slug),
+                    ],
+                    depends_on_keys: Vec::new(),
+                    agent: Some(SYSTEM_AGENT_ID.to_string()),
+                }
+            });
+        }
+    }
+
+    if rows_by_key.is_empty() {
+        return Ok(json!({
+            "enabled": true,
+            "created_count": 0,
+            "updated_count": 0,
+            "reopened_count": 0,
+            "blocked_count": 0,
+            "task_ids": []
+        }));
+    }
+
+    let mut next_state = load_task_state(repo_root)?;
+    let mut report = sync_plan_into_task_state(
+        &mut next_state,
+        rows_by_key.into_values().collect(),
+        GITHUB_CI_FAILURE_SOURCE_PLAN,
+        SYSTEM_AGENT_ID,
+        config.quality_checks_github_failure_task_priority,
+        true,
+    )?;
+    report.generated_at_utc = now_utc();
+    report.plan = GITHUB_CI_FAILURE_SOURCE_PLAN.to_string();
+    report.format = "github_actions".to_string();
+    report.dry_run = false;
+
+    next_state.updated_at_utc = now_utc();
+    write_pretty_json(&timeline_tasks_path(repo_root), &next_state)?;
+    for task in &report.created {
+        if let Some(full_task) = next_state
+            .tasks
+            .iter()
+            .find(|row| row.task_id == task.task_id)
+        {
+            append_task_timeline_event(repo_root, full_task, SYSTEM_AGENT_ID, "add", None)?;
+        }
+    }
+    for task in &report.reopened {
+        if let Some(full_task) = next_state
+            .tasks
+            .iter()
+            .find(|row| row.task_id == task.task_id)
+        {
+            append_task_timeline_event(repo_root, full_task, SYSTEM_AGENT_ID, "reopen", None)?;
+        }
+    }
+    for task in &report.updated {
+        if let Some(full_task) = next_state
+            .tasks
+            .iter()
+            .find(|row| row.task_id == task.task_id)
+        {
+            append_task_timeline_event(repo_root, full_task, SYSTEM_AGENT_ID, "edit", None)?;
+        }
+    }
+
+    let task_ids = report
+        .created
+        .iter()
+        .chain(report.updated.iter())
+        .chain(report.reopened.iter())
+        .map(|task| task.task_id.clone())
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "enabled": true,
+        "created_count": report.created.len(),
+        "updated_count": report.updated.len(),
+        "reopened_count": report.reopened.len(),
+        "blocked_count": report.blocked.len(),
+        "task_ids": task_ids,
+        "report": report
+    }))
+}
+
+fn verify_github_ci_for_commit(
+    repo_root: &Path,
+    config: &TimelineConfig,
+    options: &BridgeSyncGithubOptions,
+    remote_url: &str,
+    branch: &str,
+    commit_sha: &str,
+) -> Result<serde_json::Value> {
+    let host = parse_git_host(remote_url)
+        .ok_or_else(|| anyhow!("failed parsing GitHub host from remote URL"))?;
+    let (owner, repo) = parse_github_repo_slug(remote_url)
+        .ok_or_else(|| anyhow!("failed parsing GitHub owner/repo from remote URL"))?;
+    let api_base_url = github_api_base_url_for_host(&host);
+    let api_token = resolve_github_api_token(repo_root, &host)?;
+    let timeout_minutes = options
+        .verification_timeout_minutes
+        .unwrap_or(config.quality_checks_github_timeout_minutes)
+        .max(1);
+    let poll_seconds = options
+        .verification_poll_seconds
+        .unwrap_or(config.quality_checks_github_poll_seconds)
+        .max(1);
+    let require_checks = config.quality_checks_github_require_checks;
+    let started = Instant::now();
+    let timeout = std::time::Duration::from_secs(timeout_minutes.saturating_mul(60));
+    let poll_delay = std::time::Duration::from_secs(poll_seconds);
+    let mut last_runs = Vec::<GithubActionsRun>::new();
+
+    loop {
+        let path = format!("repos/{owner}/{repo}/actions/runs?head_sha={commit_sha}&per_page=100");
+        let (status, payload) =
+            github_api_get_json(repo_root, &api_base_url, &path, api_token.as_deref())?;
+        if !(200..300).contains(&status) {
+            return Ok(json!({
+                "schema_version": "fugit.check.run.v2",
+                "generated_at_utc": now_utc(),
+                "backend": QUALITY_CHECK_BACKEND_GITHUB_CI,
+                "ok": false,
+                "status": "github_api_error",
+                "commit_sha": commit_sha,
+                "branch": branch,
+                "repository": format!("{owner}/{repo}"),
+                "workflow_run_count": 0,
+                "html_url": serde_json::Value::Null,
+                "failure_tasks": serde_json::Value::Null,
+                "error": format!("GitHub API returned HTTP {}", status)
+            }));
+        }
+        let response = serde_json::from_value::<GithubActionsRunsResponse>(payload).unwrap_or(
+            GithubActionsRunsResponse {
+                workflow_runs: Vec::new(),
+            },
+        );
+        last_runs = response.workflow_runs;
+
+        if !last_runs.is_empty() {
+            let all_completed = last_runs
+                .iter()
+                .all(|run| run.status.as_deref() == Some("completed"));
+            if all_completed {
+                let failing_runs = last_runs
+                    .iter()
+                    .filter(|run| github_ci_conclusion_is_failure(run.conclusion.as_deref()))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let first_url = last_runs.iter().find_map(|run| run.html_url.clone());
+                if failing_runs.is_empty() {
+                    return Ok(json!({
+                        "schema_version": "fugit.check.run.v2",
+                        "generated_at_utc": now_utc(),
+                        "backend": QUALITY_CHECK_BACKEND_GITHUB_CI,
+                        "ok": true,
+                        "status": "passed",
+                        "commit_sha": commit_sha,
+                        "branch": branch,
+                        "repository": format!("{owner}/{repo}"),
+                        "workflow_run_count": last_runs.len(),
+                        "html_url": first_url,
+                        "failure_tasks": serde_json::Value::Null,
+                        "workflow_runs": last_runs.iter().map(|run| {
+                            json!({
+                                "id": run.id,
+                                "name": github_ci_run_name(run),
+                                "status": run.status,
+                                "conclusion": run.conclusion,
+                                "html_url": run.html_url
+                            })
+                        }).collect::<Vec<_>>()
+                    }));
+                }
+                let failure_tasks = sync_github_ci_failure_tasks(
+                    repo_root,
+                    config,
+                    &api_base_url,
+                    api_token.as_deref(),
+                    &owner,
+                    &repo,
+                    branch,
+                    commit_sha,
+                    &failing_runs,
+                )?;
+                return Ok(json!({
+                    "schema_version": "fugit.check.run.v2",
+                    "generated_at_utc": now_utc(),
+                    "backend": QUALITY_CHECK_BACKEND_GITHUB_CI,
+                    "ok": false,
+                    "status": "failed",
+                    "commit_sha": commit_sha,
+                    "branch": branch,
+                    "repository": format!("{owner}/{repo}"),
+                    "workflow_run_count": last_runs.len(),
+                    "html_url": first_url,
+                    "failure_tasks": failure_tasks,
+                    "workflow_runs": last_runs.iter().map(|run| {
+                        json!({
+                            "id": run.id,
+                            "name": github_ci_run_name(run),
+                            "status": run.status,
+                            "conclusion": run.conclusion,
+                            "html_url": run.html_url
+                        })
+                    }).collect::<Vec<_>>()
+                }));
+            }
+        }
+
+        if started.elapsed() >= timeout {
+            let status = if last_runs.is_empty() {
+                if require_checks {
+                    "no_runs_detected"
+                } else {
+                    "no_runs_allowed"
+                }
+            } else {
+                "timed_out"
+            };
+            let ok = status == "no_runs_allowed";
+            return Ok(json!({
+                "schema_version": "fugit.check.run.v2",
+                "generated_at_utc": now_utc(),
+                "backend": QUALITY_CHECK_BACKEND_GITHUB_CI,
+                "ok": ok,
+                "status": status,
+                "commit_sha": commit_sha,
+                "branch": branch,
+                "repository": format!("{owner}/{repo}"),
+                "workflow_run_count": last_runs.len(),
+                "html_url": last_runs.iter().find_map(|run| run.html_url.clone()),
+                "failure_tasks": serde_json::Value::Null,
+                "workflow_runs": last_runs.iter().map(|run| {
+                    json!({
+                        "id": run.id,
+                        "name": github_ci_run_name(run),
+                        "status": run.status,
+                        "conclusion": run.conclusion,
+                        "html_url": run.html_url
+                    })
+                }).collect::<Vec<_>>()
+            }));
+        }
+
+        std::thread::sleep(poll_delay);
+    }
+}
+
 fn verify_git_remote_access(repo_root: &Path, remote_url: &str) -> Result<bool> {
     let output = ProcessCommand::new("git")
         .current_dir(repo_root)
@@ -4333,17 +5051,75 @@ fn cmd_check(repo_root: &Path, args: CheckArgs) -> Result<()> {
             json,
         } => {
             let task_id = normalize_optional_text(task_id, "task id")?;
-            let kind = kind.map(CheckKindArg::into_check_kind);
-            let payload = run_quality_checks(
-                repo_root,
-                &mut state,
-                task_id.as_deref(),
-                kind,
-                include_deprecated,
-                fail_fast,
-                "manual",
-                true,
-            )?;
+            let payload = if quality_checks_use_github_ci(&config) {
+                let remote = config.default_bridge_remote.clone();
+                let branch = config.default_bridge_branch.clone();
+                let commit_sha = git_head_commit_sha(repo_root)?;
+                match git_remote_url(repo_root, &remote)? {
+                    Some(remote_url) => {
+                        let options = BridgeSyncGithubOptions {
+                            remote,
+                            branch: branch.clone(),
+                            event_count: 1,
+                            no_push: false,
+                            pack_threads: None,
+                            burst_push: false,
+                            repair_journal: false,
+                            note: None,
+                            trigger: Some("manual_check".to_string()),
+                            skip_remote_verification: false,
+                            verification_timeout_minutes: None,
+                            verification_poll_seconds: None,
+                        };
+                        let mut payload = verify_github_ci_for_commit(
+                            repo_root,
+                            &config,
+                            &options,
+                            &remote_url,
+                            &branch,
+                            &commit_sha,
+                        )?;
+                        if let Some(object) = payload.as_object_mut() {
+                            object.insert(
+                                "ignored_local_filters".to_string(),
+                                json!({
+                                    "task_id": task_id,
+                                    "kind": kind.map(|value| match value {
+                                        CheckKindArg::Regression => "regression",
+                                        CheckKindArg::Benchmark => "benchmark",
+                                    }),
+                                    "include_deprecated": include_deprecated,
+                                    "fail_fast": fail_fast
+                                }),
+                            );
+                        }
+                        payload
+                    }
+                    None => json!({
+                        "schema_version": "fugit.check.run.v2",
+                        "generated_at_utc": now_utc(),
+                        "backend": QUALITY_CHECK_BACKEND_GITHUB_CI,
+                        "ok": false,
+                        "status": "missing_remote_url",
+                        "commit_sha": commit_sha,
+                        "branch": branch,
+                        "failure_tasks": serde_json::Value::Null,
+                        "error": format!("no git remote URL found for '{}'", remote)
+                    }),
+                }
+            } else {
+                let kind = kind.map(CheckKindArg::into_check_kind);
+                run_quality_checks(
+                    repo_root,
+                    &mut state,
+                    task_id.as_deref(),
+                    kind,
+                    include_deprecated,
+                    fail_fast,
+                    "manual",
+                    true,
+                )?
+            };
             if json {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
                 if !payload["ok"].as_bool().unwrap_or(false) {
@@ -4351,11 +5127,13 @@ fn cmd_check(repo_root: &Path, args: CheckArgs) -> Result<()> {
                 }
             } else {
                 println!(
-                    "[fugit-check] status={} selected={} passed={} failed={}",
+                    "[fugit-check] backend={} status={} selected={} passed={} failed={} workflow_runs={}",
+                    payload["backend"].as_str().unwrap_or("local"),
                     payload["status"].as_str().unwrap_or("unknown"),
                     payload["selected_count"].as_u64().unwrap_or(0),
                     payload["passed_count"].as_u64().unwrap_or(0),
-                    payload["failed_count"].as_u64().unwrap_or(0)
+                    payload["failed_count"].as_u64().unwrap_or(0),
+                    payload["workflow_run_count"].as_u64().unwrap_or(0)
                 );
                 if !payload["ok"].as_bool().unwrap_or(false) {
                     bail!("quality checks failed");
@@ -4369,27 +5147,53 @@ fn cmd_check(repo_root: &Path, args: CheckArgs) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else {
                     println!(
-                        "[fugit-check-policy] enabled={} require_on_task_done={} run_before_sync={} active={} deprecated={}",
+                        "[fugit-check-policy] enabled={} backend={} require_on_task_done={} run_before_sync={} active={} deprecated={} github_timeout_minutes={} github_poll_seconds={} github_require_checks={} github_auto_task_on_failure={} github_failure_task_priority={}",
                         payload["enabled"].as_bool().unwrap_or(false),
+                        payload["backend"].as_str().unwrap_or("local"),
                         payload["require_on_task_done"].as_bool().unwrap_or(false),
                         payload["run_before_sync"].as_bool().unwrap_or(false),
                         payload["active_check_count"].as_u64().unwrap_or(0),
-                        payload["deprecated_check_count"].as_u64().unwrap_or(0)
+                        payload["deprecated_check_count"].as_u64().unwrap_or(0),
+                        payload["github_ci"]["timeout_minutes"]
+                            .as_u64()
+                            .unwrap_or(0),
+                        payload["github_ci"]["poll_seconds"].as_u64().unwrap_or(0),
+                        payload["github_ci"]["require_checks"]
+                            .as_bool()
+                            .unwrap_or(false),
+                        payload["github_ci"]["auto_task_on_failure"]
+                            .as_bool()
+                            .unwrap_or(false),
+                        payload["github_ci"]["failure_task_priority"]
+                            .as_i64()
+                            .unwrap_or(0)
                     );
                 }
             }
             CheckPolicyAction::Set {
+                backend,
                 enabled,
                 require_on_task_done,
                 run_before_sync,
+                github_timeout_minutes,
+                github_poll_seconds,
+                github_require_checks,
+                github_auto_task_on_failure,
+                github_failure_task_priority,
                 agent: _,
                 json,
             } => {
                 let changed = update_check_policy_config(
                     &mut config,
+                    backend,
                     enabled,
                     require_on_task_done,
                     run_before_sync,
+                    github_timeout_minutes,
+                    github_poll_seconds,
+                    github_require_checks,
+                    github_auto_task_on_failure,
+                    github_failure_task_priority,
                 );
                 if changed {
                     write_pretty_json(&timeline_config_path(repo_root), &config)?;
@@ -4399,10 +5203,24 @@ fn cmd_check(repo_root: &Path, args: CheckArgs) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else {
                     println!(
-                        "[fugit-check-policy] enabled={} require_on_task_done={} run_before_sync={}",
+                        "[fugit-check-policy] enabled={} backend={} require_on_task_done={} run_before_sync={} github_timeout_minutes={} github_poll_seconds={} github_require_checks={} github_auto_task_on_failure={} github_failure_task_priority={}",
                         payload["enabled"].as_bool().unwrap_or(false),
+                        payload["backend"].as_str().unwrap_or("local"),
                         payload["require_on_task_done"].as_bool().unwrap_or(false),
-                        payload["run_before_sync"].as_bool().unwrap_or(false)
+                        payload["run_before_sync"].as_bool().unwrap_or(false),
+                        payload["github_ci"]["timeout_minutes"]
+                            .as_u64()
+                            .unwrap_or(0),
+                        payload["github_ci"]["poll_seconds"].as_u64().unwrap_or(0),
+                        payload["github_ci"]["require_checks"]
+                            .as_bool()
+                            .unwrap_or(false),
+                        payload["github_ci"]["auto_task_on_failure"]
+                            .as_bool()
+                            .unwrap_or(false),
+                        payload["github_ci"]["failure_task_priority"]
+                            .as_i64()
+                            .unwrap_or(0)
                     );
                 }
             }
@@ -5693,6 +6511,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             if matches!(done_state, TaskDoneStateArg::Done) {
                 if config.quality_checks_enabled
                     && config.quality_checks_require_on_task_done
+                    && quality_checks_backend(&config) == QUALITY_CHECK_BACKEND_LOCAL
                     && !skip_check_requirement
                     && existing_active_checks == 0
                     && regression_commands.is_empty()
@@ -5898,6 +6717,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                         "quality_checks".to_string(),
                         json!({
                             "policy_enabled": config.quality_checks_enabled,
+                            "backend": quality_checks_backend(&config),
                             "require_on_task_done": config.quality_checks_require_on_task_done,
                             "skipped_requirement": skip_check_requirement,
                             "existing_active_count": existing_active_checks,
@@ -9973,7 +10793,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
         }),
         json!({
             "name": "fugit_check_run",
-            "description": "Run registered regression and benchmark checks.",
+            "description": "Run the active verification backend: local registered checks or GitHub CI for the current HEAD commit.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -9995,9 +10815,15 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "backend": { "type": "string", "enum": ["local", "github-ci"] },
                     "enabled": { "type": "boolean" },
                     "require_on_task_done": { "type": "boolean" },
                     "run_before_sync": { "type": "boolean" },
+                    "github_timeout_minutes": { "type": "integer", "minimum": 1 },
+                    "github_poll_seconds": { "type": "integer", "minimum": 1 },
+                    "github_require_checks": { "type": "boolean" },
+                    "github_auto_task_on_failure": { "type": "boolean" },
+                    "github_failure_task_priority": { "type": "integer" },
                     "agent": { "type": "string" }
                 }
             }
@@ -11487,6 +12313,10 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 "set".to_string(),
                 "--json".to_string(),
             ];
+            if let Some(backend) = args.get("backend").and_then(serde_json::Value::as_str) {
+                cli_args.push("--backend".to_string());
+                cli_args.push(backend.to_string());
+            }
             if let Some(enabled) = args.get("enabled").and_then(serde_json::Value::as_bool) {
                 cli_args.push("--enabled".to_string());
                 cli_args.push(enabled.to_string());
@@ -11504,6 +12334,41 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             {
                 cli_args.push("--run-before-sync".to_string());
                 cli_args.push(run_before_sync.to_string());
+            }
+            if let Some(timeout_minutes) = args
+                .get("github_timeout_minutes")
+                .and_then(serde_json::Value::as_u64)
+            {
+                cli_args.push("--github-timeout-minutes".to_string());
+                cli_args.push(timeout_minutes.to_string());
+            }
+            if let Some(poll_seconds) = args
+                .get("github_poll_seconds")
+                .and_then(serde_json::Value::as_u64)
+            {
+                cli_args.push("--github-poll-seconds".to_string());
+                cli_args.push(poll_seconds.to_string());
+            }
+            if let Some(require_checks) = args
+                .get("github_require_checks")
+                .and_then(serde_json::Value::as_bool)
+            {
+                cli_args.push("--github-require-checks".to_string());
+                cli_args.push(require_checks.to_string());
+            }
+            if let Some(auto_task_on_failure) = args
+                .get("github_auto_task_on_failure")
+                .and_then(serde_json::Value::as_bool)
+            {
+                cli_args.push("--github-auto-task-on-failure".to_string());
+                cli_args.push(auto_task_on_failure.to_string());
+            }
+            if let Some(priority) = args
+                .get("github_failure_task_priority")
+                .and_then(serde_json::Value::as_i64)
+            {
+                cli_args.push("--github-failure-task-priority".to_string());
+                cli_args.push(priority.to_string());
             }
             if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
                 cli_args.push("--agent".to_string());
@@ -12085,9 +12950,10 @@ fn perform_bridge_sync_github(
 ) -> Result<serde_json::Value> {
     ensure_git_repo(repo_root)?;
 
-    if let Some(remote_url) = git_remote_url(repo_root, &options.remote)?
+    let remote_url = git_remote_url(repo_root, &options.remote)?;
+    if let Some(remote_url) = remote_url.as_deref()
         && (remote_url.starts_with("http://") || remote_url.starts_with("https://"))
-        && let Some(host) = parse_git_host(&remote_url)
+        && let Some(host) = parse_git_host(remote_url)
     {
         let cred = git_credential_fill(repo_root, &host, None)?;
         let has_password = cred.as_ref().and_then(|row| row.password.clone()).is_some();
@@ -12121,41 +12987,68 @@ fn perform_bridge_sync_github(
         }
     }
     let config = load_timeline_config_or_default(repo_root)?;
-    let quality_gate = if config.quality_checks_enabled && config.quality_checks_run_before_sync {
-        let mut check_state = load_check_state(repo_root)?;
-        let payload = run_quality_checks(
-            repo_root,
-            &mut check_state,
-            None,
-            None,
-            false,
-            false,
-            "bridge_sync",
-            false,
-        )?;
-        if !payload["ok"].as_bool().unwrap_or(false) {
-            bail!(
-                "bridge sync blocked by failing quality checks; run `fugit check run --json`, fix the failures, or deprecate stale checks with `fugit check deprecate --check-id ...`"
-            );
-        }
-        payload
-    } else {
-        json!({
-            "schema_version": "fugit.check.run.v1",
+    let verification_backend = quality_checks_backend(&config).to_string();
+    let verification_enabled = config.quality_checks_enabled
+        && config.quality_checks_run_before_sync
+        && !options.skip_remote_verification;
+    let pre_sync_quality_gate =
+        if verification_enabled && quality_checks_backend(&config) == QUALITY_CHECK_BACKEND_LOCAL {
+            let mut check_state = load_check_state(repo_root)?;
+            let payload = run_quality_checks(
+                repo_root,
+                &mut check_state,
+                None,
+                None,
+                false,
+                false,
+                "bridge_sync",
+                false,
+            )?;
+            payload
+        } else {
+            json!({
+                "schema_version": "fugit.check.run.v2",
+                "generated_at_utc": now_utc(),
+                "ok": true,
+                "backend": verification_backend.clone(),
+                "status": if !config.quality_checks_enabled {
+                    "disabled"
+                } else if options.skip_remote_verification {
+                    "skipped_by_flag"
+                } else if quality_checks_use_github_ci(&config) {
+                    "waiting_for_remote_verification"
+                } else {
+                    "run_before_sync_disabled"
+                },
+                "trigger": "bridge_sync",
+                "selected_count": 0,
+                "passed_count": 0,
+                "failed_count": 0,
+                "checks": []
+            })
+        };
+    if verification_enabled
+        && quality_checks_backend(&config) == QUALITY_CHECK_BACKEND_LOCAL
+        && !pre_sync_quality_gate["ok"].as_bool().unwrap_or(false)
+    {
+        return Ok(json!({
+            "schema_version": "fugit.bridge.sync_github.v2",
             "generated_at_utc": now_utc(),
-            "ok": true,
-            "status": if !config.quality_checks_enabled {
-                "disabled"
-            } else {
-                "run_before_sync_disabled"
-            },
-            "trigger": "bridge_sync",
-            "selected_count": 0,
-            "passed_count": 0,
-            "failed_count": 0,
-            "checks": []
-        })
-    };
+            "ok": false,
+            "status": "blocked_by_quality_gate",
+            "remote": options.remote,
+            "branch": options.branch,
+            "note": options.note,
+            "trigger": options.trigger,
+            "included_event_count": 0,
+            "committed": false,
+            "pushed": false,
+            "no_push": options.no_push,
+            "verification_backend": verification_backend.clone(),
+            "quality_gate": pre_sync_quality_gate,
+            "message": "bridge sync blocked by failing quality checks before commit/push"
+        }));
+    }
     let mut events = read_branch_events(repo_root, active_branch)?;
     if events.len() > options.event_count {
         let start = events.len().saturating_sub(options.event_count);
@@ -12174,8 +13067,10 @@ fn perform_bridge_sync_github(
 
     if staged_clean {
         return Ok(json!({
-            "schema_version": "fugit.bridge.sync_github.v1",
+            "schema_version": "fugit.bridge.sync_github.v2",
             "generated_at_utc": now_utc(),
+            "ok": true,
+            "status": "noop",
             "remote": options.remote,
             "branch": options.branch,
             "note": options.note,
@@ -12184,7 +13079,8 @@ fn perform_bridge_sync_github(
             "committed": false,
             "pushed": false,
             "no_push": options.no_push,
-            "quality_gate": quality_gate,
+            "verification_backend": verification_backend.clone(),
+            "quality_gate": pre_sync_quality_gate,
             "message": "no staged changes after git add -A; skipping commit/push",
             "commit_subject": subject
         }));
@@ -12218,9 +13114,77 @@ fn perform_bridge_sync_github(
         true
     };
 
+    let commit_sha = git_head_commit_sha(repo_root)?;
+    let quality_gate = if verification_enabled
+        && quality_checks_backend(&config) == QUALITY_CHECK_BACKEND_GITHUB_CI
+    {
+        if options.no_push {
+            json!({
+                "schema_version": "fugit.check.run.v2",
+                "generated_at_utc": now_utc(),
+                "backend": QUALITY_CHECK_BACKEND_GITHUB_CI,
+                "ok": true,
+                "status": "skipped_no_push",
+                "commit_sha": commit_sha,
+                "branch": options.branch,
+                "failure_tasks": serde_json::Value::Null
+            })
+        } else if let Some(remote_url) = remote_url.as_deref() {
+            match verify_github_ci_for_commit(
+                repo_root,
+                &config,
+                options,
+                remote_url,
+                &options.branch,
+                &commit_sha,
+            ) {
+                Ok(payload) => payload,
+                Err(err) => json!({
+                    "schema_version": "fugit.check.run.v2",
+                    "generated_at_utc": now_utc(),
+                    "backend": QUALITY_CHECK_BACKEND_GITHUB_CI,
+                    "ok": false,
+                    "status": "verification_error",
+                    "commit_sha": commit_sha,
+                    "branch": options.branch,
+                    "failure_tasks": serde_json::Value::Null,
+                    "error": err.to_string()
+                }),
+            }
+        } else {
+            json!({
+                "schema_version": "fugit.check.run.v2",
+                "generated_at_utc": now_utc(),
+                "backend": QUALITY_CHECK_BACKEND_GITHUB_CI,
+                "ok": false,
+                "status": "missing_remote_url",
+                "commit_sha": commit_sha,
+                "branch": options.branch,
+                "failure_tasks": serde_json::Value::Null,
+                "error": "bridge sync could not resolve git remote URL for GitHub CI verification"
+            })
+        }
+    } else {
+        pre_sync_quality_gate
+    };
+    let sync_ok = quality_gate["ok"].as_bool().unwrap_or(true);
+    let status = if !sync_ok {
+        if pushed {
+            "verification_failed"
+        } else {
+            "blocked_by_quality_gate"
+        }
+    } else if pushed {
+        "success"
+    } else {
+        "committed_local"
+    };
+
     Ok(json!({
-        "schema_version": "fugit.bridge.sync_github.v1",
+        "schema_version": "fugit.bridge.sync_github.v2",
         "generated_at_utc": now_utc(),
+        "ok": sync_ok,
+        "status": status,
         "remote": options.remote,
         "branch": options.branch,
         "note": options.note,
@@ -12229,8 +13193,10 @@ fn perform_bridge_sync_github(
         "committed": true,
         "pushed": pushed,
         "no_push": options.no_push,
+        "verification_backend": verification_backend.clone(),
         "quality_gate": quality_gate,
-        "commit_subject": subject
+        "commit_subject": subject,
+        "commit_sha": commit_sha
     }))
 }
 
@@ -12285,6 +13251,12 @@ fn queue_bridge_auto_sync_background(
     state.last_branch = Some(options.branch.clone());
     state.last_result = None;
     state.last_error = None;
+    state.last_verified_commit = None;
+    state.last_verification_backend = None;
+    state.last_verification_status = None;
+    state.last_verification_summary = None;
+    state.last_verification_url = None;
+    state.last_failure_task_ids.clear();
     state.pending_trigger = false;
     state.pending_note = None;
     write_bridge_auto_sync_state(repo_root, &state)?;
@@ -12314,6 +13286,17 @@ fn queue_bridge_auto_sync_background(
     }
     if let Some(trigger) = options.trigger.as_deref() {
         cmd.arg("--trigger").arg(trigger);
+    }
+    if options.skip_remote_verification {
+        cmd.arg("--skip-remote-verification");
+    }
+    if let Some(timeout_minutes) = options.verification_timeout_minutes {
+        cmd.arg("--verification-timeout-minutes")
+            .arg(timeout_minutes.to_string());
+    }
+    if let Some(poll_seconds) = options.verification_poll_seconds {
+        cmd.arg("--verification-poll-seconds")
+            .arg(poll_seconds.to_string());
     }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -12370,6 +13353,12 @@ fn run_bridge_auto_sync_worker(
         state.last_remote = Some(current_options.remote.clone());
         state.last_branch = Some(current_options.branch.clone());
         state.last_error = None;
+        state.last_verified_commit = None;
+        state.last_verification_backend = None;
+        state.last_verification_status = None;
+        state.last_verification_summary = None;
+        state.last_verification_url = None;
+        state.last_failure_task_ids.clear();
         write_bridge_auto_sync_state(repo_root, &state)?;
 
         let result = perform_bridge_sync_github(repo_root, active_branch, &current_options);
@@ -12386,7 +13375,17 @@ fn run_bridge_auto_sync_worker(
                     .get("pushed")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
-                state.status = if !committed {
+                let sync_ok = report
+                    .get("ok")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(true);
+                state.status = if !sync_ok {
+                    report
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("verification_failed")
+                        .to_string()
+                } else if !committed {
                     "noop".to_string()
                 } else if pushed {
                     "success".to_string()
@@ -12400,12 +13399,58 @@ fn run_bridge_auto_sync_worker(
                         .unwrap_or("bridge sync complete")
                         .to_string(),
                 );
-                state.last_error = None;
+                state.last_error = if sync_ok {
+                    None
+                } else {
+                    Some(
+                        report["quality_gate"]["status"]
+                            .as_str()
+                            .unwrap_or("verification_failed")
+                            .to_string(),
+                    )
+                };
+                state.last_verified_commit = report
+                    .get("commit_sha")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string);
+                state.last_verification_backend = report
+                    .get("verification_backend")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string);
+                state.last_verification_status = report["quality_gate"]["status"]
+                    .as_str()
+                    .map(ToString::to_string);
+                state.last_verification_summary = report["quality_gate"]
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string)
+                    .or_else(|| {
+                        report["quality_gate"]["status"]
+                            .as_str()
+                            .map(ToString::to_string)
+                    });
+                state.last_verification_url = report["quality_gate"]["html_url"]
+                    .as_str()
+                    .map(ToString::to_string);
+                state.last_failure_task_ids = report["quality_gate"]["failure_tasks"]["task_ids"]
+                    .as_array()
+                    .map(|rows| {
+                        rows.iter()
+                            .filter_map(|row| row.as_str().map(ToString::to_string))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
             }
             Err(err) => {
                 state.status = "error".to_string();
                 state.last_error = Some(err.to_string());
                 state.last_result = None;
+                state.last_verified_commit = None;
+                state.last_verification_backend = None;
+                state.last_verification_status = None;
+                state.last_verification_summary = None;
+                state.last_verification_url = None;
+                state.last_failure_task_ids.clear();
             }
         }
 
@@ -12471,6 +13516,9 @@ fn maybe_queue_auto_bridge_sync_for_task_done(
         repair_journal: false,
         note: Some(note),
         trigger: Some("task_done".to_string()),
+        skip_remote_verification: false,
+        verification_timeout_minutes: None,
+        verification_poll_seconds: None,
     };
     match queue_bridge_auto_sync_background(repo_root, config, &options) {
         Ok(payload) => payload,
@@ -14928,16 +15976,33 @@ fn build_default_timeline_config(repo_root: &Path) -> TimelineConfig {
         auto_replenish_require_confirmation: default_auto_replenish_require_confirmation(),
         auto_replenish_agents: Vec::new(),
         quality_checks_enabled: default_quality_checks_enabled(),
+        quality_checks_backend: default_quality_checks_backend_for_repo(repo_root),
         quality_checks_require_on_task_done: default_quality_checks_require_on_task_done(),
         quality_checks_run_before_sync: default_quality_checks_run_before_sync(),
+        quality_checks_github_timeout_minutes: default_quality_checks_github_timeout_minutes(),
+        quality_checks_github_poll_seconds: default_quality_checks_github_poll_seconds(),
+        quality_checks_github_require_checks: default_quality_checks_github_require_checks(),
+        quality_checks_github_auto_task_on_failure:
+            default_quality_checks_github_auto_task_on_failure(),
+        quality_checks_github_failure_task_priority:
+            default_quality_checks_github_failure_task_priority(),
     }
 }
 
 fn load_timeline_config_or_default(repo_root: &Path) -> Result<TimelineConfig> {
-    Ok(
-        load_json_optional::<TimelineConfig>(&timeline_config_path(repo_root))?
-            .unwrap_or_else(|| build_default_timeline_config(repo_root)),
-    )
+    let mut config = load_json_optional::<TimelineConfig>(&timeline_config_path(repo_root))?
+        .unwrap_or_else(|| build_default_timeline_config(repo_root));
+    if config.quality_checks_backend.trim().is_empty() {
+        config.quality_checks_backend = default_quality_checks_backend_for_repo(repo_root);
+    }
+    if config.quality_checks_github_timeout_minutes == 0 {
+        config.quality_checks_github_timeout_minutes =
+            default_quality_checks_github_timeout_minutes();
+    }
+    if config.quality_checks_github_poll_seconds == 0 {
+        config.quality_checks_github_poll_seconds = default_quality_checks_github_poll_seconds();
+    }
+    Ok(config)
 }
 
 fn default_bridge_auto_sync_state(config: &TimelineConfig) -> BridgeAutoSyncState {
@@ -14958,6 +16023,12 @@ fn default_bridge_auto_sync_state(config: &TimelineConfig) -> BridgeAutoSyncStat
         last_branch: None,
         last_result: None,
         last_error: None,
+        last_verified_commit: None,
+        last_verification_backend: None,
+        last_verification_status: None,
+        last_verification_summary: None,
+        last_verification_url: None,
+        last_failure_task_ids: Vec::new(),
         pending_trigger: false,
         pending_note: None,
     }
@@ -15030,6 +16101,12 @@ fn bridge_auto_sync_payload(
         "last_branch": state.last_branch,
         "last_result": state.last_result,
         "last_error": state.last_error,
+        "last_verified_commit": state.last_verified_commit,
+        "last_verification_backend": state.last_verification_backend,
+        "last_verification_status": state.last_verification_status,
+        "last_verification_summary": state.last_verification_summary,
+        "last_verification_url": state.last_verification_url,
+        "last_failure_task_ids": state.last_failure_task_ids,
         "pending_trigger": state.pending_trigger,
         "pending_note": state.pending_note
     })
@@ -16066,11 +17143,23 @@ fn approve_tasks_in_state(
 
 fn update_check_policy_config(
     config: &mut TimelineConfig,
+    backend: Option<CheckBackendArg>,
     enabled: Option<bool>,
     require_on_task_done: Option<bool>,
     run_before_sync: Option<bool>,
+    github_timeout_minutes: Option<u64>,
+    github_poll_seconds: Option<u64>,
+    github_require_checks: Option<bool>,
+    github_auto_task_on_failure: Option<bool>,
+    github_failure_task_priority: Option<i32>,
 ) -> bool {
     let mut changed = false;
+    if let Some(backend) = backend
+        && config.quality_checks_backend != backend.as_str()
+    {
+        config.quality_checks_backend = backend.as_str().to_string();
+        changed = true;
+    }
     if let Some(enabled) = enabled
         && config.quality_checks_enabled != enabled
     {
@@ -16089,6 +17178,36 @@ fn update_check_policy_config(
         config.quality_checks_run_before_sync = run_before_sync;
         changed = true;
     }
+    if let Some(timeout_minutes) = github_timeout_minutes.map(|value| value.max(1))
+        && config.quality_checks_github_timeout_minutes != timeout_minutes
+    {
+        config.quality_checks_github_timeout_minutes = timeout_minutes;
+        changed = true;
+    }
+    if let Some(poll_seconds) = github_poll_seconds.map(|value| value.max(1))
+        && config.quality_checks_github_poll_seconds != poll_seconds
+    {
+        config.quality_checks_github_poll_seconds = poll_seconds;
+        changed = true;
+    }
+    if let Some(require_checks) = github_require_checks
+        && config.quality_checks_github_require_checks != require_checks
+    {
+        config.quality_checks_github_require_checks = require_checks;
+        changed = true;
+    }
+    if let Some(auto_task_on_failure) = github_auto_task_on_failure
+        && config.quality_checks_github_auto_task_on_failure != auto_task_on_failure
+    {
+        config.quality_checks_github_auto_task_on_failure = auto_task_on_failure;
+        changed = true;
+    }
+    if let Some(priority) = github_failure_task_priority
+        && config.quality_checks_github_failure_task_priority != priority
+    {
+        config.quality_checks_github_failure_task_priority = priority;
+        changed = true;
+    }
     if changed {
         config.updated_at_utc = now_utc();
     }
@@ -16105,8 +17224,16 @@ fn check_policy_payload(state: &CheckState, config: &TimelineConfig) -> serde_js
         "schema_version": "fugit.check.policy.v1",
         "generated_at_utc": now_utc(),
         "enabled": config.quality_checks_enabled,
+        "backend": quality_checks_backend(config),
         "require_on_task_done": config.quality_checks_require_on_task_done,
         "run_before_sync": config.quality_checks_run_before_sync,
+        "github_ci": {
+            "timeout_minutes": config.quality_checks_github_timeout_minutes,
+            "poll_seconds": config.quality_checks_github_poll_seconds,
+            "require_checks": config.quality_checks_github_require_checks,
+            "auto_task_on_failure": config.quality_checks_github_auto_task_on_failure,
+            "failure_task_priority": config.quality_checks_github_failure_task_priority
+        },
         "active_check_count": active_check_count,
         "deprecated_check_count": state.checks.len().saturating_sub(active_check_count)
     })
@@ -16215,6 +17342,7 @@ fn run_quality_checks(
     Ok(json!({
         "schema_version": "fugit.check.run.v1",
         "generated_at_utc": now_utc(),
+        "backend": QUALITY_CHECK_BACKEND_LOCAL,
         "ok": failed_count == 0,
         "status": status,
         "trigger": trigger,
@@ -19795,6 +20923,26 @@ fn default_quality_checks_run_before_sync() -> bool {
     true
 }
 
+fn default_quality_checks_github_timeout_minutes() -> u64 {
+    30
+}
+
+fn default_quality_checks_github_poll_seconds() -> u64 {
+    15
+}
+
+fn default_quality_checks_github_require_checks() -> bool {
+    true
+}
+
+fn default_quality_checks_github_auto_task_on_failure() -> bool {
+    true
+}
+
+fn default_quality_checks_github_failure_task_priority() -> i32 {
+    95
+}
+
 fn default_advisor_low_task_threshold() -> usize {
     2
 }
@@ -20105,6 +21253,49 @@ mod tests {
         assert_eq!(
             parse_git_host("ssh://git@internal.example.com:2222/team/repo.git").as_deref(),
             Some("internal.example.com")
+        );
+    }
+
+    #[test]
+    fn parse_github_repo_slug_handles_https_and_ssh_forms() {
+        assert_eq!(
+            parse_github_repo_slug("https://github.com/openai/symphony.git"),
+            Some(("openai".to_string(), "symphony".to_string()))
+        );
+        assert_eq!(
+            parse_github_repo_slug("git@github.com:karpathy/autoresearch.git"),
+            Some(("karpathy".to_string(), "autoresearch".to_string()))
+        );
+        assert_eq!(
+            parse_github_repo_slug("ssh://git@github.example.com/team/project.git"),
+            Some(("team".to_string(), "project".to_string()))
+        );
+    }
+
+    #[test]
+    fn default_quality_checks_backend_for_repo_prefers_local_for_non_github_remote() {
+        let repo = TestRepo::new("quality-backend-local");
+        repo.git(&["init"]);
+        repo.git(&["remote", "add", "origin", "/tmp/fugit-local-origin.git"]);
+        assert_eq!(
+            default_quality_checks_backend_for_repo(repo.path()),
+            QUALITY_CHECK_BACKEND_LOCAL
+        );
+    }
+
+    #[test]
+    fn default_quality_checks_backend_for_repo_prefers_github_for_github_remote() {
+        let repo = TestRepo::new("quality-backend-github");
+        repo.git(&["init"]);
+        repo.git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/project.git",
+        ]);
+        assert_eq!(
+            default_quality_checks_backend_for_repo(repo.path()),
+            QUALITY_CHECK_BACKEND_GITHUB_CI
         );
     }
 
@@ -21099,8 +22290,14 @@ mod tests {
             auto_replenish_require_confirmation: true,
             auto_replenish_agents: vec!["agent.alpha".to_string(), "agent.beta".to_string()],
             quality_checks_enabled: true,
+            quality_checks_backend: QUALITY_CHECK_BACKEND_GITHUB_CI.to_string(),
             quality_checks_require_on_task_done: true,
             quality_checks_run_before_sync: true,
+            quality_checks_github_timeout_minutes: 30,
+            quality_checks_github_poll_seconds: 15,
+            quality_checks_github_require_checks: true,
+            quality_checks_github_auto_task_on_failure: true,
+            quality_checks_github_failure_task_priority: 95,
         };
 
         let result = ensure_auto_replenish_tasks(&mut state, &config, "agent.alpha");

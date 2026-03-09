@@ -479,7 +479,11 @@ json_assert "$TMP_ROOT/task-sync-2.json" 'len(payload.get("removed", [])) >= 1 a
 
 echo "[vigorous-e2e] quality gate + deprecate"
 "$BIN" --repo-root "$REPO_A" check policy show --json >"$TMP_ROOT/check-policy-show.json"
-json_assert "$TMP_ROOT/check-policy-show.json" 'payload.get("enabled") is True and payload.get("require_on_task_done") is True and payload.get("run_before_sync") is True' "quality checks should be enabled by default"
+json_assert "$TMP_ROOT/check-policy-show.json" 'payload.get("enabled") is True and payload.get("backend") == "local" and payload.get("require_on_task_done") is True and payload.get("run_before_sync") is True' "local test repo should default to the local quality-check backend"
+"$BIN" --repo-root "$REPO_A" check policy set --backend github-ci --json >"$TMP_ROOT/check-policy-github.json"
+json_assert "$TMP_ROOT/check-policy-github.json" 'payload.get("backend") == "github_ci" and payload.get("github_ci", {}).get("auto_task_on_failure") is True' "quality policy should allow switching to GitHub CI mode"
+"$BIN" --repo-root "$REPO_A" check policy set --backend local --json >"$TMP_ROOT/check-policy-local.json"
+json_assert "$TMP_ROOT/check-policy-local.json" 'payload.get("backend") == "local"' "quality policy should allow switching back to the local backend"
 "$BIN" --repo-root "$REPO_A" check add --kind regression --command "exit 1" --task-id "$TASK_A" --agent agent.qa --json >"$TMP_ROOT/check-add-failing.json"
 FAILING_CHECK_ID="$(python3 - "$TMP_ROOT/check-add-failing.json" <<'PY'
 import json,sys
