@@ -82,11 +82,11 @@ Unix installer behavior:
 ```bash
 fugit --version
 fugit --help
-fugit task --help
 fugit skill doctor
+fugit skill doctor --json
 ```
 
-`fugit task --help` should include `sync` and `reopen`. If not, reinstall using the installer for this repo and run `hash -r` or open a new shell if the old binary is still cached.
+`fugit skill doctor --json` now reports whether the installed Codex skill matches the running CLI and whether the skill references command paths this binary does not support. If `unsupported_command_paths` is non-empty or the installed skill does not match the embedded bundle, reinstall from this repo, run `fugit skill install-codex --overwrite`, then `hash -r` or open a new shell if the old binary is still cached.
 
 ### 4. Agent Skill Setup
 
@@ -130,6 +130,7 @@ After migration, use fugit for daily coordination (`task`, `checkpoint`, `log`),
 ```bash
 fugit --repo-root . task import --file /path/to/tasks.tsv
 fugit --repo-root . task sync --plan /path/to/the_final_plan.md
+fugit --repo-root . task search --status open --contains compiler --jsonl --fields task_id,title,priority,tags
 fugit --repo-root . task start --agent agent.worker
 fugit task start --repo-root . --agent agent.worker --focus compiler --peek-open 3 --json
 fugit --repo-root . task start --agent agent.worker --task-id <task_id>
@@ -147,6 +148,8 @@ fugit --repo-root . task add --title "Implement feature X" --priority 10 --tag f
 ```
 
 `task start` is the normal agent entrypoint: it resumes the agent's current claim if one exists, otherwise it claims the next best task. Use `task request` when you want preview mode (`--no-claim`, `--max`), explicit scheduling diagnostics, or to bypass your current claim with `--skip-owned`.
+
+For backlog shaping, prefer `task list` / `task search` filters such as `--tag`, `--focus`, `--contains`, and `--title-contains` over reading `.fugit/tasks.json` directly.
 
 When an agent already owns a claim, `task request` now returns that owned claim without silently shrinking its lease. If the agent explicitly wants an additional claim, use `--max-new-claims 1` (or higher) and branch on `selection_reason` / `claim_ttl_remaining_seconds` from the JSON payload.
 

@@ -21,6 +21,8 @@ Use when multiple agents should coordinate by pulling from a shared queue.
 
 - `fugit --repo-root . task import --file /path/to/tasks.tsv`
 - `fugit --repo-root . task list --ready-only`
+- `fugit skill doctor --json`
+- `fugit --repo-root . task search --status open --contains compiler --jsonl --fields task_id,title,priority,tags`
 - `fugit --repo-root . task start --agent <agent_id> --claim-ttl-minutes 30 --steal-after-minutes 90`
 - `fugit task start --repo-root . --agent <agent_id> --json`
 - `fugit --repo-root . task request --agent <agent_id> --focus compiler --claim-ttl-minutes 30 --steal-after-minutes 90`
@@ -31,6 +33,7 @@ Use when multiple agents should coordinate by pulling from a shared queue.
 - `fugit --repo-root . task edit --task-id <task_id> --title "Updated X"`
 - `fugit --repo-root . task show <task_id>`
 - `fugit --repo-root . task list --jsonl --fields task_id,title,status`
+- `fugit --repo-root . task list --tag semantic --title-contains "compiler" --json`
 - `fugit --repo-root . task list --agent <agent_id> --mine --json`
 - `fugit --repo-root . task status --agent <agent_id> --json`
 - `fugit --repo-root . status --json --summary-only`
@@ -53,6 +56,7 @@ Use when multiple agents should coordinate by pulling from a shared queue.
 
 Characteristics:
 - dependency-aware ordering via `--depends-on`,
+- one-command CLI/skill drift detection via `skill doctor --json`,
 - one-command resume-or-claim flow via `task start`,
 - lease-based claims with default stale-claim work stealing,
 - default-on date-gate filtering for tasks with `not_before:` tags or date windows in their text,
@@ -64,6 +68,7 @@ Characteristics:
 - local/non-GitHub repos keep the registered regression/benchmark gate,
 - explicit release path for fast agent handoff,
 - easy plan maintenance through `task edit` / `task remove`.
+- native backlog search via `task list|search --tag/--focus/--contains/--title-contains`.
 - explicit unblock path through `task update --clear-blocked`.
 
 ## Live Task Board

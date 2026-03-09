@@ -1549,6 +1549,7 @@ struct TaskArgs {
 
 #[derive(Debug, Subcommand)]
 enum TaskAction {
+    #[command(visible_aliases = ["search", "scan"])]
     List {
         #[arg(long, default_value_t = false)]
         json: bool,
@@ -1558,6 +1559,16 @@ enum TaskAction {
         all: bool,
         #[arg(long, value_enum)]
         status: Option<TaskStatusArg>,
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        #[arg(long)]
+        focus: Option<String>,
+        #[arg(long)]
+        prefix: Option<String>,
+        #[arg(long)]
+        contains: Option<String>,
+        #[arg(long)]
+        title_contains: Option<String>,
         #[arg(long)]
         agent: Option<String>,
         #[arg(long, default_value_t = false)]
@@ -2647,19 +2658,19 @@ fn cmd_skill(args: SkillArgs) -> Result<()> {
             );
         }
         SkillAction::Doctor { json } => {
-            let (ok, checks) = fugit_skill_doctor_checks();
+            let report = fugit_skill_doctor_report();
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&json!({
-                        "schema_version": "fugit.skill.doctor.v1",
-                        "generated_at_utc": now_utc(),
-                        "skill_id": FUGIT_SKILL_ID,
-                        "ok": ok,
-                        "checks": checks
-                    }))?
-                );
+                println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
+                let ok = report
+                    .get("ok")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let checks = report
+                    .get("checks")
+                    .and_then(serde_json::Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
                 println!(
                     "[fugit-skill] skill={} ok={} checks={}",
                     FUGIT_SKILL_ID,
@@ -2672,6 +2683,26 @@ fn cmd_skill(args: SkillArgs) -> Result<()> {
                         check["name"].as_str().unwrap_or("unknown"),
                         check["pass"].as_bool().unwrap_or(false)
                     );
+                }
+                if let Some(paths) = report
+                    .get("installed_codex_skill")
+                    .and_then(|value| value.get("unsupported_command_paths"))
+                    .and_then(serde_json::Value::as_array)
+                    && !paths.is_empty()
+                {
+                    let rendered = paths
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    println!("- unsupported_command_paths: {}", rendered);
+                }
+                if let Some(recommended_fix) = report
+                    .get("summary")
+                    .and_then(|value| value.get("recommended_fix"))
+                    .and_then(serde_json::Value::as_str)
+                {
+                    println!("- recommended_fix: {}", recommended_fix);
                 }
             }
         }
@@ -2740,6 +2771,7 @@ fn fugit_skill_bundle(include_skill_body: bool, include_openai_yaml: bool) -> se
                 "fugit_advisor_review",
                 "fugit_advisor_research",
                 "fugit_skill_bundle",
+                "fugit_skill_doctor",
                 "fugit_skill_install_codex",
                 "fugit_task_gui_launch",
                 "fugit_project_list",
@@ -2779,7 +2811,226 @@ fn fugit_skill_bundle(include_skill_body: bool, include_openai_yaml: bool) -> se
     bundle
 }
 
-fn fugit_skill_doctor_checks() -> (bool, Vec<serde_json::Value>) {
+fn supported_task_command_names() -> &'static [&'static str] {
+    &[
+        "list",
+        "status",
+        "show",
+        "start",
+        "current",
+        "add",
+        "edit",
+        "remove",
+        "approve",
+        "policy",
+        "sync",
+        "import",
+        "request",
+        "claim",
+        "done",
+        "progress",
+        "note",
+        "reopen",
+        "release",
+        "cancel",
+        "heartbeat",
+        "gui",
+    ]
+}
+
+fn supported_nested_command_names() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
+    let mut map = BTreeMap::<&'static str, BTreeSet<&'static str>>::new();
+    map.insert(
+        "task",
+        supported_task_command_names().iter().copied().collect(),
+    );
+    map.insert(
+        "skill",
+        ["show", "install-codex", "doctor"]
+            .iter()
+            .copied()
+            .collect(),
+    );
+    map.insert(
+        "branch",
+        ["list", "create", "switch"].iter().copied().collect(),
+    );
+    map.insert("backend", ["show", "set"].iter().copied().collect());
+    map.insert(
+        "check",
+        ["list", "add", "deprecate", "run", "policy"]
+            .iter()
+            .copied()
+            .collect(),
+    );
+    map.insert(
+        "bridge",
+        [
+            "summary",
+            "auth",
+            "sync-github",
+            "pull-github",
+            "auto-sync",
+            "issue-monitor",
+            "sync-github-issues",
+        ]
+        .iter()
+        .copied()
+        .collect(),
+    );
+    map.insert("lock", ["list", "add", "remove"].iter().copied().collect());
+    map.insert(
+        "project",
+        ["add", "list", "use", "remove", "discover"]
+            .iter()
+            .copied()
+            .collect(),
+    );
+    map.insert(
+        "advisor",
+        [
+            "show", "policy", "provider", "review", "research", "workflow", "run", "runs",
+        ]
+        .iter()
+        .copied()
+        .collect(),
+    );
+    map
+}
+
+fn supported_cli_command_paths() -> BTreeSet<String> {
+    let mut paths = [
+        "init",
+        "quickstart",
+        "doctor",
+        "skill",
+        "status",
+        "checkpoint",
+        "log",
+        "branch",
+        "backend",
+        "bridge",
+        "checkout",
+        "gc",
+        "check",
+        "lock",
+        "task",
+        "advisor",
+        "project",
+        "mcp",
+    ]
+    .iter()
+    .map(|value| (*value).to_string())
+    .collect::<BTreeSet<_>>();
+    for (top_level, nested) in supported_nested_command_names() {
+        for subcommand in nested {
+            paths.insert(format!("{}/{}", top_level, subcommand));
+        }
+    }
+    paths
+}
+
+fn normalize_skill_token(token: &str) -> Option<String> {
+    let trimmed = token
+        .trim_matches(|ch: char| matches!(ch, '`' | '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']'))
+        .trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn extract_skill_command_paths(skill_body: &str) -> BTreeSet<String> {
+    let top_level = [
+        "init",
+        "quickstart",
+        "doctor",
+        "skill",
+        "status",
+        "checkpoint",
+        "log",
+        "branch",
+        "backend",
+        "bridge",
+        "checkout",
+        "gc",
+        "check",
+        "lock",
+        "task",
+        "advisor",
+        "project",
+        "mcp",
+    ]
+    .iter()
+    .copied()
+    .collect::<BTreeSet<_>>();
+    let nested = supported_nested_command_names();
+    let mut paths = BTreeSet::<String>::new();
+
+    for line in skill_body.lines() {
+        if !line.contains("fugit") {
+            continue;
+        }
+        let tokens = line
+            .split_whitespace()
+            .filter_map(normalize_skill_token)
+            .collect::<Vec<_>>();
+        let Some(fugit_index) = tokens.iter().position(|token| token == "fugit") else {
+            continue;
+        };
+        let after_fugit = &tokens[fugit_index + 1..];
+        let Some((top_index, top_command)) = after_fugit
+            .iter()
+            .enumerate()
+            .find_map(|(idx, token)| top_level.contains(token.as_str()).then_some((idx, token)))
+        else {
+            continue;
+        };
+        paths.insert(top_command.clone());
+        if nested.contains_key(top_command.as_str())
+            && let Some(subcommand) = after_fugit[top_index + 1..]
+                .iter()
+                .find(|token| !token.starts_with('-'))
+        {
+            paths.insert(format!("{}/{}", top_command, subcommand));
+        }
+    }
+
+    paths
+}
+
+fn unsupported_skill_command_paths(skill_body: &str) -> Vec<String> {
+    let supported = supported_cli_command_paths();
+    extract_skill_command_paths(skill_body)
+        .into_iter()
+        .filter(|path| !supported.contains(path))
+        .collect()
+}
+
+fn fugit_skill_doctor_report() -> serde_json::Value {
+    let current_exe = std::env::current_exe()
+        .ok()
+        .map(|path| path.display().to_string());
+    let codex_home = resolve_codex_home().ok();
+    let skill_root = codex_home
+        .as_ref()
+        .map(|path| path.join("skills").join(FUGIT_SKILL_ID));
+    let installed_skill_path = skill_root.as_ref().map(|path| path.join("SKILL.md"));
+    let installed_openai_yaml_path = skill_root
+        .as_ref()
+        .map(|path| path.join("agents").join("openai.yaml"));
+    let installed_skill = installed_skill_path
+        .as_ref()
+        .and_then(|path| fs::read_to_string(path).ok());
+    let installed_openai_yaml = installed_openai_yaml_path
+        .as_ref()
+        .and_then(|path| fs::read_to_string(path).ok());
+    let unsupported_installed_commands = installed_skill
+        .as_deref()
+        .map(unsupported_skill_command_paths)
+        .unwrap_or_default();
+
     let checks = vec![
         json!({
             "name": "frontmatter_present",
@@ -2831,6 +3082,46 @@ fn fugit_skill_doctor_checks() -> (bool, Vec<serde_json::Value>) {
             "pass": !FUGIT_SKILL_REF_WORKFLOW_PROFILES.trim().is_empty() && !FUGIT_SKILL_REF_RECOVERY_PLAYBOOKS.trim().is_empty(),
             "detail": "Bundled reference files are embedded and non-empty."
         }),
+        json!({
+            "name": "installed_codex_skill_matches_embedded",
+            "pass": installed_skill
+                .as_deref()
+                .map(|value| value == FUGIT_SKILL_MD)
+                .unwrap_or(true),
+            "detail": if installed_skill.is_some() {
+                "Installed Codex SKILL.md matches the running fugit binary's bundled skill.".to_string()
+            } else {
+                "No Codex-installed SKILL.md was found; install one with `fugit skill install-codex --overwrite` if this machine should use the local fugit skill.".to_string()
+            }
+        }),
+        json!({
+            "name": "installed_openai_yaml_matches_embedded",
+            "pass": installed_openai_yaml
+                .as_deref()
+                .map(|value| value == FUGIT_SKILL_OPENAI_YAML)
+                .unwrap_or(true),
+            "detail": if installed_openai_yaml.is_some() {
+                "Installed agents/openai.yaml matches the running fugit binary's bundled agent profile.".to_string()
+            } else {
+                "No installed agents/openai.yaml was found under the local Codex skill path.".to_string()
+            }
+        }),
+        json!({
+            "name": "installed_skill_commands_supported_by_cli",
+            "pass": installed_skill.is_none() || unsupported_installed_commands.is_empty(),
+            "detail": if unsupported_installed_commands.is_empty() {
+                if installed_skill.is_some() {
+                    "Installed skill only references command paths supported by this fugit binary.".to_string()
+                } else {
+                    "No installed skill was found, so there are no external skill command paths to validate.".to_string()
+                }
+            } else {
+                format!(
+                    "Installed skill references command paths this fugit binary does not support: {}",
+                    unsupported_installed_commands.join(", ")
+                )
+            }
+        }),
     ];
     let ok = checks.iter().all(|check| {
         check
@@ -2838,7 +3129,52 @@ fn fugit_skill_doctor_checks() -> (bool, Vec<serde_json::Value>) {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
     });
-    (ok, checks)
+    let recommended_fix = if !unsupported_installed_commands.is_empty() {
+        Some(
+            "Reinstall fugit from the canonical repo, then run `fugit skill install-codex --overwrite` and refresh your shell PATH/hash."
+                .to_string(),
+        )
+    } else if installed_skill.is_none() || installed_openai_yaml.is_none() {
+        Some(
+            "If this machine uses Codex locally, run `fugit skill install-codex --overwrite` to align the installed skill with the running CLI."
+                .to_string(),
+        )
+    } else if installed_skill.as_deref() != Some(FUGIT_SKILL_MD)
+        || installed_openai_yaml.as_deref() != Some(FUGIT_SKILL_OPENAI_YAML)
+    {
+        Some(
+            "Run `fugit skill install-codex --overwrite` to realign the installed skill bundle with this fugit binary."
+                .to_string(),
+        )
+    } else {
+        None
+    };
+
+    json!({
+        "schema_version": "fugit.skill.doctor.v2",
+        "generated_at_utc": now_utc(),
+        "skill_id": FUGIT_SKILL_ID,
+        "ok": ok,
+        "checks": checks,
+        "cli": {
+            "version": env!("CARGO_PKG_VERSION"),
+            "executable": current_exe,
+            "supported_task_commands": supported_task_command_names(),
+            "supported_command_paths": supported_cli_command_paths().into_iter().collect::<Vec<_>>()
+        },
+        "installed_codex_skill": {
+            "root": skill_root.map(|path| path.display().to_string()),
+            "skill_path": installed_skill_path.map(|path| path.display().to_string()),
+            "openai_yaml_path": installed_openai_yaml_path.map(|path| path.display().to_string()),
+            "present": installed_skill.is_some(),
+            "matches_embedded_skill_md": installed_skill.as_deref() == Some(FUGIT_SKILL_MD),
+            "matches_embedded_openai_yaml": installed_openai_yaml.as_deref() == Some(FUGIT_SKILL_OPENAI_YAML),
+            "unsupported_command_paths": unsupported_installed_commands
+        },
+        "summary": {
+            "recommended_fix": recommended_fix
+        }
+    })
 }
 
 fn install_fugit_skill_to_codex(overwrite: bool) -> Result<PathBuf> {
@@ -6123,6 +6459,11 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             jsonl,
             all,
             status,
+            tags,
+            focus,
+            prefix,
+            contains,
+            title_contains,
             agent,
             mine,
             ready_only,
@@ -6143,6 +6484,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             } else {
                 None
             };
+            let filters =
+                normalize_task_query_filter(tags, focus, prefix, contains, title_contains)?;
             let mut indices: Vec<usize> = (0..state.tasks.len()).collect();
             sort_task_indices(&state, &mut indices);
             let mut rows = Vec::<serde_json::Value>::new();
@@ -6169,6 +6512,9 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     if !matches_agent {
                         continue;
                     }
+                }
+                if !task_matches_query_filter(task, &filters) {
+                    continue;
                 }
                 let payload = task_to_json_payload(task, &status_map);
                 if ready_only
@@ -11169,6 +11515,11 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                 "type": "object",
                 "properties": {
                     "status": { "type": "string", "enum": ["open", "claimed", "done"] },
+                    "tags": { "type": "array", "items": { "type": "string" } },
+                    "focus": { "type": "string" },
+                    "prefix": { "type": "string" },
+                    "contains": { "type": "string" },
+                    "title_contains": { "type": "string" },
                     "agent": { "type": "string" },
                     "mine": { "type": "boolean" },
                     "ready_only": { "type": "boolean" },
@@ -11642,6 +11993,14 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "include_skill_body": { "type": "boolean" },
                     "include_openai_yaml": { "type": "boolean" }
                 }
+            }
+        }),
+        json!({
+            "name": "fugit_skill_doctor",
+            "description": "Report whether the installed Codex skill matches the running fugit CLI and whether the skill references unsupported command paths.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
             }
         }),
         json!({
@@ -12276,6 +12635,33 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             if let Some(status) = args.get("status").and_then(serde_json::Value::as_str) {
                 cli_args.push("--status".to_string());
                 cli_args.push(status.to_string());
+            }
+            if let Some(tags) = args.get("tags").and_then(serde_json::Value::as_array) {
+                for tag in tags {
+                    if let Some(tag_value) = tag.as_str() {
+                        cli_args.push("--tag".to_string());
+                        cli_args.push(tag_value.to_string());
+                    }
+                }
+            }
+            if let Some(focus) = args.get("focus").and_then(serde_json::Value::as_str) {
+                cli_args.push("--focus".to_string());
+                cli_args.push(focus.to_string());
+            }
+            if let Some(prefix) = args.get("prefix").and_then(serde_json::Value::as_str) {
+                cli_args.push("--prefix".to_string());
+                cli_args.push(prefix.to_string());
+            }
+            if let Some(contains) = args.get("contains").and_then(serde_json::Value::as_str) {
+                cli_args.push("--contains".to_string());
+                cli_args.push(contains.to_string());
+            }
+            if let Some(title_contains) = args
+                .get("title_contains")
+                .and_then(serde_json::Value::as_str)
+            {
+                cli_args.push("--title-contains".to_string());
+                cli_args.push(title_contains.to_string());
             }
             if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
                 cli_args.push("--agent".to_string());
@@ -13428,6 +13814,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 .unwrap_or(true);
             fugit_skill_bundle(include_skill_body, include_openai_yaml)
         }
+        "fugit_skill_doctor" => fugit_skill_doctor_report(),
         "fugit_skill_install_codex" => {
             let overwrite = args
                 .get("overwrite")
@@ -22182,6 +22569,56 @@ mod tests {
             parse_github_repo_slug("ssh://git@github.example.com/team/project.git"),
             Some(("team".to_string(), "project".to_string()))
         );
+    }
+
+    #[test]
+    fn extract_skill_command_paths_handles_global_options_and_nested_commands() {
+        let skill = r#"
+- `fugit --repo-root . task start --agent agent.runner --json`
+- `fugit skill doctor --json`
+- `fugit --repo-root . bridge issue-monitor show --json`
+"#;
+        let paths = extract_skill_command_paths(skill);
+        assert!(paths.contains("task"));
+        assert!(paths.contains("task/start"));
+        assert!(paths.contains("skill"));
+        assert!(paths.contains("skill/doctor"));
+        assert!(paths.contains("bridge"));
+        assert!(paths.contains("bridge/issue-monitor"));
+    }
+
+    #[test]
+    fn unsupported_skill_command_paths_flags_unknown_nested_commands() {
+        let skill = r#"
+- `fugit --repo-root . task teleport --agent agent.runner`
+- `fugit bridge wormhole`
+"#;
+        let unsupported = unsupported_skill_command_paths(skill);
+        assert_eq!(
+            unsupported,
+            vec!["bridge/wormhole".to_string(), "task/teleport".to_string(),]
+        );
+    }
+
+    #[test]
+    fn task_matches_query_filter_checks_tags_and_contains_filters() {
+        let mut task = sample_task(
+            "task_search",
+            "Semantic compiler substrate",
+            10,
+            TaskStatus::Open,
+        );
+        task.detail = Some("tree-sitter parser and lineage work".to_string());
+        task.tags = vec!["semantic".to_string(), "compiler".to_string()];
+        let filter = normalize_task_query_filter(
+            vec!["semantic".to_string()],
+            None,
+            None,
+            Some("tree-sitter".to_string()),
+            Some("compiler".to_string()),
+        )
+        .expect("query filter");
+        assert!(task_matches_query_filter(&task, &filter));
     }
 
     #[test]

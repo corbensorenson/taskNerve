@@ -200,6 +200,8 @@ json_assert "$TMP_ROOT/task-a-edit.json" 'payload.get("detail") == "root task" a
 json_assert "$TMP_ROOT/task-a-show.json" 'payload.get("task_id") is not None and payload.get("detail") == "root task"' "task show should expose edited task state"
 "$BIN" --repo-root "$REPO_A" task list --jsonl --fields task_id,title,status --limit 2 >"$TMP_ROOT/task-list.jsonl"
 jsonl_assert "$TMP_ROOT/task-list.jsonl" 'all(set(row.keys()) == {"task_id","title","status"} for row in rows)' "task list --jsonl --fields should emit compact rows"
+"$BIN" --repo-root "$REPO_A" task search --tag root --contains "root task" --json >"$TMP_ROOT/task-search.json"
+json_assert "$TMP_ROOT/task-search.json" 'len(payload) == 1 and payload[0].get("task_id") == "'"$TASK_A"'"' "task search should filter by tags and contains text without reading tasks.json directly"
 "$BIN" --repo-root "$REPO_A" task add --title "task-c" --priority 1 --agent agent.c --json >"$TMP_ROOT/task-c.json"
 TASK_C="$(python3 - "$TMP_ROOT/task-c.json" <<'PY'
 import json,sys
@@ -608,7 +610,7 @@ echo "[vigorous-e2e] gc/doctor/skill"
 "$BIN" skill show --json --include-openai-yaml >"$TMP_ROOT/skill-show.json"
 "$BIN" skill doctor --json >"$TMP_ROOT/skill-doctor.json"
 "$BIN" skill install-codex --overwrite >/dev/null
-json_assert "$TMP_ROOT/skill-doctor.json" 'payload.get("ok") is True' "skill doctor should pass"
+json_assert "$TMP_ROOT/skill-doctor.json" 'payload.get("ok") is True and isinstance(payload.get("cli", {}).get("supported_task_commands"), list) and payload.get("installed_codex_skill", {}).get("unsupported_command_paths") == []' "skill doctor should expose CLI support and report no unsupported installed skill commands"
 
 echo "[vigorous-e2e] doctor fix"
 INDEX_HASH="$(python3 - "$REPO_A/.fugit/branches/trunk/index.json" <<'PY'
@@ -727,6 +729,8 @@ if not any(t.get("name") == "fugit_check_run" for t in tools):
     raise RuntimeError("missing fugit_check_run in MCP tools")
 if not any(t.get("name") == "fugit_check_deprecate" for t in tools):
     raise RuntimeError("missing fugit_check_deprecate in MCP tools")
+if not any(t.get("name") == "fugit_skill_doctor" for t in tools):
+    raise RuntimeError("missing fugit_skill_doctor in MCP tools")
 
 send({
     "jsonrpc":"2.0",

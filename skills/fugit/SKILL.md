@@ -18,6 +18,11 @@ Use this skill when any of the following are true:
 
 ## Workflow
 
+0. If the installed CLI and skill may have drifted, verify once instead of probing `--help` repeatedly:
+- `fugit skill doctor --json`
+- If `unsupported_command_paths` is non-empty, reinstall fugit from the canonical repo and align the local skill with:
+- `fugit skill install-codex --overwrite`
+
 1. Ensure timeline exists:
 - `fugit --repo-root . init --branch trunk`
 
@@ -33,6 +38,9 @@ Use this skill when any of the following are true:
 4. Add shared tasks to the persistent queue:
 - `fugit --repo-root . task add --title "Implement X" --priority 10 --tag compiler`
 - `fugit --repo-root . task list --ready-only`
+- For backlog scans, use native queue search/filtering instead of reading `.fugit/tasks.json` directly:
+- `fugit --repo-root . task search --status open --contains compiler --jsonl --fields task_id,title,priority,tags`
+- `fugit --repo-root . task list --tag semantic --title-contains "compiler" --json`
 - Prefer bulk backlog migration through import first:
 - `fugit --repo-root . task import --file /path/to/tasks.tsv`
 - For markdown checklist plans, import directly:
@@ -130,6 +138,7 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . task status --agent <agent_id> --json`
 - For compact queue scans:
 - `fugit --repo-root . task list --jsonl --fields task_id,title,status`
+- `fugit --repo-root . task search --contains compiler --status open --jsonl --fields task_id,title,priority,tags`
 - `fugit --repo-root . task list --status in_progress --json`
 - `fugit --repo-root . task list --agent <agent_id> --mine --json`
 - Inspect or change auto-replenish policy:
