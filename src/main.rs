@@ -32,6 +32,7 @@ const SCHEMA_PROJECTS: &str = "fugit.projects.v1";
 const SCHEMA_BRIDGE_AUTH: &str = "timeline.bridge_auth.v1";
 const BACKEND_MODE_GIT_BRIDGE: &str = "git_bridge";
 const BACKEND_MODE_FUGIT_CLOUD: &str = "fugit_cloud";
+const TASK_GUI_MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const FUGIT_SKILL_ID: &str = "fugit";
 const FUGIT_SKILL_MD: &str = include_str!("../skills/fugit/SKILL.md");
 const FUGIT_SKILL_OPENAI_YAML: &str = include_str!("../skills/fugit/agents/openai.yaml");
@@ -411,6 +412,28 @@ struct TaskImportRow {
     agent: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+enum TaskTextPatch {
+    Keep,
+    Clear,
+    Set(String),
+}
+
+impl Default for TaskTextPatch {
+    fn default() -> Self {
+        Self::Keep
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct TaskEditPatch {
+    title: Option<String>,
+    detail: TaskTextPatch,
+    priority: Option<i32>,
+    tags: Option<Vec<String>>,
+    depends_on: Option<Vec<String>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RegisteredProject {
     name: String,
@@ -434,6 +457,33 @@ struct TaskGuiProject {
     repo_root: String,
     is_default: bool,
     is_current_repo: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskGuiCreateRequest {
+    title: String,
+    detail: Option<String>,
+    priority: Option<i32>,
+    tags: Option<Vec<String>>,
+    depends_on: Option<Vec<String>>,
+    agent: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskGuiEditRequest {
+    task_id: String,
+    title: Option<String>,
+    detail: Option<Option<String>>,
+    priority: Option<i32>,
+    tags: Option<Vec<String>>,
+    depends_on: Option<Vec<String>>,
+    agent: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskGuiRemoveRequest {
+    task_id: String,
+    agent: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -495,6 +545,38 @@ enum TaskAction {
         tags: Vec<String>,
         #[arg(long = "depends-on")]
         depends_on: Vec<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Edit {
+        #[arg(long)]
+        task_id: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        detail: Option<String>,
+        #[arg(long, default_value_t = false)]
+        clear_detail: bool,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        priority: Option<i32>,
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        #[arg(long, default_value_t = false)]
+        clear_tags: bool,
+        #[arg(long = "depends-on")]
+        depends_on: Vec<String>,
+        #[arg(long, default_value_t = false)]
+        clear_depends_on: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Remove {
+        #[arg(long)]
+        task_id: String,
+        #[arg(long)]
+        agent: Option<String>,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -1048,6 +1130,8 @@ fn fugit_skill_bundle(include_skill_body: bool, include_openai_yaml: bool) -> se
                 "fugit_lock_add",
                 "fugit_lock_list",
                 "fugit_task_add",
+                "fugit_task_edit",
+                "fugit_task_remove",
                 "fugit_task_import",
                 "fugit_task_list",
                 "fugit_task_request",
@@ -2783,37 +2867,17 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             depends_on,
             json,
         } => {
-            let normalized_title = title.trim();
-            if normalized_title.is_empty() {
-                bail!("task title cannot be empty");
-            }
-            let now = now_utc();
-            let task = FugitTask {
-                task_id: format!("task_{}", Uuid::new_v4().simple()),
-                title: normalized_title.to_string(),
-                detail: detail.and_then(|value| {
-                    let trimmed = value.trim().to_string();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(trimmed)
-                    }
-                }),
+            let task = build_manual_task(
+                &state,
+                &title,
+                detail,
+                normalize_agent_id(agent),
                 priority,
-                tags: dedupe_keep_order(tags),
-                depends_on: dedupe_keep_order(depends_on),
-                status: TaskStatus::Open,
-                created_at_utc: now.clone(),
-                updated_at_utc: now.clone(),
-                created_by_agent_id: agent.unwrap_or_else(default_agent_id),
-                claimed_by_agent_id: None,
-                claim_started_at_utc: None,
-                claim_expires_at_utc: None,
-                completed_at_utc: None,
-                completed_by_agent_id: None,
-            };
+                tags,
+                depends_on,
+            )?;
             state.tasks.push(task.clone());
-            state.updated_at_utc = now;
+            state.updated_at_utc = task.updated_at_utc.clone();
             write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
             append_task_timeline_event(repo_root, &task, &task.created_by_agent_id, "add", None)?;
             if json {
@@ -2825,6 +2889,51 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     task.priority,
                     task.tags.join(",")
                 );
+            }
+        }
+        TaskAction::Edit {
+            task_id,
+            title,
+            detail,
+            clear_detail,
+            agent,
+            priority,
+            tags,
+            clear_tags,
+            depends_on,
+            clear_depends_on,
+            json,
+        } => {
+            let agent_id = normalize_agent_id(agent);
+            let patch = TaskEditPatch {
+                title,
+                detail: resolve_task_text_patch(detail, clear_detail)?,
+                priority,
+                tags: resolve_task_list_patch(tags, clear_tags, "tags")?,
+                depends_on: resolve_task_list_patch(depends_on, clear_depends_on, "depends-on")?,
+            };
+            let task = edit_task_in_state(&mut state, &task_id, &agent_id, patch)?;
+            write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+            append_task_timeline_event(repo_root, &task, &agent_id, "edit", None)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&task)?);
+            } else {
+                println!("[fugit-task] edited {} by {}", task.task_id, agent_id);
+            }
+        }
+        TaskAction::Remove {
+            task_id,
+            agent,
+            json,
+        } => {
+            let agent_id = normalize_agent_id(agent);
+            let task = remove_task_from_state(&mut state, &task_id, &agent_id)?;
+            write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+            append_task_timeline_event(repo_root, &task, &agent_id, "remove", None)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&task)?);
+            } else {
+                println!("[fugit-task] removed {} by {}", task.task_id, agent_id);
             }
         }
         TaskAction::Import {
@@ -3356,6 +3465,7 @@ fn task_timeline_summary(
     let title = task.title.trim();
     match (action, dispatch_kind) {
         ("add", _) => format!("task add: {} \"{}\"", task.task_id, title),
+        ("edit", _) => format!("task edit: {} \"{}\"", task.task_id, title),
         ("claim", Some(dispatch)) => format!(
             "task claim: {} \"{}\" (dispatch={})",
             task.task_id,
@@ -3364,6 +3474,7 @@ fn task_timeline_summary(
         ),
         ("claim", None) => format!("task claim: {} \"{}\"", task.task_id, title),
         ("done", _) => format!("task done: {} \"{}\"", task.task_id, title),
+        ("remove", _) => format!("task remove: {} \"{}\"", task.task_id, title),
         ("release", _) => format!("task release: {} \"{}\"", task.task_id, title),
         (other, _) => format!("task {}: {} \"{}\"", other, task.task_id, title),
     }
@@ -3515,73 +3626,149 @@ fn handle_task_gui_connection(
     repo_root: &Path,
     default_project: Option<&str>,
 ) -> Result<()> {
-    let mut buffer = [0_u8; 8192];
-    let read = stream
-        .read(&mut buffer)
-        .with_context(|| "failed reading task-gui request")?;
-    if read == 0 {
+    let Some(request) = read_http_request(stream)? else {
         return Ok(());
-    }
-    let request = String::from_utf8_lossy(&buffer[..read]).to_string();
-    let target = parse_http_target(&request).unwrap_or_else(|| HttpTarget {
-        path: "/".to_string(),
-        query: BTreeMap::new(),
-    });
-    let path = target.path;
+    };
+    let method = request.method.as_str();
+    let path = request.target.path.as_str();
+    let query = &request.target.query;
 
-    if path == "/health" {
-        return write_http_response(
-            stream,
-            "200 OK",
-            "application/json; charset=utf-8",
-            br#"{"ok":true}"#,
-        );
+    if method == "GET" && path == "/health" {
+        return write_http_json(stream, "200 OK", &json!({ "ok": true }));
     }
 
-    if path.starts_with("/api/tasks") {
-        let selected_project = target
-            .query
-            .get("project")
-            .map(String::as_str)
-            .or(default_project);
-        let payload = task_gui_payload(repo_root, selected_project)?;
-        let bytes = serde_json::to_vec_pretty(&payload)
-            .with_context(|| "failed serializing task-gui payload")?;
-        return write_http_response(stream, "200 OK", "application/json; charset=utf-8", &bytes);
+    if path == "/api/tasks" {
+        if method != "GET" {
+            return write_http_json_error(
+                stream,
+                "405 Method Not Allowed",
+                "GET required for /api/tasks",
+            );
+        }
+        let selected_project = query.get("project").map(String::as_str).or(default_project);
+        return match task_gui_payload(repo_root, selected_project) {
+            Ok(payload) => write_http_json(stream, "200 OK", &payload),
+            Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
+        };
     }
 
-    if path.starts_with("/api/timeline") {
-        let selected_project = target
-            .query
-            .get("project")
-            .map(String::as_str)
-            .or(default_project);
-        let selected_branch = target
-            .query
+    if path == "/api/timeline" {
+        if method != "GET" {
+            return write_http_json_error(
+                stream,
+                "405 Method Not Allowed",
+                "GET required for /api/timeline",
+            );
+        }
+        let selected_project = query.get("project").map(String::as_str).or(default_project);
+        let selected_branch = query
             .get("branch")
             .map(String::as_str)
             .map(str::trim)
             .filter(|token| !token.is_empty());
-        let limit = parse_query_usize(&target.query, "limit")
+        let limit = parse_query_usize(query, "limit")
             .unwrap_or(120)
             .clamp(1, 1000);
-        let offset = parse_query_usize(&target.query, "offset")
+        let offset = parse_query_usize(query, "offset")
             .unwrap_or(0)
             .min(1_000_000);
-        let payload =
-            task_gui_timeline_payload(repo_root, selected_project, selected_branch, limit, offset)?;
-        let bytes = serde_json::to_vec_pretty(&payload)
-            .with_context(|| "failed serializing task-gui timeline payload")?;
-        return write_http_response(stream, "200 OK", "application/json; charset=utf-8", &bytes);
+        return match task_gui_timeline_payload(
+            repo_root,
+            selected_project,
+            selected_branch,
+            limit,
+            offset,
+        ) {
+            Ok(payload) => write_http_json(stream, "200 OK", &payload),
+            Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
+        };
     }
 
-    let html = task_gui_html();
-    write_http_response(
-        stream,
-        "200 OK",
-        "text/html; charset=utf-8",
-        html.as_bytes(),
-    )
+    if path == "/api/tasks/add" {
+        if method != "POST" {
+            return write_http_json_error(
+                stream,
+                "405 Method Not Allowed",
+                "POST required for /api/tasks/add",
+            );
+        }
+        if !request_content_type_is_json(&request) {
+            return write_http_json_error(
+                stream,
+                "415 Unsupported Media Type",
+                "application/json body required for /api/tasks/add",
+            );
+        }
+        let selected_project = query.get("project").map(String::as_str).or(default_project);
+        return match task_gui_add_task(repo_root, selected_project, &request.body) {
+            Ok(payload) => write_http_json(stream, "200 OK", &payload),
+            Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
+        };
+    }
+
+    if path == "/api/tasks/edit" {
+        if method != "POST" {
+            return write_http_json_error(
+                stream,
+                "405 Method Not Allowed",
+                "POST required for /api/tasks/edit",
+            );
+        }
+        if !request_content_type_is_json(&request) {
+            return write_http_json_error(
+                stream,
+                "415 Unsupported Media Type",
+                "application/json body required for /api/tasks/edit",
+            );
+        }
+        let selected_project = query.get("project").map(String::as_str).or(default_project);
+        return match task_gui_edit_task(repo_root, selected_project, &request.body) {
+            Ok(payload) => write_http_json(stream, "200 OK", &payload),
+            Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
+        };
+    }
+
+    if path == "/api/tasks/remove" {
+        if method != "POST" {
+            return write_http_json_error(
+                stream,
+                "405 Method Not Allowed",
+                "POST required for /api/tasks/remove",
+            );
+        }
+        if !request_content_type_is_json(&request) {
+            return write_http_json_error(
+                stream,
+                "415 Unsupported Media Type",
+                "application/json body required for /api/tasks/remove",
+            );
+        }
+        let selected_project = query.get("project").map(String::as_str).or(default_project);
+        return match task_gui_remove_task(repo_root, selected_project, &request.body) {
+            Ok(payload) => write_http_json(stream, "200 OK", &payload),
+            Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
+        };
+    }
+
+    if method == "GET" && path == "/" {
+        let html = task_gui_html();
+        return write_http_response(
+            stream,
+            "200 OK",
+            "text/html; charset=utf-8",
+            html.as_bytes(),
+        );
+    }
+
+    if method != "GET" && method != "POST" {
+        return write_http_json_error(
+            stream,
+            "405 Method Not Allowed",
+            "supported methods: GET, POST",
+        );
+    }
+
+    write_http_json_error(stream, "404 Not Found", "unknown task gui endpoint")
 }
 
 #[derive(Debug, Clone)]
@@ -3590,15 +3777,144 @@ struct HttpTarget {
     query: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone)]
+struct HttpRequest {
+    method: String,
+    target: HttpTarget,
+    headers: BTreeMap<String, String>,
+    body: Vec<u8>,
+}
+
+fn request_content_type_is_json(request: &HttpRequest) -> bool {
+    request
+        .headers
+        .get("content-type")
+        .map(|value| value.to_ascii_lowercase().contains("application/json"))
+        .unwrap_or(true)
+}
+
+fn read_http_request(stream: &mut TcpStream) -> Result<Option<HttpRequest>> {
+    let mut buffer = Vec::<u8>::with_capacity(8192);
+    let mut chunk = [0_u8; 4096];
+    let mut header_end = None;
+    let mut expected_total = None;
+
+    loop {
+        let read = stream
+            .read(&mut chunk)
+            .with_context(|| "failed reading task-gui request")?;
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if buffer.len() > TASK_GUI_MAX_REQUEST_BYTES {
+            bail!(
+                "task-gui request exceeds maximum size of {} bytes",
+                TASK_GUI_MAX_REQUEST_BYTES
+            );
+        }
+        if header_end.is_none()
+            && let Some(idx) = find_http_header_end(&buffer)
+        {
+            header_end = Some(idx);
+            let content_length = parse_http_content_length(&buffer[..idx])?;
+            expected_total = Some(idx + 4 + content_length);
+        }
+        if let Some(total_len) = expected_total
+            && buffer.len() >= total_len
+        {
+            break;
+        }
+    }
+
+    if buffer.is_empty() {
+        return Ok(None);
+    }
+
+    let header_end = find_http_header_end(&buffer)
+        .ok_or_else(|| anyhow!("task-gui request missing header terminator"))?;
+    let content_length = parse_http_content_length(&buffer[..header_end])?;
+    let total_len = header_end + 4 + content_length;
+    if buffer.len() < total_len {
+        bail!("task-gui request body shorter than declared content-length");
+    }
+    parse_http_request(&buffer[..total_len]).map(Some)
+}
+
+fn find_http_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn parse_http_content_length(header_bytes: &[u8]) -> Result<usize> {
+    let header_text = String::from_utf8_lossy(header_bytes);
+    for line in header_text.lines().skip(1) {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("content-length") {
+            return value
+                .trim()
+                .parse::<usize>()
+                .with_context(|| format!("invalid content-length '{}'", value.trim()));
+        }
+    }
+    Ok(0)
+}
+
+fn parse_http_request(bytes: &[u8]) -> Result<HttpRequest> {
+    let header_end = find_http_header_end(bytes)
+        .ok_or_else(|| anyhow!("task-gui request missing header terminator"))?;
+    let header_text = String::from_utf8_lossy(&bytes[..header_end]);
+    let mut lines = header_text.split("\r\n");
+    let request_line = lines
+        .next()
+        .ok_or_else(|| anyhow!("task-gui request missing request line"))?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts
+        .next()
+        .ok_or_else(|| anyhow!("task-gui request missing method"))?
+        .to_string();
+    let raw_target = parts
+        .next()
+        .ok_or_else(|| anyhow!("task-gui request missing target"))?;
+    let target = parse_http_target_from_raw(raw_target);
+    let mut headers = BTreeMap::<String, String>::new();
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':') {
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+        }
+    }
+    let content_length = headers
+        .get("content-length")
+        .map(String::as_str)
+        .unwrap_or("0")
+        .parse::<usize>()
+        .with_context(|| "invalid content-length header")?;
+    let body_start = header_end + 4;
+    let body_end = body_start.saturating_add(content_length).min(bytes.len());
+    let body = bytes[body_start..body_end].to_vec();
+    Ok(HttpRequest {
+        method,
+        target,
+        headers,
+        body,
+    })
+}
+
+#[cfg(test)]
 fn parse_http_target(request: &str) -> Option<HttpTarget> {
     let first_line = request.lines().next()?;
     let mut parts = first_line.split_whitespace();
     let _method = parts.next()?;
     let raw_target = parts.next()?;
+    Some(parse_http_target_from_raw(raw_target))
+}
+
+fn parse_http_target_from_raw(raw_target: &str) -> HttpTarget {
     let mut pieces = raw_target.splitn(2, '?');
     let path = pieces.next().unwrap_or("/").to_string();
     let query = pieces.next().map(parse_query_string).unwrap_or_default();
-    Some(HttpTarget { path, query })
+    HttpTarget { path, query }
 }
 
 fn parse_query_string(query: &str) -> BTreeMap<String, String> {
@@ -3694,11 +4010,153 @@ fn write_http_response(
     Ok(())
 }
 
-fn task_gui_payload(repo_root: &Path, project_selector: Option<&str>) -> Result<serde_json::Value> {
+fn write_http_json(
+    stream: &mut TcpStream,
+    status: &str,
+    payload: &serde_json::Value,
+) -> Result<()> {
+    let bytes =
+        serde_json::to_vec_pretty(payload).with_context(|| "failed serializing http json body")?;
+    write_http_response(stream, status, "application/json; charset=utf-8", &bytes)
+}
+
+fn write_http_json_error(stream: &mut TcpStream, status: &str, message: &str) -> Result<()> {
+    write_http_json(
+        stream,
+        status,
+        &json!({
+            "ok": false,
+            "error": message
+        }),
+    )
+}
+
+fn resolve_task_gui_project_selection(
+    repo_root: &Path,
+    project_selector: Option<&str>,
+) -> Result<(Vec<TaskGuiProject>, TaskGuiProject, PathBuf)> {
     let projects = collect_task_gui_projects(repo_root)?;
     let selected = resolve_selected_task_gui_project(&projects, project_selector)
+        .cloned()
         .ok_or_else(|| anyhow!("task gui has no available projects"))?;
     let selected_repo = PathBuf::from(selected.repo_root.clone());
+    Ok((projects, selected, selected_repo))
+}
+
+fn task_gui_add_task(
+    repo_root: &Path,
+    project_selector: Option<&str>,
+    body: &[u8],
+) -> Result<serde_json::Value> {
+    let request: TaskGuiCreateRequest =
+        serde_json::from_slice(body).with_context(|| "invalid task gui add payload")?;
+    let (_projects, selected, selected_repo) =
+        resolve_task_gui_project_selection(repo_root, project_selector)?;
+    let mut state = load_task_state(&selected_repo)?;
+    let _ = prune_expired_task_claims(&mut state)?;
+    let task = build_manual_task(
+        &state,
+        &request.title,
+        request.detail,
+        normalize_agent_id(request.agent),
+        request.priority.unwrap_or(0),
+        request.tags.unwrap_or_default(),
+        request.depends_on.unwrap_or_default(),
+    )?;
+    state.tasks.push(task.clone());
+    state.updated_at_utc = task.updated_at_utc.clone();
+    write_pretty_json(&timeline_tasks_path(&selected_repo), &state)?;
+    append_task_timeline_event(
+        &selected_repo,
+        &task,
+        &task.created_by_agent_id,
+        "add",
+        None,
+    )?;
+    Ok(json!({
+        "ok": true,
+        "action": "add",
+        "selected_project": {
+            "key": selected.key,
+            "name": selected.name,
+            "repo_root": selected.repo_root
+        },
+        "task": task
+    }))
+}
+
+fn task_gui_edit_task(
+    repo_root: &Path,
+    project_selector: Option<&str>,
+    body: &[u8],
+) -> Result<serde_json::Value> {
+    let request: TaskGuiEditRequest =
+        serde_json::from_slice(body).with_context(|| "invalid task gui edit payload")?;
+    let (_projects, selected, selected_repo) =
+        resolve_task_gui_project_selection(repo_root, project_selector)?;
+    let mut state = load_task_state(&selected_repo)?;
+    let _ = prune_expired_task_claims(&mut state)?;
+    let agent_id = normalize_agent_id(request.agent);
+    let task = edit_task_in_state(
+        &mut state,
+        &request.task_id,
+        &agent_id,
+        TaskEditPatch {
+            title: request.title,
+            detail: match request.detail {
+                None => TaskTextPatch::Keep,
+                Some(None) => TaskTextPatch::Clear,
+                Some(Some(value)) => TaskTextPatch::Set(value),
+            },
+            priority: request.priority,
+            tags: request.tags.map(dedupe_keep_order),
+            depends_on: request.depends_on.map(dedupe_keep_order),
+        },
+    )?;
+    write_pretty_json(&timeline_tasks_path(&selected_repo), &state)?;
+    append_task_timeline_event(&selected_repo, &task, &agent_id, "edit", None)?;
+    Ok(json!({
+        "ok": true,
+        "action": "edit",
+        "selected_project": {
+            "key": selected.key,
+            "name": selected.name,
+            "repo_root": selected.repo_root
+        },
+        "task": task
+    }))
+}
+
+fn task_gui_remove_task(
+    repo_root: &Path,
+    project_selector: Option<&str>,
+    body: &[u8],
+) -> Result<serde_json::Value> {
+    let request: TaskGuiRemoveRequest =
+        serde_json::from_slice(body).with_context(|| "invalid task gui remove payload")?;
+    let (_projects, selected, selected_repo) =
+        resolve_task_gui_project_selection(repo_root, project_selector)?;
+    let mut state = load_task_state(&selected_repo)?;
+    let _ = prune_expired_task_claims(&mut state)?;
+    let agent_id = normalize_agent_id(request.agent);
+    let task = remove_task_from_state(&mut state, &request.task_id, &agent_id)?;
+    write_pretty_json(&timeline_tasks_path(&selected_repo), &state)?;
+    append_task_timeline_event(&selected_repo, &task, &agent_id, "remove", None)?;
+    Ok(json!({
+        "ok": true,
+        "action": "remove",
+        "selected_project": {
+            "key": selected.key,
+            "name": selected.name,
+            "repo_root": selected.repo_root
+        },
+        "task": task
+    }))
+}
+
+fn task_gui_payload(repo_root: &Path, project_selector: Option<&str>) -> Result<serde_json::Value> {
+    let (projects, selected, selected_repo) =
+        resolve_task_gui_project_selection(repo_root, project_selector)?;
     let mut state = load_task_state(&selected_repo)?;
     let changed = prune_expired_task_claims(&mut state)?;
     if changed {
@@ -3756,10 +4214,8 @@ fn task_gui_timeline_payload(
     limit: usize,
     offset: usize,
 ) -> Result<serde_json::Value> {
-    let projects = collect_task_gui_projects(repo_root)?;
-    let selected = resolve_selected_task_gui_project(&projects, project_selector)
-        .ok_or_else(|| anyhow!("task gui has no available projects"))?;
-    let selected_repo = PathBuf::from(selected.repo_root.clone());
+    let (projects, selected, selected_repo) =
+        resolve_task_gui_project_selection(repo_root, project_selector)?;
     let timeline_initialized = timeline_is_initialized(&selected_repo);
     if !timeline_initialized {
         return Ok(json!({
@@ -3906,7 +4362,10 @@ fn task_gui_html() -> &'static str {
       --ready: #15803d;
       --timeline-task: #0f766e;
       --timeline-file: #1d4ed8;
+      --danger: #b91c1c;
+      --accent: #0f172a;
     }
+    * { box-sizing: border-box; }
     body {
       margin: 0;
       font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -3929,16 +4388,37 @@ fn task_gui_html() -> &'static str {
       gap: 12px;
       flex-wrap: wrap;
     }
+    .head-controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
     h1 { margin: 0; font-size: 20px; }
     .meta { margin-top: 6px; color: var(--muted); font-size: 13px; }
-    .project-picker {
+    .project-picker,
+    .agent-input,
+    .field input,
+    .field textarea,
+    .timeline-controls select,
+    .timeline-controls button,
+    .panel-actions button,
+    .task-actions button,
+    .editor-actions button {
       border: 1px solid var(--border);
       border-radius: 8px;
       background: #fff;
       color: var(--ink);
-      padding: 6px 10px;
+      font: inherit;
+    }
+    .project-picker,
+    .agent-input {
+      padding: 8px 10px;
       min-width: 260px;
       font-size: 13px;
+    }
+    .agent-input {
+      min-width: 200px;
     }
     main {
       padding: 16px;
@@ -3956,7 +4436,31 @@ fn task_gui_html() -> &'static str {
       padding: 12px;
       box-shadow: 0 2px 10px rgba(15, 23, 42, 0.04);
     }
-    .summary { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+    .panel-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    .panel-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .panel-actions button,
+    .task-actions button,
+    .editor-actions button,
+    .timeline-controls button {
+      padding: 7px 11px;
+      cursor: pointer;
+    }
+    .summary {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
     .pill {
       background: var(--card);
       border: 1px solid var(--border);
@@ -3964,6 +4468,66 @@ fn task_gui_html() -> &'static str {
       padding: 6px 10px;
       font-size: 12px;
       color: var(--muted);
+    }
+    .message-error {
+      color: var(--danger);
+    }
+    .message-ok {
+      color: var(--ready);
+    }
+    .editor {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #f8fafc;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+    .editor-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    .editor-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 10px;
+    }
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .field input,
+    .field textarea {
+      padding: 9px 10px;
+      font-size: 13px;
+      color: var(--ink);
+    }
+    .field textarea {
+      min-height: 96px;
+      resize: vertical;
+    }
+    .field-span {
+      grid-column: 1 / -1;
+    }
+    .editor-actions {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
+    .ghost-button {
+      background: #fff;
+    }
+    .danger-button {
+      color: var(--danger);
+      border-color: #fecaca;
     }
     .grid {
       display: grid;
@@ -4006,6 +4570,12 @@ fn task_gui_html() -> &'static str {
     .state { margin-top: 8px; font-size: 12px; }
     .ready { color: var(--ready); font-weight: 600; }
     .blocked { color: var(--blocked); font-weight: 600; }
+    .task-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+    }
     .timeline-controls {
       display: flex;
       flex-wrap: wrap;
@@ -4015,10 +4585,6 @@ fn task_gui_html() -> &'static str {
     }
     .timeline-controls select,
     .timeline-controls button {
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      background: #fff;
-      color: var(--ink);
       padding: 6px 10px;
       font-size: 12px;
       cursor: pointer;
@@ -4076,17 +4642,59 @@ fn task_gui_html() -> &'static str {
   <header>
     <div class="head-row">
       <h1>fugit task board</h1>
-      <label>
-        <select id="projectSelect" class="project-picker"></select>
-      </label>
+      <div class="head-controls">
+        <input id="agentInput" class="agent-input" placeholder="agent id (optional)">
+        <label>
+          <select id="projectSelect" class="project-picker"></select>
+        </label>
+      </div>
     </div>
     <div class="meta" id="meta">loading...</div>
   </header>
   <main>
     <section class="panel">
-      <div class="summary" id="summary"></div>
+      <div class="panel-top">
+        <div class="summary" id="summary"></div>
+        <div class="panel-actions">
+          <button id="newTaskButton" type="button">new task</button>
+          <button id="refreshTasks" type="button">refresh</button>
+        </div>
+      </div>
+      <form id="taskEditor" class="editor" style="display:none;">
+        <div class="editor-top">
+          <strong id="editorTitle">new task</strong>
+          <button id="closeEditor" class="ghost-button" type="button">cancel</button>
+        </div>
+        <div class="editor-grid">
+          <label class="field">
+            <span>title</span>
+            <input id="taskTitleInput" type="text" autocomplete="off" maxlength="500">
+          </label>
+          <label class="field">
+            <span>priority</span>
+            <input id="taskPriorityInput" type="number" step="1">
+          </label>
+          <label class="field field-span">
+            <span>detail</span>
+            <textarea id="taskDetailInput" placeholder="optional detail"></textarea>
+          </label>
+          <label class="field">
+            <span>tags (comma separated)</span>
+            <input id="taskTagsInput" type="text" autocomplete="off" placeholder="compiler,gui">
+          </label>
+          <label class="field">
+            <span>depends on task ids</span>
+            <input id="taskDependsInput" type="text" autocomplete="off" placeholder="task_abc,task_xyz">
+          </label>
+        </div>
+        <div class="editor-actions">
+          <button id="saveTaskButton" type="submit">create task</button>
+          <div class="meta" id="editorMeta">Use this editor for new tasks and full replacements when editing.</div>
+        </div>
+      </form>
+      <div class="meta" id="actionMeta">Task changes apply immediately and timeline events refresh after each mutation.</div>
       <div class="grid" id="tasks"></div>
-      <div class="empty" id="empty" style="display:none;">No tasks yet. Add one with <code>fugit task add --title "..."</code>.</div>
+      <div class="empty" id="empty" style="display:none;">No tasks yet. Create one here or import a backlog with <code>fugit task import --file /path/to/tasks.tsv</code>.</div>
     </section>
     <section class="panel">
       <div class="timeline-controls">
@@ -4110,6 +4718,32 @@ fn task_gui_html() -> &'static str {
     let timelineRows = [];
     let timelineLoading = false;
     const TIMELINE_PAGE_SIZE = 120;
+    const EDITOR_STORAGE_KEY = "fugit.task.gui.agent";
+
+    const escapeHtml = (value) => String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/\"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+
+    const csvSplit = (value) => String(value || "")
+      .split(",")
+      .map((token) => token.trim())
+      .filter(Boolean);
+
+    const projectQuery = () => selectedProject ? `?project=${encodeURIComponent(selectedProject)}` : "";
+
+    const currentAgentId = () => {
+      const input = byId("agentInput");
+      return input ? input.value.trim() : "";
+    };
+
+    const setActionMessage = (message, kind = "ok") => {
+      const node = byId("actionMeta");
+      node.textContent = message;
+      node.className = `meta ${kind === "error" ? "message-error" : "message-ok"}`;
+    };
 
     const syncUrl = () => {
       const next = new URL(window.location.href);
@@ -4139,6 +4773,48 @@ fn task_gui_html() -> &'static str {
       return "status-open";
     };
 
+    const readJsonResponse = async (response) => {
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.error || response.statusText || "request failed");
+      }
+      return payload;
+    };
+
+    const closeEditor = () => {
+      const editor = byId("taskEditor");
+      editor.dataset.mode = "";
+      editor.dataset.taskId = "";
+      editor.style.display = "none";
+      byId("taskTitleInput").value = "";
+      byId("taskPriorityInput").value = "0";
+      byId("taskDetailInput").value = "";
+      byId("taskTagsInput").value = "";
+      byId("taskDependsInput").value = "";
+    };
+
+    const openEditor = (mode, task) => {
+      const editor = byId("taskEditor");
+      editor.dataset.mode = mode;
+      editor.dataset.taskId = task?.task_id || "";
+      editor.style.display = "block";
+      byId("editorTitle").textContent = mode === "edit"
+        ? `edit ${task.task_id}`
+        : "new task";
+      byId("saveTaskButton").textContent = mode === "edit"
+        ? "save changes"
+        : "create task";
+      byId("editorMeta").textContent = mode === "edit"
+        ? "Editing replaces the current title, detail, tags, and dependency list."
+        : "Create tasks directly from the board without dropping to the CLI.";
+      byId("taskTitleInput").value = task?.title || "";
+      byId("taskPriorityInput").value = String(task?.priority ?? 0);
+      byId("taskDetailInput").value = task?.detail || "";
+      byId("taskTagsInput").value = (task?.tags || []).join(", ");
+      byId("taskDependsInput").value = (task?.depends_on || []).join(", ");
+      byId("taskTitleInput").focus();
+    };
+
     const renderSummary = (tasks) => {
       const counts = { open: 0, claimed: 0, done: 0, ready: 0, blocked: 0 };
       for (const task of tasks) {
@@ -4152,7 +4828,7 @@ fn task_gui_html() -> &'static str {
         `done: ${counts.done}`,
         `ready: ${counts.ready}`,
         `blocked: ${counts.blocked}`
-      ].map((line) => `<div class="pill">${line}</div>`).join("");
+      ].map((line) => `<div class="pill">${escapeHtml(line)}</div>`).join("");
     };
 
     const renderProjectPicker = (projects, selectedKey) => {
@@ -4161,12 +4837,13 @@ fn task_gui_html() -> &'static str {
       picker.innerHTML = (projects || []).map((project) => {
         const selected = project.key === selectedKey ? " selected" : "";
         const label = `${project.name} (${project.repo_root})`;
-        return `<option value="${project.key}"${selected}>${label}</option>`;
+        return `<option value="${escapeHtml(project.key)}"${selected}>${escapeHtml(label)}</option>`;
       }).join("");
       picker.onchange = () => {
         selectedProject = picker.value || "";
         selectedBranch = "";
         resetTimeline();
+        closeEditor();
         syncUrl();
         refresh();
         refreshTimeline(true);
@@ -4174,30 +4851,81 @@ fn task_gui_html() -> &'static str {
     };
 
     const renderTasks = (tasks) => {
+      const editor = byId("taskEditor");
+      if (editor.dataset.mode === "edit" && editor.dataset.taskId) {
+        const stillExists = tasks.some((task) => task.task_id === editor.dataset.taskId);
+        if (!stillExists) {
+          closeEditor();
+        }
+      }
       byId("empty").style.display = tasks.length === 0 ? "block" : "none";
       byId("tasks").innerHTML = tasks.map((task) => {
-        const tags = (task.tags || []).map((tag) => `<span class="tag">${tag}</span>`).join("");
-        const detail = task.detail ? `<p class="detail">${task.detail}</p>` : "";
+        const tags = (task.tags || [])
+          .map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`)
+          .join("");
+        const detail = task.detail
+          ? `<p class="detail">${escapeHtml(task.detail)}</p>`
+          : "";
         const deps = (task.depends_on || []).join(", ");
         const blockedBy = (task.blocked_by || []).join(", ");
         const stateLine = task.ready
           ? `<span class="ready">ready</span>`
-          : `<span class="blocked">blocked by: ${blockedBy || "unknown"}</span>`;
+          : `<span class="blocked">blocked by: ${escapeHtml(blockedBy || "unknown")}</span>`;
         return `
           <article class="card">
             <div class="row">
-              <h2 class="title">${task.title || "(untitled)"}</h2>
-              <span class="status ${statusClass(task.status)}">${task.status}</span>
+              <h2 class="title">${escapeHtml(task.title || "(untitled)")}</h2>
+              <span class="status ${statusClass(task.status)}">${escapeHtml(task.status)}</span>
             </div>
-            <div class="priority">id: ${task.task_id} • priority: ${task.priority}</div>
+            <div class="priority">id: ${escapeHtml(task.task_id)} • priority: ${escapeHtml(task.priority)}</div>
             ${detail}
-            <div class="meta-row">claimed by: ${task.claimed_by_agent_id || "none"}</div>
-            <div class="meta-row">depends on: ${deps || "none"}</div>
+            <div class="meta-row">claimed by: ${escapeHtml(task.claimed_by_agent_id || "none")}</div>
+            <div class="meta-row">depends on: ${escapeHtml(deps || "none")}</div>
             <div class="state">${stateLine}</div>
             <div class="tags">${tags}</div>
+            <div class="task-actions">
+              <button type="button" class="ghost-button edit-task" data-task-id="${escapeHtml(task.task_id)}">edit</button>
+              <button type="button" class="ghost-button danger-button remove-task" data-task-id="${escapeHtml(task.task_id)}">remove</button>
+            </div>
           </article>
         `;
       }).join("");
+
+      byId("tasks").querySelectorAll(".edit-task").forEach((button) => {
+        button.onclick = () => {
+          const task = tasks.find((candidate) => candidate.task_id === button.dataset.taskId);
+          if (task) {
+            openEditor("edit", task);
+          }
+        };
+      });
+
+      byId("tasks").querySelectorAll(".remove-task").forEach((button) => {
+        button.onclick = async () => {
+          const task = tasks.find((candidate) => candidate.task_id === button.dataset.taskId);
+          if (!task) return;
+          const confirmed = window.confirm(`Remove ${task.task_id}: ${task.title || "(untitled)"}?`);
+          if (!confirmed) return;
+          try {
+            const payload = { task_id: task.task_id };
+            const agent = currentAgentId();
+            if (agent) payload.agent = agent;
+            const response = await fetch(`/api/tasks/remove${projectQuery()}`, {
+              method: "POST",
+              cache: "no-store",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload)
+            });
+            const result = await readJsonResponse(response);
+            closeEditor();
+            setActionMessage(`removed ${result.task?.task_id || task.task_id}`);
+            await refresh();
+            await refreshTimeline(true);
+          } catch (error) {
+            setActionMessage(`remove failed: ${error}`, "error");
+          }
+        };
+      });
     };
 
     const renderBranchPicker = (branches, activeBranch, branchValue) => {
@@ -4214,7 +4942,7 @@ fn task_gui_html() -> &'static str {
       picker.innerHTML = branches.map((branch) => {
         const marker = branch === activeBranch ? " (active)" : "";
         const chosen = branch === selected ? " selected" : "";
-        return `<option value="${branch}"${chosen}>${branch}${marker}</option>`;
+        return `<option value="${escapeHtml(branch)}"${chosen}>${escapeHtml(branch + marker)}</option>`;
       }).join("");
       picker.onchange = () => {
         selectedBranch = picker.value || "";
@@ -4244,12 +4972,12 @@ fn task_gui_html() -> &'static str {
         return `
           <article class="${timelineRowClass(event)}">
             <div class="timeline-topline">
-              <span>${when}</span>
-              <span>${event.event_id}</span>
+              <span>${escapeHtml(when)}</span>
+              <span>${escapeHtml(event.event_id)}</span>
             </div>
-            <div class="timeline-summary">${event.summary || "(no summary)"}</div>
-            <div class="timeline-metrics">branch=${event.branch} • agent=${event.agent_id} • ${taskInfo}${dispatch}</div>
-            <div class="timeline-metrics">${tagList ? `tags: ${tagList}` : "tags: none"}</div>
+            <div class="timeline-summary">${escapeHtml(event.summary || "(no summary)")}</div>
+            <div class="timeline-metrics">branch=${escapeHtml(event.branch)} • agent=${escapeHtml(event.agent_id)} • ${escapeHtml(taskInfo)}${escapeHtml(dispatch)}</div>
+            <div class="timeline-metrics">${escapeHtml(tagList ? `tags: ${tagList}` : "tags: none")}</div>
           </article>
         `;
       }).join("");
@@ -4263,9 +4991,8 @@ fn task_gui_html() -> &'static str {
     async function refresh() {
       try {
         const previousProject = selectedProject;
-        const query = selectedProject ? `?project=${encodeURIComponent(selectedProject)}` : "";
-        const response = await fetch(`/api/tasks${query}`, { cache: "no-store" });
-        const payload = await response.json();
+        const response = await fetch(`/api/tasks${projectQuery()}`, { cache: "no-store" });
+        const payload = await readJsonResponse(response);
         if (payload.selected_project && payload.selected_project.key) {
           selectedProject = payload.selected_project.key;
         }
@@ -4300,7 +5027,7 @@ fn task_gui_html() -> &'static str {
         query.set("limit", String(TIMELINE_PAGE_SIZE));
         query.set("offset", String(timelineOffset));
         const response = await fetch(`/api/timeline?${query.toString()}`, { cache: "no-store" });
-        const payload = await response.json();
+        const payload = await readJsonResponse(response);
         if (payload.selected_project && payload.selected_project.key) {
           selectedProject = payload.selected_project.key;
         }
@@ -4334,6 +5061,55 @@ fn task_gui_html() -> &'static str {
       }
     }
 
+    byId("refreshTasks").onclick = () => {
+      refresh();
+    };
+    byId("newTaskButton").onclick = () => {
+      openEditor("create");
+    };
+    byId("closeEditor").onclick = () => {
+      closeEditor();
+    };
+    byId("taskEditor").onsubmit = async (event) => {
+      event.preventDefault();
+      try {
+        const editor = byId("taskEditor");
+        const title = byId("taskTitleInput").value.trim();
+        if (!title) {
+          throw new Error("task title cannot be empty");
+        }
+        const priorityText = byId("taskPriorityInput").value.trim();
+        const payload = {
+          title,
+          detail: byId("taskDetailInput").value.trim() || null,
+          priority: priorityText === "" ? 0 : Number(priorityText),
+          tags: csvSplit(byId("taskTagsInput").value),
+          depends_on: csvSplit(byId("taskDependsInput").value)
+        };
+        const agent = currentAgentId();
+        if (agent) {
+          payload.agent = agent;
+        }
+        let endpoint = "/api/tasks/add";
+        if (editor.dataset.mode === "edit") {
+          endpoint = "/api/tasks/edit";
+          payload.task_id = editor.dataset.taskId;
+        }
+        const response = await fetch(`${endpoint}${projectQuery()}`, {
+          method: "POST",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const result = await readJsonResponse(response);
+        setActionMessage(`${editor.dataset.mode === "edit" ? "saved" : "created"} ${result.task?.task_id || title}`);
+        closeEditor();
+        await refresh();
+        await refreshTimeline(true);
+      } catch (error) {
+        setActionMessage(`save failed: ${error}`, "error");
+      }
+    };
     byId("refreshTimeline").onclick = () => {
       refreshTimeline(true);
     };
@@ -4343,8 +5119,19 @@ fn task_gui_html() -> &'static str {
       }
     };
 
+    const agentInput = byId("agentInput");
+    agentInput.value = localStorage.getItem(EDITOR_STORAGE_KEY) || "";
+    agentInput.onchange = () => {
+      localStorage.setItem(EDITOR_STORAGE_KEY, agentInput.value.trim());
+    };
+    agentInput.onblur = agentInput.onchange;
+
     refresh().then(() => refreshTimeline(true));
-    setInterval(refresh, 1200);
+    setInterval(() => {
+      if (!document.hidden) {
+        refresh();
+      }
+    }, 1200);
   </script>
 </body>
 </html>"#
@@ -4497,6 +5284,38 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "priority": { "type": "integer" },
                     "tags": { "type": "array", "items": { "type": "string" } },
                     "depends_on": { "type": "array", "items": { "type": "string" } }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_task_edit",
+            "description": "Edit task metadata by replacing selected fields.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["task_id"],
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "title": { "type": "string" },
+                    "detail": { "type": "string" },
+                    "clear_detail": { "type": "boolean" },
+                    "agent": { "type": "string" },
+                    "priority": { "type": "integer" },
+                    "tags": { "type": "array", "items": { "type": "string" } },
+                    "clear_tags": { "type": "boolean" },
+                    "depends_on": { "type": "array", "items": { "type": "string" } },
+                    "clear_depends_on": { "type": "boolean" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_task_remove",
+            "description": "Remove a task that is no longer needed.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["task_id"],
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "agent": { "type": "string" }
                 }
             }
         }),
@@ -4908,6 +5727,91 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                         cli_args.push(dep_value.to_string());
                     }
                 }
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_task_edit" => {
+            let task_id = args
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_task_edit requires task_id"))?;
+            let mut cli_args = vec![
+                "task".to_string(),
+                "edit".to_string(),
+                "--task-id".to_string(),
+                task_id.to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(title) = args.get("title").and_then(serde_json::Value::as_str) {
+                cli_args.push("--title".to_string());
+                cli_args.push(title.to_string());
+            }
+            if let Some(detail) = args.get("detail").and_then(serde_json::Value::as_str) {
+                cli_args.push("--detail".to_string());
+                cli_args.push(detail.to_string());
+            }
+            if args
+                .get("clear_detail")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--clear-detail".to_string());
+            }
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            if let Some(priority) = args.get("priority").and_then(serde_json::Value::as_i64) {
+                cli_args.push("--priority".to_string());
+                cli_args.push(priority.to_string());
+            }
+            if let Some(tags) = args.get("tags").and_then(serde_json::Value::as_array) {
+                for tag in tags {
+                    if let Some(tag_value) = tag.as_str() {
+                        cli_args.push("--tag".to_string());
+                        cli_args.push(tag_value.to_string());
+                    }
+                }
+            }
+            if args
+                .get("clear_tags")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--clear-tags".to_string());
+            }
+            if let Some(depends_on) = args.get("depends_on").and_then(serde_json::Value::as_array) {
+                for dependency in depends_on {
+                    if let Some(dep_value) = dependency.as_str() {
+                        cli_args.push("--depends-on".to_string());
+                        cli_args.push(dep_value.to_string());
+                    }
+                }
+            }
+            if args
+                .get("clear_depends_on")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--clear-depends-on".to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_task_remove" => {
+            let task_id = args
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_task_remove requires task_id"))?;
+            let mut cli_args = vec![
+                "task".to_string(),
+                "remove".to_string(),
+                "--task-id".to_string(),
+                task_id.to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
@@ -5930,6 +6834,257 @@ fn load_task_state(repo_root: &Path) -> Result<TaskState> {
         state.schema_version = SCHEMA_TASKS.to_string();
     }
     Ok(state)
+}
+
+fn normalize_task_title(title: &str) -> Result<String> {
+    let normalized = title.trim();
+    if normalized.is_empty() {
+        bail!("task title cannot be empty");
+    }
+    Ok(normalized.to_string())
+}
+
+fn normalize_task_detail(detail: Option<String>) -> Option<String> {
+    detail.and_then(|value| {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    })
+}
+
+fn normalize_agent_id(agent: Option<String>) -> String {
+    agent
+        .and_then(|value| {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        })
+        .unwrap_or_else(default_agent_id)
+}
+
+fn resolve_task_text_patch(value: Option<String>, clear: bool) -> Result<TaskTextPatch> {
+    if clear && value.is_some() {
+        bail!("cannot combine detail update with --clear-detail");
+    }
+    if clear {
+        Ok(TaskTextPatch::Clear)
+    } else if let Some(value) = value {
+        Ok(TaskTextPatch::Set(value))
+    } else {
+        Ok(TaskTextPatch::Keep)
+    }
+}
+
+fn resolve_task_list_patch(
+    values: Vec<String>,
+    clear: bool,
+    field_name: &str,
+) -> Result<Option<Vec<String>>> {
+    if clear && !values.is_empty() {
+        bail!(
+            "cannot combine {} replacement values with --clear-{}",
+            field_name,
+            field_name
+        );
+    }
+    if clear {
+        Ok(Some(Vec::new()))
+    } else if values.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(dedupe_keep_order(values)))
+    }
+}
+
+fn validate_task_dependencies(
+    state: &TaskState,
+    editing_task_id: Option<&str>,
+    depends_on: &[String],
+) -> Result<()> {
+    let known_ids = state
+        .tasks
+        .iter()
+        .map(|task| task.task_id.as_str())
+        .collect::<BTreeSet<_>>();
+    for dependency in depends_on {
+        let token = dependency.trim();
+        if token.is_empty() {
+            continue;
+        }
+        if editing_task_id == Some(token) {
+            bail!("task {} cannot depend on itself", token);
+        }
+        if !known_ids.contains(token) {
+            bail!("task dependency not found: {}", token);
+        }
+    }
+    Ok(())
+}
+
+fn task_dependents(state: &TaskState, task_id: &str) -> Vec<String> {
+    state
+        .tasks
+        .iter()
+        .filter(|task| {
+            task.depends_on
+                .iter()
+                .any(|dependency| dependency == task_id)
+        })
+        .map(|task| task.task_id.clone())
+        .collect()
+}
+
+fn build_manual_task(
+    state: &TaskState,
+    title: &str,
+    detail: Option<String>,
+    agent_id: String,
+    priority: i32,
+    tags: Vec<String>,
+    depends_on: Vec<String>,
+) -> Result<FugitTask> {
+    let normalized_title = normalize_task_title(title)?;
+    let normalized_tags = dedupe_keep_order(tags);
+    let normalized_depends_on = dedupe_keep_order(depends_on);
+    validate_task_dependencies(state, None, &normalized_depends_on)?;
+    let now = now_utc();
+    Ok(FugitTask {
+        task_id: format!("task_{}", Uuid::new_v4().simple()),
+        title: normalized_title,
+        detail: normalize_task_detail(detail),
+        priority,
+        tags: normalized_tags,
+        depends_on: normalized_depends_on,
+        status: TaskStatus::Open,
+        created_at_utc: now.clone(),
+        updated_at_utc: now.clone(),
+        created_by_agent_id: agent_id,
+        claimed_by_agent_id: None,
+        claim_started_at_utc: None,
+        claim_expires_at_utc: None,
+        completed_at_utc: None,
+        completed_by_agent_id: None,
+    })
+}
+
+fn edit_task_in_state(
+    state: &mut TaskState,
+    task_id: &str,
+    agent_id: &str,
+    patch: TaskEditPatch,
+) -> Result<FugitTask> {
+    let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id) else {
+        bail!("task not found: {}", task_id);
+    };
+    if let Some(owner) = state.tasks[task_index].claimed_by_agent_id.as_deref()
+        && owner != agent_id
+    {
+        bail!(
+            "task {} is claimed by {}; cannot edit as {}",
+            state.tasks[task_index].task_id,
+            owner,
+            agent_id
+        );
+    }
+    if let Some(depends_on) = patch.depends_on.as_ref() {
+        validate_task_dependencies(state, Some(task_id), depends_on)?;
+    }
+
+    let mut changed = false;
+    if let Some(title) = patch.title {
+        let normalized = normalize_task_title(&title)?;
+        if state.tasks[task_index].title != normalized {
+            state.tasks[task_index].title = normalized;
+            changed = true;
+        }
+    }
+
+    match patch.detail {
+        TaskTextPatch::Keep => {}
+        TaskTextPatch::Clear => {
+            if state.tasks[task_index].detail.is_some() {
+                state.tasks[task_index].detail = None;
+                changed = true;
+            }
+        }
+        TaskTextPatch::Set(value) => {
+            let normalized = normalize_task_detail(Some(value));
+            if state.tasks[task_index].detail != normalized {
+                state.tasks[task_index].detail = normalized;
+                changed = true;
+            }
+        }
+    }
+
+    if let Some(priority) = patch.priority
+        && state.tasks[task_index].priority != priority
+    {
+        state.tasks[task_index].priority = priority;
+        changed = true;
+    }
+
+    if let Some(tags) = patch.tags
+        && state.tasks[task_index].tags != tags
+    {
+        state.tasks[task_index].tags = tags;
+        changed = true;
+    }
+
+    if let Some(depends_on) = patch.depends_on
+        && state.tasks[task_index].depends_on != depends_on
+    {
+        state.tasks[task_index].depends_on = depends_on;
+        changed = true;
+    }
+
+    if !changed {
+        bail!("task edit produced no changes: {}", task_id);
+    }
+
+    let now = now_utc();
+    state.tasks[task_index].updated_at_utc = now.clone();
+    state.updated_at_utc = now;
+    Ok(state.tasks[task_index].clone())
+}
+
+fn remove_task_from_state(
+    state: &mut TaskState,
+    task_id: &str,
+    agent_id: &str,
+) -> Result<FugitTask> {
+    let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id) else {
+        bail!("task not found: {}", task_id);
+    };
+    if let Some(owner) = state.tasks[task_index].claimed_by_agent_id.as_deref()
+        && owner != agent_id
+    {
+        bail!(
+            "task {} is claimed by {}; cannot remove as {}",
+            state.tasks[task_index].task_id,
+            owner,
+            agent_id
+        );
+    }
+    let dependents = task_dependents(state, task_id);
+    if !dependents.is_empty() {
+        bail!(
+            "task {} still has dependents: {}",
+            task_id,
+            dependents.join(", ")
+        );
+    }
+
+    let now = now_utc();
+    let mut removed = state.tasks.remove(task_index);
+    removed.updated_at_utc = now.clone();
+    state.updated_at_utc = now;
+    Ok(removed)
 }
 
 fn parse_task_import_rows(file: &Path, format: TaskImportFormatArg) -> Result<Vec<TaskImportRow>> {
@@ -7356,6 +8511,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_http_request_extracts_method_headers_and_body() {
+        let request = concat!(
+            "POST /api/tasks/edit?project=alpha HTTP/1.1\r\n",
+            "Host: localhost\r\n",
+            "Content-Type: application/json\r\n",
+            "Content-Length: 15\r\n",
+            "\r\n",
+            "{\"task_id\":\"x\"}"
+        );
+        let parsed = parse_http_request(request.as_bytes()).expect("expected parse");
+        assert_eq!(parsed.method, "POST");
+        assert_eq!(parsed.target.path, "/api/tasks/edit");
+        assert_eq!(
+            parsed.target.query.get("project").map(String::as_str),
+            Some("alpha")
+        );
+        assert_eq!(
+            parsed.headers.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+        assert_eq!(parsed.body, br#"{"task_id":"x"}"#);
+    }
+
+    #[test]
     fn resolve_selected_task_gui_project_prefers_selector_then_default() {
         let projects = vec![
             TaskGuiProject {
@@ -7464,6 +8643,138 @@ mod tests {
         assert!(tags.iter().any(|tag| tag == "task_id:task_abc"));
         assert!(tags.iter().any(|tag| tag == "task_dispatch:open"));
         assert!(tags.iter().any(|tag| tag == "task_tag:parser"));
+    }
+
+    #[test]
+    fn build_manual_task_rejects_unknown_dependency_ids() {
+        let state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![],
+        };
+
+        let err = build_manual_task(
+            &state,
+            "implement something",
+            None,
+            "agent.a".to_string(),
+            5,
+            vec![],
+            vec!["task_missing".to_string()],
+        )
+        .expect_err("expected unknown dependency to fail");
+        assert!(err.to_string().contains("task dependency not found"));
+    }
+
+    #[test]
+    fn edit_task_in_state_replaces_selected_fields() {
+        let mut state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![
+                FugitTask {
+                    task_id: "task_dep".to_string(),
+                    title: "dependency".to_string(),
+                    detail: None,
+                    priority: 0,
+                    tags: vec![],
+                    depends_on: vec![],
+                    status: TaskStatus::Done,
+                    created_at_utc: now_utc(),
+                    updated_at_utc: now_utc(),
+                    created_by_agent_id: "agent.seed".to_string(),
+                    claimed_by_agent_id: None,
+                    claim_started_at_utc: None,
+                    claim_expires_at_utc: None,
+                    completed_at_utc: Some(now_utc()),
+                    completed_by_agent_id: Some("agent.seed".to_string()),
+                },
+                FugitTask {
+                    task_id: "task_main".to_string(),
+                    title: "before".to_string(),
+                    detail: Some("old detail".to_string()),
+                    priority: 1,
+                    tags: vec!["old".to_string()],
+                    depends_on: vec![],
+                    status: TaskStatus::Open,
+                    created_at_utc: now_utc(),
+                    updated_at_utc: now_utc(),
+                    created_by_agent_id: "agent.seed".to_string(),
+                    claimed_by_agent_id: None,
+                    claim_started_at_utc: None,
+                    claim_expires_at_utc: None,
+                    completed_at_utc: None,
+                    completed_by_agent_id: None,
+                },
+            ],
+        };
+
+        let task = edit_task_in_state(
+            &mut state,
+            "task_main",
+            "agent.editor",
+            TaskEditPatch {
+                title: Some("after".to_string()),
+                detail: TaskTextPatch::Clear,
+                priority: Some(9),
+                tags: Some(vec!["compiler".to_string(), "gui".to_string()]),
+                depends_on: Some(vec!["task_dep".to_string()]),
+            },
+        )
+        .expect("expected edit to succeed");
+        assert_eq!(task.title, "after");
+        assert!(task.detail.is_none());
+        assert_eq!(task.priority, 9);
+        assert_eq!(task.tags, vec!["compiler".to_string(), "gui".to_string()]);
+        assert_eq!(task.depends_on, vec!["task_dep".to_string()]);
+    }
+
+    #[test]
+    fn remove_task_from_state_rejects_tasks_with_dependents() {
+        let mut state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![
+                FugitTask {
+                    task_id: "task_parent".to_string(),
+                    title: "parent".to_string(),
+                    detail: None,
+                    priority: 0,
+                    tags: vec![],
+                    depends_on: vec![],
+                    status: TaskStatus::Open,
+                    created_at_utc: now_utc(),
+                    updated_at_utc: now_utc(),
+                    created_by_agent_id: "agent.seed".to_string(),
+                    claimed_by_agent_id: None,
+                    claim_started_at_utc: None,
+                    claim_expires_at_utc: None,
+                    completed_at_utc: None,
+                    completed_by_agent_id: None,
+                },
+                FugitTask {
+                    task_id: "task_child".to_string(),
+                    title: "child".to_string(),
+                    detail: None,
+                    priority: 0,
+                    tags: vec![],
+                    depends_on: vec!["task_parent".to_string()],
+                    status: TaskStatus::Open,
+                    created_at_utc: now_utc(),
+                    updated_at_utc: now_utc(),
+                    created_by_agent_id: "agent.seed".to_string(),
+                    claimed_by_agent_id: None,
+                    claim_started_at_utc: None,
+                    claim_expires_at_utc: None,
+                    completed_at_utc: None,
+                    completed_by_agent_id: None,
+                },
+            ],
+        };
+
+        let err = remove_task_from_state(&mut state, "task_parent", "agent.editor")
+            .expect_err("expected dependent check to fail");
+        assert!(err.to_string().contains("still has dependents"));
     }
 
     #[test]

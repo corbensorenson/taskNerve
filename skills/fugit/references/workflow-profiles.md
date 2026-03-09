@@ -17,15 +17,17 @@ Characteristics:
 
 Use when multiple agents should coordinate by pulling from a shared queue.
 
-- `fugit --repo-root . task add --title "Implement X" --priority 10 --tag compiler`
+- `fugit --repo-root . task import --file /path/to/tasks.tsv`
 - `fugit --repo-root . task list --ready-only`
 - `fugit --repo-root . task request --agent <agent_id> --claim-ttl-minutes 30 --steal-after-minutes 90`
+- `fugit --repo-root . task edit --task-id <task_id> --title "Updated X"`
 - `fugit --repo-root . task done --task-id <task_id> --agent <agent_id>`
 
 Characteristics:
 - dependency-aware ordering via `--depends-on`,
 - lease-based claims with default stale-claim work stealing,
-- explicit release path for fast agent handoff.
+- explicit release path for fast agent handoff,
+- easy plan maintenance through `task edit` / `task remove`.
 
 ## Live Task Board
 
@@ -35,6 +37,11 @@ Use when humans or lead agents need continuous visual awareness of queue state.
 - `fugit --repo-root . task gui --background`
 - `fugit --repo-root . task gui --project <project_name>`
 - MCP: `fugit_task_gui_launch`
+
+Characteristics:
+- project switcher plus branch-aware timeline explorer,
+- direct create/edit/remove task controls in the browser,
+- useful when humans need to fix queue drift without dropping to shell.
 
 ## Multi-Project Coordination
 

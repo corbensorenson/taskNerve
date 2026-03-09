@@ -107,6 +107,15 @@ print(json.load(open(sys.argv[1]))["task_id"])
 PY
 )"
 "$BIN" --repo-root "$REPO_A" task add --title "task-b" --priority 5 --depends-on "$TASK_A" --agent agent.b --json >"$TMP_ROOT/task-b.json"
+"$BIN" --repo-root "$REPO_A" task edit --task-id "$TASK_A" --detail "root task" --tag root --agent agent.a --json >"$TMP_ROOT/task-a-edit.json"
+json_assert "$TMP_ROOT/task-a-edit.json" 'payload.get("detail") == "root task" and "root" in payload.get("tags", [])' "task edit should replace requested fields"
+"$BIN" --repo-root "$REPO_A" task add --title "task-c" --priority 1 --agent agent.c --json >"$TMP_ROOT/task-c.json"
+TASK_C="$(python3 - "$TMP_ROOT/task-c.json" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1]))["task_id"])
+PY
+)"
+"$BIN" --repo-root "$REPO_A" task remove --task-id "$TASK_C" --agent agent.c >/dev/null
 "$BIN" --repo-root "$REPO_A" task request --agent agent.runner --json >"$TMP_ROOT/task-request-1.json"
 json_assert "$TMP_ROOT/task-request-1.json" 'payload.get("assigned") is True and payload.get("task",{}).get("task_id") is not None' "task request should assign a task"
 "$BIN" --repo-root "$REPO_A" task done --task-id "$TASK_A" --agent agent.runner >/dev/null
@@ -114,6 +123,7 @@ json_assert "$TMP_ROOT/task-request-1.json" 'payload.get("assigned") is True and
 json_assert "$TMP_ROOT/task-request-2.json" 'payload.get("assigned") is True' "second task request should assign dependent task after completion"
 "$BIN" --repo-root "$REPO_A" log --limit 50 --json >"$TMP_ROOT/log-task.json"
 json_assert "$TMP_ROOT/log-task.json" 'any("task done:" in row.get("summary","") for row in payload)' "task actions should be mirrored into timeline events"
+json_assert "$TMP_ROOT/log-task.json" 'any("task edit:" in row.get("summary","") for row in payload) and any("task remove:" in row.get("summary","") for row in payload)' "edit/remove actions should be mirrored into timeline events"
 
 echo "[vigorous-e2e] project registry"
 "$BIN" project add --name proj-a --repo-root "$REPO_A" --set-default --json >"$TMP_ROOT/project-add-a.json"
@@ -130,9 +140,26 @@ sleep 0.7
 curl -s "http://127.0.0.1:$GUI_PORT/health" >"$TMP_ROOT/gui-health.json"
 curl -s "http://127.0.0.1:$GUI_PORT/api/tasks?project=proj-a" >"$TMP_ROOT/gui-tasks.json"
 curl -s "http://127.0.0.1:$GUI_PORT/api/timeline?project=proj-a&branch=trunk&limit=30&offset=0" >"$TMP_ROOT/gui-timeline.json"
+curl -s -X POST "http://127.0.0.1:$GUI_PORT/api/tasks/add?project=proj-a" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"gui task","priority":2,"tags":["gui"]}' >"$TMP_ROOT/gui-add.json"
+GUI_TASK_ID="$(python3 - "$TMP_ROOT/gui-add.json" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1]))["task"]["task_id"])
+PY
+)"
+curl -s -X POST "http://127.0.0.1:$GUI_PORT/api/tasks/edit?project=proj-a" \
+  -H "Content-Type: application/json" \
+  -d "{\"task_id\":\"$GUI_TASK_ID\",\"title\":\"gui task updated\",\"detail\":\"board edited\",\"tags\":[\"gui\",\"edited\"],\"depends_on\":[]}" >"$TMP_ROOT/gui-edit.json"
+curl -s -X POST "http://127.0.0.1:$GUI_PORT/api/tasks/remove?project=proj-a" \
+  -H "Content-Type: application/json" \
+  -d "{\"task_id\":\"$GUI_TASK_ID\"}" >"$TMP_ROOT/gui-remove.json"
 json_assert "$TMP_ROOT/gui-tasks.json" 'payload.get("schema_version") == "fugit.task.gui.snapshot.v1"' "task GUI payload schema mismatch"
 json_assert "$TMP_ROOT/gui-timeline.json" 'payload.get("schema_version") == "fugit.task.gui.timeline.v1"' "timeline GUI payload schema mismatch"
 json_assert "$TMP_ROOT/gui-timeline.json" 'any("task_action" in row for row in payload.get("events",[]))' "timeline payload should include task event metadata"
+json_assert "$TMP_ROOT/gui-add.json" 'payload.get("ok") is True and payload.get("task",{}).get("task_id") is not None' "GUI add endpoint should return created task"
+json_assert "$TMP_ROOT/gui-edit.json" 'payload.get("ok") is True and payload.get("task",{}).get("title") == "gui task updated"' "GUI edit endpoint should return updated task"
+json_assert "$TMP_ROOT/gui-remove.json" 'payload.get("ok") is True and payload.get("task",{}).get("task_id") is not None' "GUI remove endpoint should return removed task"
 GUI_PID="$(lsof -ti tcp:$GUI_PORT || true)"
 if [[ -n "$GUI_PID" ]]; then
   kill "$GUI_PID" || true
@@ -218,6 +245,10 @@ resp = recv()
 tools = resp.get("result", {}).get("tools", [])
 if not any(t.get("name") == "fugit_task_request" for t in tools):
     raise RuntimeError("missing fugit_task_request in MCP tools")
+if not any(t.get("name") == "fugit_task_edit" for t in tools):
+    raise RuntimeError("missing fugit_task_edit in MCP tools")
+if not any(t.get("name") == "fugit_task_remove" for t in tools):
+    raise RuntimeError("missing fugit_task_remove in MCP tools")
 
 send({
     "jsonrpc":"2.0",
@@ -238,6 +269,32 @@ send({
 resp = recv()
 if "result" not in resp:
     raise RuntimeError(f"fugit_task_add MCP call failed: {resp}")
+mcp_task = resp["result"].get("structuredContent", {})
+mcp_task_id = mcp_task.get("task_id")
+if not mcp_task_id:
+    raise RuntimeError(f"fugit_task_add MCP call returned no task id: {resp}")
+
+send({
+    "jsonrpc":"2.0",
+    "id":5,
+    "method":"tools/call",
+    "params":{"name":"fugit_task_edit","arguments":{"task_id":mcp_task_id,"detail":"mcp edited","tags":["mcp","edited"]}}
+})
+resp = recv()
+edited = resp.get("result", {}).get("structuredContent", {})
+if "result" not in resp or edited.get("detail") != "mcp edited":
+    raise RuntimeError(f"fugit_task_edit MCP call failed: {resp}")
+
+send({
+    "jsonrpc":"2.0",
+    "id":6,
+    "method":"tools/call",
+    "params":{"name":"fugit_task_remove","arguments":{"task_id":mcp_task_id}}
+})
+resp = recv()
+removed = resp.get("result", {}).get("structuredContent", {})
+if "result" not in resp or removed.get("task_id") != mcp_task_id:
+    raise RuntimeError(f"fugit_task_remove MCP call failed: {resp}")
 
 proc.terminate()
 proc.wait(timeout=5)

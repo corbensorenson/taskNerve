@@ -31,10 +31,13 @@ Use this skill when any of the following are true:
 4. Add shared tasks to the persistent queue:
 - `fugit --repo-root . task add --title "Implement X" --priority 10 --tag compiler`
 - `fugit --repo-root . task list --ready-only`
-- For bulk backlog migration, import TSV once:
+- Prefer bulk backlog migration through import first:
 - `fugit --repo-root . task import --file /path/to/tasks.tsv`
 - For markdown checklist plans, import directly:
 - `fugit --repo-root . task import --file /path/to/the_final_plan.md --format markdown`
+- Edit or remove tasks when plans change:
+- `fugit --repo-root . task edit --task-id <task_id> --title "Updated X"`
+- `fugit --repo-root . task remove --task-id <task_id>`
 
 5. Request next task (work-stealing by default on stale claims):
 - `fugit --repo-root . task request --agent <agent_id> --claim-ttl-minutes 30 --steal-after-minutes 90`
@@ -46,7 +49,7 @@ Use this skill when any of the following are true:
 7. Mark tasks done or release claim:
 - `fugit --repo-root . task done --task-id <task_id> --agent <agent_id>`
 - `fugit --repo-root . task release --task-id <task_id> --agent <agent_id>`
-- Note: task lifecycle mutations (`add`, `claim`, `done`, `release`) are mirrored into timeline events automatically.
+- Note: task lifecycle mutations (`add`, `edit`, `claim`, `done`, `release`, `remove`) are mirrored into timeline events automatically.
 
 8. Review event history:
 - `fugit --repo-root . log --limit 20`
@@ -70,6 +73,7 @@ Use this skill when any of the following are true:
 - CLI foreground: `fugit --repo-root . task gui`
 - CLI background: `fugit --repo-root . task gui --background`
 - Project-pinned GUI: `fugit --repo-root . task gui --project <project_name>`
+- Built-in board supports create/edit/remove directly from the browser.
 - Timeline explorer: use the branch selector and `load older` in the GUI to scroll project history.
 - MCP launch tool: `fugit_task_gui_launch`
 
@@ -113,6 +117,8 @@ Use this contract to keep task execution deterministic across agents.
 
 2. If no task is returned, create an explicit task instead of silent work:
 - `fugit --repo-root . task add --title "<deliverable>" --priority <n>`
+- If a plan changes, update the existing task instead of leaving drift behind:
+- `fugit --repo-root . task edit --task-id <task_id> --title "<updated deliverable>"`
 
 3. Use dependencies for ordering rather than comments:
 - `fugit --repo-root . task add --title "<child>" --depends-on <task_id>`
@@ -156,6 +162,8 @@ Expose these tools to agents via MCP:
 - `fugit_lock_add`
 - `fugit_lock_list`
 - `fugit_task_add`
+- `fugit_task_edit`
+- `fugit_task_remove`
 - `fugit_task_import`
 - `fugit_task_list`
 - `fugit_task_request`

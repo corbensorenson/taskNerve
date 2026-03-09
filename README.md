@@ -126,14 +126,20 @@ After migration, use fugit for daily coordination (`task`, `checkpoint`, `log`),
 ## Daily Workflow
 
 ```bash
-fugit --repo-root . task add --title "Implement feature X" --priority 10 --tag feature
+fugit --repo-root . task import --file /path/to/tasks.tsv
 fugit --repo-root . task request --agent agent.worker
 fugit --repo-root . checkpoint --summary "implemented feature X" --agent agent.worker --tag feature
 fugit --repo-root . task done --task-id <task_id> --agent agent.worker
 fugit --repo-root . log --limit 20
 ```
 
-Task lifecycle operations (`add`, `claim`, `done`, `release`) are mirrored into timeline events.
+When you are only adding one task, use:
+
+```bash
+fugit --repo-root . task add --title "Implement feature X" --priority 10 --tag feature
+```
+
+Task lifecycle operations (`add`, `edit`, `claim`, `done`, `release`, `remove`) are mirrored into timeline events.
 
 ## Bulk Task Import
 
@@ -176,9 +182,17 @@ fugit --repo-root . task gui --background --project <project_name>
 
 GUI features:
 - Project switcher
-- Task board
+- Optional agent-id field for task mutations
+- Task board with create, edit, and remove controls
 - Timeline explorer (branch selector + paged `load older`)
 - Scrollable history to correlate task completion with timeline events
+
+Task maintenance from CLI:
+
+```bash
+fugit --repo-root . task edit --task-id <task_id> --title "Updated title" --tag compiler
+fugit --repo-root . task remove --task-id <task_id>
+```
 
 ## Core Commands
 
@@ -189,7 +203,7 @@ GUI features:
 - `fugit checkout --event <event_id> --force`
 - `fugit branch list|create|switch`
 - `fugit lock add|list|remove`
-- `fugit task add|import|list|request|claim|done|release|gui`
+- `fugit task add|edit|remove|import|list|request|claim|done|release|gui`
 - `fugit project add|list|use|remove`
 - `fugit backend show|set`
 - `fugit bridge summary|auth|sync-github|pull-github`
@@ -201,7 +215,7 @@ GUI features:
 Key tools include:
 - `fugit_status`, `fugit_checkpoint`, `fugit_log`, `fugit_checkout`
 - `fugit_lock_add`, `fugit_lock_list`
-- `fugit_task_add`, `fugit_task_list`, `fugit_task_request`, `fugit_task_claim`, `fugit_task_done`, `fugit_task_release`, `fugit_task_gui_launch`
+- `fugit_task_add`, `fugit_task_edit`, `fugit_task_remove`, `fugit_task_list`, `fugit_task_request`, `fugit_task_claim`, `fugit_task_done`, `fugit_task_release`, `fugit_task_gui_launch`
 - `fugit_task_import` (supports file/tsv/markdown payload import)
 - `fugit_project_list`, `fugit_project_add`, `fugit_project_use`, `fugit_project_remove`
 - `fugit_gc`

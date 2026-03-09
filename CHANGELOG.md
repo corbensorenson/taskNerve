@@ -9,12 +9,12 @@
 - Added bridge auth wrappers and sync auth preflight.
 - Added pull autostash flow.
 - Added burst performance controls for local and push paths.
-- Added persistent multi-agent task queue with dependency-aware ordering and work stealing (`task add|list|request|claim|done|release` + MCP tools).
-- Added live task-board GUI with CLI launch (`task gui`) and MCP launch tool (`fugit_task_gui_launch`).
+- Added persistent multi-agent task queue with dependency-aware ordering, validated dependencies, edit/remove operations, and work stealing (`task add|edit|remove|import|list|request|claim|done|release` + MCP tools).
+- Added live task-board GUI with CLI launch (`task gui`), browser-side create/edit/remove controls, and MCP launch tool (`fugit_task_gui_launch`).
 - Added multi-project registry (`project add|list|use|remove`) and GUI project switching to keep task streams isolated across repos.
 - Hardened release validation script to run dependency advisory checks with `cargo-audit` when available.
 - Removed project-specific identifiers from README examples to keep docs fingerprint-neutral.
-- Integrated task lifecycle operations with timeline events (`task add|claim|done|release`).
+- Integrated task lifecycle operations with timeline events (`task add|edit|claim|done|release|remove`).
 - Extended task GUI with a per-project timeline explorer (branch selection + paged scrollable history).
 - Added vigorous end-to-end validation script (`scripts/vigorous-e2e.sh`) covering CLI, GUI API, bridge, and MCP flows.
 - Expanded README to turnkey setup paths (agent-assisted + manual), Git-to-fugit migration, and Codex/Claude integration guidance.
