@@ -17302,6 +17302,7 @@ fn task_current_payload(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_peek_open_payload(
     repo_root: &Path,
     state: &TaskState,
@@ -17405,7 +17406,7 @@ fn execute_task_request(
         .collect::<Vec<_>>()
     } else {
         let include_owned_claims =
-            !options.skip_owned && !(has_owned_claims && options.max_new_claims > 0);
+            !(options.skip_owned || has_owned_claims && options.max_new_claims > 0);
         select_task_candidates_for_agent(
             state,
             &options.agent_id,
