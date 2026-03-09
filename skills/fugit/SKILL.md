@@ -20,9 +20,10 @@ Use this skill when any of the following are true:
 
 0. If the installed CLI and skill may have drifted, verify once instead of probing `--help` repeatedly:
 - `fugit --version`
+- `fugit version --json`
 - `fugit skill doctor --json`
 - When built from a git checkout, `fugit --version` should include a build fingerprint such as `0.1.0+a5ce333236d7`; that is the fastest way to tell whether two installed binaries are actually the same build.
-- If `unsupported_command_paths` is non-empty, reinstall fugit from the canonical repo and align the local skill with:
+- If `current_executable_shadowed` is `true` or `unsupported_command_paths` is non-empty, reinstall fugit from the canonical repo and align the local skill with:
 - `fugit skill install-codex --overwrite`
 
 1. Ensure timeline exists:
@@ -43,6 +44,8 @@ Use this skill when any of the following are true:
 - For backlog scans, use native queue search/filtering instead of reading `.fugit/tasks.json` directly:
 - `fugit --repo-root . task search --status open --contains compiler --jsonl --fields task_id,title,priority,tags`
 - `fugit --repo-root . task list --tag semantic --title-contains "compiler" --json`
+- For explicit human-readable queue triage, request a stable render mode:
+- `fugit --repo-root . task list --format table --limit 10`
 - Prefer bulk backlog migration through import first:
 - `fugit --repo-root . task import --file /path/to/tasks.tsv`
 - For markdown checklist plans, import directly:
@@ -86,6 +89,8 @@ Use this skill when any of the following are true:
 
 7. Mark tasks done or release claim:
 - `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --summary "<what finished>"`
+- Prefer the dedicated close-and-continue command when you are staying in the queue loop:
+- `fugit --repo-root . task advance --task-id <task_id> --agent <agent_id> --summary "<what finished>"`
 - To leave a lightweight execution breadcrumb without changing task state:
 - `fugit --repo-root . task progress <task_id> --agent <agent_id> --note "<what changed>"`
 - To attach machine-readable artifact breadcrumbs for handoff/resume:

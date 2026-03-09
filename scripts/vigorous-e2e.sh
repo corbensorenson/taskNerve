@@ -150,6 +150,8 @@ if not version.startswith("fugit 0.1.0"):
 if "+" not in version:
     raise SystemExit(f"[vigorous-e2e] expected build fingerprint in version output: {version}")
 PY
+"$BIN" version --json >"$TMP_ROOT/version-json.json"
+json_assert "$TMP_ROOT/version-json.json" 'payload.get("schema_version") == "fugit.version.v1" and payload.get("version", "").startswith("fugit 0.1.0") and isinstance(payload.get("path_resolution", {}).get("candidates"), list)' "version --json should expose machine-readable build and PATH resolution details"
 "$BIN" --repo-root "$REPO_A" init --branch trunk >/dev/null
 "$BIN" --repo-root "$REPO_A" status --json >"$TMP_ROOT/status.json"
 json_assert "$TMP_ROOT/status.json" 'payload.get("schema_version") == "timeline.status.v1" and payload.get("branch") == "trunk"' "status schema/branch mismatch after init"
@@ -208,6 +210,15 @@ json_assert "$TMP_ROOT/task-a-edit.json" 'payload.get("detail") == "root task" a
 json_assert "$TMP_ROOT/task-a-show.json" 'payload.get("task_id") is not None and payload.get("detail") == "root task"' "task show should expose edited task state"
 "$BIN" --repo-root "$REPO_A" task list --jsonl --fields task_id,title,status --limit 2 >"$TMP_ROOT/task-list.jsonl"
 jsonl_assert "$TMP_ROOT/task-list.jsonl" 'all(set(row.keys()) == {"task_id","title","status"} for row in rows)' "task list --jsonl --fields should emit compact rows"
+"$BIN" --repo-root "$REPO_A" task list --format table --limit 2 >"$TMP_ROOT/task-list-table.txt"
+python3 - "$TMP_ROOT/task-list-table.txt" <<'PY'
+import sys
+lines = [line.rstrip("\n") for line in open(sys.argv[1], "r", encoding="utf-8")]
+if len(lines) < 2:
+    raise SystemExit("[vigorous-e2e] expected task list --format table to emit a header and at least one row")
+if lines[0].split("\t") != ["task_id", "status", "priority", "ready", "claimed_by_agent_id", "title"]:
+    raise SystemExit(f"[vigorous-e2e] unexpected task list header: {lines[0]!r}")
+PY
 "$BIN" --repo-root "$REPO_A" task search --tag root --contains "root task" --json >"$TMP_ROOT/task-search.json"
 json_assert "$TMP_ROOT/task-search.json" 'len(payload) == 1 and payload[0].get("task_id") == "'"$TASK_A"'"' "task search should filter by tags and contains text without reading tasks.json directly"
 "$BIN" --repo-root "$REPO_A" task add --title "task-c" --priority 1 --agent agent.c --json >"$TMP_ROOT/task-c.json"
@@ -326,6 +337,8 @@ if [[ "$AUTO_SYNC_SUBJECT" != timeline\ sync:\ task\ done:* ]]; then
 fi
 "$BIN" --repo-root "$REPO_A" task current --agent agent.runner --json >"$TMP_ROOT/task-current-after-done.json"
 json_assert "$TMP_ROOT/task-current-after-done.json" 'payload.get("task", {}).get("task_id") == "'"$TASK_B"'"' "task done --claim-next should make the next task current immediately"
+"$BIN" --repo-root "$REPO_A" task advance --task-id "$TASK_B" --agent agent.runner --summary "dependency lane complete" --regression "test -f README.txt" --json >"$TMP_ROOT/task-advance.json"
+json_assert "$TMP_ROOT/task-advance.json" 'payload.get("completed_summary") == "dependency lane complete" and payload.get("claim_next", {}).get("requested") is True' "task advance should complete the task and request the next ready task in one command"
 "$BIN" --repo-root "$REPO_A" task show --task-id "$TASK_A" --json >"$TMP_ROOT/task-a-done.json"
 json_assert "$TMP_ROOT/task-a-done.json" 'payload.get("completed_summary") == "root lane complete" and "cargo test" in payload.get("completion_commands", []) and payload.get("progress_count") == 1' "task show should include completion metadata and progress breadcrumbs"
 "$BIN" --repo-root "$REPO_A" check list --json >"$TMP_ROOT/check-list.json"

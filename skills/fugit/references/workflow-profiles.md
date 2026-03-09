@@ -21,8 +21,10 @@ Use when multiple agents should coordinate by pulling from a shared queue.
 
 - `fugit --repo-root . task import --file /path/to/tasks.tsv`
 - `fugit --repo-root . task list --ready-only`
+- `fugit version --json`
 - `fugit skill doctor --json`
 - `fugit --repo-root . task search --status open --contains compiler --jsonl --fields task_id,title,priority,tags`
+- `fugit --repo-root . task list --format table --limit 10`
 - `fugit --repo-root . task start --agent <agent_id> --claim-ttl-minutes 30 --steal-after-minutes 90`
 - `fugit task start --repo-root . --agent <agent_id> --json`
 - `fugit --repo-root . task request --agent <agent_id> --focus compiler --claim-ttl-minutes 30 --steal-after-minutes 90`
@@ -43,6 +45,7 @@ Use when multiple agents should coordinate by pulling from a shared queue.
 - `fugit --repo-root . task approve --all-pending-auto-replenish --agent <agent_id>`
 - `fugit --repo-root . bridge auto-sync show --json`
 - `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --summary "done summary"`
+- `fugit --repo-root . task advance --task-id <task_id> --agent <agent_id> --summary "done summary"`
 - `fugit --repo-root . task progress <task_id> --agent <agent_id> --note "implemented parser wiring"`
 - `fugit --repo-root . task note <task_id> --agent <agent_id> --message "captured handoff notes" --artifact artifacts/report.json`
 - `fugit --repo-root . task heartbeat <task_id> --agent <agent_id> --claim-ttl-minutes 60 --note "reran flaky benchmark"`
@@ -57,7 +60,9 @@ Use when multiple agents should coordinate by pulling from a shared queue.
 Characteristics:
 - dependency-aware ordering via `--depends-on`,
 - one-command CLI/skill drift detection via `skill doctor --json`,
+- machine-readable binary identity and PATH candidate inspection via `version --json`,
 - one-command resume-or-claim flow via `task start`,
+- one-command complete-and-continue flow via `task advance`,
 - lease-based claims with default stale-claim work stealing,
 - default-on date-gate filtering for tasks with `not_before:` tags or date windows in their text,
 - default-on auto-replenish scout tasks when no real work is dispatchable,

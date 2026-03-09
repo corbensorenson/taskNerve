@@ -96,6 +96,7 @@ enum Command {
     Quickstart(QuickstartArgs),
     Doctor(DoctorArgs),
     Skill(SkillArgs),
+    Version(VersionArgs),
     Status(StatusArgs),
     Checkpoint(CheckpointArgs),
     Log(LogArgs),
@@ -166,6 +167,12 @@ struct DoctorArgs {
     json: bool,
     #[arg(long, default_value_t = false)]
     fix: bool,
+}
+
+#[derive(Debug, Parser)]
+struct VersionArgs {
+    #[arg(long, default_value_t = false)]
+    json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -1551,6 +1558,8 @@ struct TaskArgs {
 enum TaskAction {
     #[command(visible_aliases = ["search", "scan"])]
     List {
+        #[arg(long, value_enum)]
+        format: Option<TaskListFormatArg>,
         #[arg(long, default_value_t = false)]
         json: bool,
         #[arg(long, default_value_t = false)]
@@ -1826,6 +1835,37 @@ enum TaskAction {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(visible_aliases = ["complete-next", "done-next"])]
+    Advance {
+        #[arg(long)]
+        task_id: Option<String>,
+        #[arg(value_name = "TASK_ID")]
+        task_id_arg: Option<String>,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long, value_enum, default_value_t = TaskDoneStateArg::Done)]
+        state: TaskDoneStateArg,
+        #[arg(long)]
+        summary: Option<String>,
+        #[arg(long = "note")]
+        notes: Vec<String>,
+        #[arg(long = "artifact")]
+        artifacts: Vec<String>,
+        #[arg(long = "command")]
+        commands: Vec<String>,
+        #[arg(long = "regression")]
+        regressions: Vec<String>,
+        #[arg(long = "benchmark")]
+        benchmarks: Vec<String>,
+        #[arg(long, default_value_t = false)]
+        skip_check_requirement: bool,
+        #[arg(long, default_value_t = false)]
+        next_ignore_date_gates: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     Progress {
         #[arg(long)]
         task_id: Option<String>,
@@ -1926,6 +1966,14 @@ enum TaskStatusArg {
     #[value(alias = "in_progress")]
     Claimed,
     Done,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum TaskListFormatArg {
+    Table,
+    Compact,
+    Json,
+    Jsonl,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -2373,6 +2421,7 @@ fn try_main() -> Result<()> {
         Command::Quickstart(args) => cmd_quickstart(&repo_root, args),
         Command::Doctor(args) => cmd_doctor(&repo_root, args),
         Command::Skill(args) => cmd_skill(args),
+        Command::Version(args) => cmd_version(args),
         Command::Status(args) => cmd_status(&repo_root, args),
         Command::Checkpoint(args) => cmd_checkpoint(&repo_root, args),
         Command::Log(args) => cmd_log(&repo_root, args),
@@ -2697,6 +2746,25 @@ fn cmd_skill(args: SkillArgs) -> Result<()> {
                         .join(", ");
                     println!("- unsupported_command_paths: {}", rendered);
                 }
+                if let Some(first_path_match) = report
+                    .get("cli")
+                    .and_then(|value| value.get("path_resolution"))
+                    .and_then(|value| value.get("first_path_match"))
+                    .and_then(serde_json::Value::as_str)
+                {
+                    println!("- first_path_match: {}", first_path_match);
+                }
+                if report
+                    .get("cli")
+                    .and_then(|value| value.get("path_resolution"))
+                    .and_then(|value| value.get("current_executable_shadowed"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    println!(
+                        "- warning: PATH resolves a different fugit binary than the current executable"
+                    );
+                }
                 if let Some(recommended_fix) = report
                     .get("summary")
                     .and_then(|value| value.get("recommended_fix"))
@@ -2706,6 +2774,16 @@ fn cmd_skill(args: SkillArgs) -> Result<()> {
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn cmd_version(args: VersionArgs) -> Result<()> {
+    let payload = fugit_version_report();
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("{}", payload["version"].as_str().unwrap_or("fugit"));
     }
     Ok(())
 }
@@ -2743,6 +2821,7 @@ fn fugit_skill_bundle(include_skill_body: bool, include_openai_yaml: bool) -> se
                 "fugit_task_start",
                 "fugit_task_claim",
                 "fugit_task_done",
+                "fugit_task_advance",
                 "fugit_task_progress",
                 "fugit_task_note",
                 "fugit_task_reopen",
@@ -2828,6 +2907,7 @@ fn supported_task_command_names() -> &'static [&'static str] {
         "request",
         "claim",
         "done",
+        "advance",
         "progress",
         "note",
         "reopen",
@@ -2904,6 +2984,7 @@ fn supported_cli_command_paths() -> BTreeSet<String> {
         "quickstart",
         "doctor",
         "skill",
+        "version",
         "status",
         "checkpoint",
         "log",
@@ -2947,6 +3028,7 @@ fn extract_skill_command_paths(skill_body: &str) -> BTreeSet<String> {
         "quickstart",
         "doctor",
         "skill",
+        "version",
         "status",
         "checkpoint",
         "log",
@@ -3008,10 +3090,89 @@ fn unsupported_skill_command_paths(skill_body: &str) -> Vec<String> {
         .collect()
 }
 
-fn fugit_skill_doctor_report() -> serde_json::Value {
+#[derive(Debug, Clone, Serialize)]
+struct FugitPathCandidate {
+    path: String,
+    version: Option<String>,
+    is_current_executable: bool,
+    is_first_path_match: bool,
+}
+
+fn detect_fugit_path_candidates() -> Vec<FugitPathCandidate> {
+    let current_exe = std::env::current_exe().ok();
+    let mut seen = BTreeSet::<PathBuf>::new();
+    let mut candidates = Vec::<PathBuf>::new();
+    if let Some(path) = current_exe.as_ref()
+        && seen.insert(path.clone())
+    {
+        candidates.push(path.clone());
+    }
+    if let Some(path_env) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_env) {
+            let candidate = dir.join("fugit");
+            if candidate.is_file() && seen.insert(candidate.clone()) {
+                candidates.push(candidate);
+            }
+        }
+    }
+    let first_path_match = std::env::var_os("PATH").and_then(|path_env| {
+        std::env::split_paths(&path_env)
+            .map(|dir| dir.join("fugit"))
+            .find(|candidate| candidate.is_file())
+    });
+    candidates
+        .into_iter()
+        .map(|path| {
+            let version = ProcessCommand::new(&path)
+                .arg("--version")
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            FugitPathCandidate {
+                path: path.display().to_string(),
+                version,
+                is_current_executable: current_exe.as_ref() == Some(&path),
+                is_first_path_match: first_path_match.as_ref() == Some(&path),
+            }
+        })
+        .collect()
+}
+
+fn fugit_version_report() -> serde_json::Value {
     let current_exe = std::env::current_exe()
         .ok()
         .map(|path| path.display().to_string());
+    let candidates = detect_fugit_path_candidates();
+    let first_path_match = candidates
+        .iter()
+        .find(|candidate| candidate.is_first_path_match)
+        .map(|candidate| candidate.path.clone());
+    let shadowed = current_exe
+        .as_deref()
+        .zip(first_path_match.as_deref())
+        .map(|(current, first)| current != first)
+        .unwrap_or(false);
+    json!({
+        "schema_version": "fugit.version.v1",
+        "generated_at_utc": now_utc(),
+        "version": format!("fugit {}", env!("FUGIT_BUILD_VERSION")),
+        "package_version": env!("CARGO_PKG_VERSION"),
+        "git_sha": env!("FUGIT_BUILD_GIT_SHA"),
+        "git_dirty": env!("FUGIT_BUILD_GIT_DIRTY") == "true",
+        "executable": current_exe,
+        "path_resolution": {
+            "first_path_match": first_path_match,
+            "current_executable_shadowed": shadowed,
+            "candidates": candidates
+        }
+    })
+}
+
+fn fugit_skill_doctor_report() -> serde_json::Value {
+    let version_report = fugit_version_report();
     let codex_home = resolve_codex_home().ok();
     let skill_root = codex_home
         .as_ref()
@@ -3134,6 +3295,14 @@ fn fugit_skill_doctor_report() -> serde_json::Value {
             "Reinstall fugit from the canonical repo, then run `fugit skill install-codex --overwrite` and refresh your shell PATH/hash."
                 .to_string(),
         )
+    } else if version_report["path_resolution"]["current_executable_shadowed"]
+        .as_bool()
+        .unwrap_or(false)
+    {
+        Some(
+            "PATH resolves a different fugit binary than the one currently running; reinstall from the canonical repo, then refresh shell PATH/hash so agents do not hit a stale build."
+                .to_string(),
+        )
     } else if installed_skill.is_none() || installed_openai_yaml.is_none() {
         Some(
             "If this machine uses Codex locally, run `fugit skill install-codex --overwrite` to align the installed skill with the running CLI."
@@ -3157,11 +3326,12 @@ fn fugit_skill_doctor_report() -> serde_json::Value {
         "ok": ok,
         "checks": checks,
         "cli": {
-            "version": env!("FUGIT_BUILD_VERSION"),
-            "package_version": env!("CARGO_PKG_VERSION"),
-            "git_sha": env!("FUGIT_BUILD_GIT_SHA"),
-            "git_dirty": env!("FUGIT_BUILD_GIT_DIRTY") == "true",
-            "executable": current_exe,
+            "version": version_report["version"],
+            "package_version": version_report["package_version"],
+            "git_sha": version_report["git_sha"],
+            "git_dirty": version_report["git_dirty"],
+            "executable": version_report["executable"],
+            "path_resolution": version_report["path_resolution"],
             "supported_task_commands": supported_task_command_names(),
             "supported_command_paths": supported_cli_command_paths().into_iter().collect::<Vec<_>>()
         },
@@ -6452,12 +6622,53 @@ impl TaskDispatchKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskListRenderMode {
+    Table,
+    Compact,
+    Json,
+    Jsonl,
+}
+
+fn resolve_task_list_render_mode(
+    format: Option<TaskListFormatArg>,
+    json: bool,
+    jsonl: bool,
+    has_fields: bool,
+) -> Result<TaskListRenderMode> {
+    let explicit = format.map(|value| match value {
+        TaskListFormatArg::Table => TaskListRenderMode::Table,
+        TaskListFormatArg::Compact => TaskListRenderMode::Compact,
+        TaskListFormatArg::Json => TaskListRenderMode::Json,
+        TaskListFormatArg::Jsonl => TaskListRenderMode::Jsonl,
+    });
+    if let Some(mode) = explicit {
+        if json && mode != TaskListRenderMode::Json {
+            bail!("task list --json conflicts with --format");
+        }
+        if jsonl && mode != TaskListRenderMode::Jsonl {
+            bail!("task list --jsonl conflicts with --format");
+        }
+        return Ok(mode);
+    }
+    Ok(if json {
+        TaskListRenderMode::Json
+    } else if jsonl {
+        TaskListRenderMode::Jsonl
+    } else if has_fields {
+        TaskListRenderMode::Table
+    } else {
+        TaskListRenderMode::Compact
+    })
+}
+
 fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
     let mut state = load_task_state(repo_root)?;
     let state_changed = prune_expired_task_claims(&mut state)?;
 
     match args.action {
         TaskAction::List {
+            format,
             json,
             jsonl,
             all,
@@ -6474,13 +6685,15 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             limit,
         } => {
             let _ = all;
-            if json && jsonl {
+            if json && jsonl && format.is_none() {
                 bail!("task list accepts only one of --json or --jsonl");
             }
             if state_changed {
                 state.updated_at_utc = now_utc();
                 write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
             }
+            let render_mode =
+                resolve_task_list_render_mode(format, json, jsonl, !fields.is_empty())?;
             let status_map = task_status_map(&state);
             let mine_agent_id = if mine {
                 Some(normalize_agent_id(agent.clone()))
@@ -6534,16 +6747,28 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 }
             }
 
-            if json {
+            if render_mode == TaskListRenderMode::Json {
                 println!("{}", serde_json::to_string_pretty(&rows)?);
-            } else if jsonl {
+            } else if render_mode == TaskListRenderMode::Jsonl {
                 for row in rows {
                     println!("{}", serde_json::to_string(&row)?);
                 }
-            } else if !fields.is_empty() {
-                println!("{}", fields.join("\t"));
+            } else if render_mode == TaskListRenderMode::Table {
+                let header_fields = if fields.is_empty() {
+                    vec![
+                        "task_id".to_string(),
+                        "status".to_string(),
+                        "priority".to_string(),
+                        "ready".to_string(),
+                        "claimed_by_agent_id".to_string(),
+                        "title".to_string(),
+                    ]
+                } else {
+                    fields.clone()
+                };
+                println!("{}", header_fields.join("\t"));
                 for row in rows {
-                    let values = fields
+                    let values = header_fields
                         .iter()
                         .map(|field| {
                             row.get(field.trim())
@@ -7705,6 +7930,45 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     next_task_id
                 );
             }
+        }
+        TaskAction::Advance {
+            task_id,
+            task_id_arg,
+            agent,
+            reason,
+            state,
+            summary,
+            notes,
+            artifacts,
+            commands,
+            regressions,
+            benchmarks,
+            skip_check_requirement,
+            next_ignore_date_gates,
+            json,
+        } => {
+            return cmd_task(
+                repo_root,
+                TaskArgs {
+                    action: TaskAction::Done {
+                        task_id,
+                        task_id_arg,
+                        agent,
+                        reason,
+                        state,
+                        summary,
+                        notes,
+                        artifacts,
+                        commands,
+                        regressions,
+                        benchmarks,
+                        skip_check_requirement,
+                        claim_next: true,
+                        next_ignore_date_gates,
+                        json,
+                    },
+                },
+            );
         }
         TaskAction::Progress {
             task_id,
@@ -11618,6 +11882,28 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
+            "name": "fugit_task_advance",
+            "description": "Mark a task as completed and immediately claim the next ready task for the same agent.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["task_id"],
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "agent": { "type": "string" },
+                    "reason": { "type": "string" },
+                    "state": { "type": "string", "enum": ["done", "blocked"] },
+                    "summary": { "type": "string" },
+                    "notes": { "type": "array", "items": { "type": "string" } },
+                    "artifacts": { "type": "array", "items": { "type": "string" } },
+                    "commands": { "type": "array", "items": { "type": "string" } },
+                    "regressions": { "type": "array", "items": { "type": "string" } },
+                    "benchmarks": { "type": "array", "items": { "type": "string" } },
+                    "skip_check_requirement": { "type": "boolean" },
+                    "next_ignore_date_gates": { "type": "boolean" }
+                }
+            }
+        }),
+        json!({
             "name": "fugit_task_progress",
             "description": "Append an execution progress note to a task without changing status.",
             "inputSchema": {
@@ -12700,6 +12986,93 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             if let Some(limit) = args.get("limit").and_then(serde_json::Value::as_u64) {
                 cli_args.push("--limit".to_string());
                 cli_args.push(limit.to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_task_advance" => {
+            let mut cli_args = vec![
+                "task".to_string(),
+                "advance".to_string(),
+                "--json".to_string(),
+            ];
+            let task_id = args
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_task_advance requires task_id"))?;
+            cli_args.push("--task-id".to_string());
+            cli_args.push(task_id.to_string());
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            if let Some(reason) = args.get("reason").and_then(serde_json::Value::as_str) {
+                cli_args.push("--reason".to_string());
+                cli_args.push(reason.to_string());
+            }
+            if let Some(state) = args.get("state").and_then(serde_json::Value::as_str) {
+                cli_args.push("--state".to_string());
+                cli_args.push(state.to_string());
+            }
+            if let Some(summary) = args.get("summary").and_then(serde_json::Value::as_str) {
+                cli_args.push("--summary".to_string());
+                cli_args.push(summary.to_string());
+            }
+            if let Some(notes) = args.get("notes").and_then(serde_json::Value::as_array) {
+                for note in notes {
+                    if let Some(value) = note.as_str() {
+                        cli_args.push("--note".to_string());
+                        cli_args.push(value.to_string());
+                    }
+                }
+            }
+            if let Some(artifacts) = args.get("artifacts").and_then(serde_json::Value::as_array) {
+                for artifact in artifacts {
+                    if let Some(value) = artifact.as_str() {
+                        cli_args.push("--artifact".to_string());
+                        cli_args.push(value.to_string());
+                    }
+                }
+            }
+            if let Some(commands) = args.get("commands").and_then(serde_json::Value::as_array) {
+                for command in commands {
+                    if let Some(value) = command.as_str() {
+                        cli_args.push("--command".to_string());
+                        cli_args.push(value.to_string());
+                    }
+                }
+            }
+            if let Some(regressions) = args
+                .get("regressions")
+                .and_then(serde_json::Value::as_array)
+            {
+                for regression in regressions {
+                    if let Some(value) = regression.as_str() {
+                        cli_args.push("--regression".to_string());
+                        cli_args.push(value.to_string());
+                    }
+                }
+            }
+            if let Some(benchmarks) = args.get("benchmarks").and_then(serde_json::Value::as_array) {
+                for benchmark in benchmarks {
+                    if let Some(value) = benchmark.as_str() {
+                        cli_args.push("--benchmark".to_string());
+                        cli_args.push(value.to_string());
+                    }
+                }
+            }
+            if args
+                .get("skip_check_requirement")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--skip-check-requirement".to_string());
+            }
+            if args
+                .get("next_ignore_date_gates")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--next-ignore-date-gates".to_string());
             }
             run_self_cli_json(repo_root, &cli_args)?
         }

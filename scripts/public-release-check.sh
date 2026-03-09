@@ -27,7 +27,10 @@ CODEX_HOME="$(mktemp -d /tmp/fugit-alpha-release-codex-XXXXXX)" \
 HOME="$TMP_HOME" \
   bash ./install.sh --install-dir "$TMP_BIN" --no-path-update --skip-rust-install --with-skill --overwrite-skill
 "$TMP_BIN/fugit" --help >/dev/null
+"$TMP_BIN/fugit" version --json >/dev/null
 "$TMP_BIN/fugit" skill doctor >/dev/null
+bash -n ./scripts/auto-install-dev.sh
+bash -n ./scripts/install-dev-hooks.sh
 
 echo "[release-check] identifier scan"
 if rg -n --hidden -S "/Users/" -g '!target' -g '!.fugit' . | grep -v "/Users/Shared/" >/dev/null; then

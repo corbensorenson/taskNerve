@@ -260,6 +260,21 @@ if [[ -n "$INSTALLED_VERSION" ]]; then
   echo "[installer] installed version: $INSTALLED_VERSION"
 fi
 RESOLVED_BIN="$(command -v "$BIN_NAME" || true)"
+if command -v which >/dev/null 2>&1; then
+  PATH_MATCHES="$(which -a "$BIN_NAME" 2>/dev/null | awk '!seen[$0]++')"
+  if [[ -n "$PATH_MATCHES" ]]; then
+    echo "[installer] PATH matches:"
+    while IFS= read -r match; do
+      [[ -z "$match" ]] && continue
+      MATCH_VERSION="$("$match" --version 2>/dev/null || true)"
+      if [[ -n "$MATCH_VERSION" ]]; then
+        echo "  - $match ($MATCH_VERSION)"
+      else
+        echo "  - $match"
+      fi
+    done <<<"$PATH_MATCHES"
+  fi
+fi
 if [[ -n "$RESOLVED_BIN" && "$RESOLVED_BIN" != "$INSTALL_DIR/$BIN_NAME" ]]; then
   echo "[installer] warning: PATH currently resolves $BIN_NAME to: $RESOLVED_BIN"
   echo "[installer] expected active binary: $INSTALL_DIR/$BIN_NAME"

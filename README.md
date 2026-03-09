@@ -81,6 +81,7 @@ Unix installer behavior:
 
 ```bash
 fugit --version
+fugit version --json
 fugit --help
 fugit skill doctor
 fugit skill doctor --json
@@ -88,7 +89,9 @@ fugit skill doctor --json
 
 `fugit --version` now includes a build fingerprint when fugit is built from a git checkout, for example `fugit 0.1.0+a5ce333236d7`. That makes it obvious when two installed binaries are not the same build even if the package version has not changed.
 
-`fugit skill doctor --json` now reports whether the installed Codex skill matches the running CLI and whether the skill references command paths this binary does not support. If `unsupported_command_paths` is non-empty or the installed skill does not match the embedded bundle, reinstall from this repo, run `fugit skill install-codex --overwrite`, then `hash -r` or open a new shell if the old binary is still cached.
+`fugit version --json` exposes a stable machine-readable envelope with the build fingerprint, git sha, current executable path, and every `fugit` binary currently visible on `PATH`.
+
+`fugit skill doctor --json` now reports whether the installed Codex skill matches the running CLI, whether the skill references command paths this binary does not support, and whether `PATH` resolves a different `fugit` binary than the current executable. If `unsupported_command_paths` is non-empty, `current_executable_shadowed` is `true`, or the installed skill does not match the embedded bundle, reinstall from this repo, run `fugit skill install-codex --overwrite`, then `hash -r` or open a new shell if the old binary is still cached.
 
 ### 4. Agent Skill Setup
 
@@ -133,6 +136,7 @@ After migration, use fugit for daily coordination (`task`, `checkpoint`, `log`),
 fugit --repo-root . task import --file /path/to/tasks.tsv
 fugit --repo-root . task sync --plan /path/to/the_final_plan.md
 fugit --repo-root . task search --status open --contains compiler --jsonl --fields task_id,title,priority,tags
+fugit --repo-root . task list --format table --limit 10
 fugit --repo-root . task start --agent agent.worker
 fugit task start --repo-root . --agent agent.worker --focus compiler --peek-open 3 --json
 fugit --repo-root . task start --agent agent.worker --task-id <task_id>
@@ -140,6 +144,7 @@ fugit --repo-root . task progress --task-id <task_id> --agent agent.worker --not
 fugit --repo-root . task note --task-id <task_id> --agent agent.worker --message "captured benchmark delta" --artifact artifacts/report.json
 fugit --repo-root . checkpoint --summary "implemented feature X" --agent agent.worker --tag feature
 fugit --repo-root . task done --task-id <task_id> --agent agent.worker --summary "validated feature X" --command "cargo test" --claim-next
+fugit --repo-root . task advance --task-id <task_id> --agent agent.worker --summary "validated feature X" --command "cargo test"
 fugit --repo-root . log --limit 20
 ```
 
@@ -150,6 +155,10 @@ fugit --repo-root . task add --title "Implement feature X" --priority 10 --tag f
 ```
 
 `task start` is the normal agent entrypoint: it resumes the agent's current claim if one exists, otherwise it claims the next best task. Use `task request` when you want preview mode (`--no-claim`, `--max`), explicit scheduling diagnostics, or to bypass your current claim with `--skip-owned`.
+
+`task advance` is the tight completion loop: it is equivalent to `task done --claim-next`, but easier for agents to discover from `--help` and easier to standardize in shared skills.
+
+`task list --format table|compact|json|jsonl` gives an explicit render mode so agents do not need to infer output shape from a mix of flags.
 
 For backlog shaping, prefer `task list` / `task search` filters such as `--tag`, `--focus`, `--contains`, and `--title-contains` over reading `.fugit/tasks.json` directly.
 
@@ -231,6 +240,22 @@ fugit --repo-root . advisor workflow sync-policy --json
 ```
 
 The same workflow metadata is exposed in `advisor show --json`, advisor run reports, and the browser GUI so operators can see whether advisor automation is running from repo defaults or fallback prompts.
+
+## Developer Auto-Refresh
+
+If you develop fugit itself on a machine and want the installed `fugit` binary plus bundled skill to stay fresh automatically as the repo changes, enable the tracked git hooks:
+
+```bash
+bash ./scripts/install-dev-hooks.sh
+```
+
+That sets `core.hooksPath` to the repo's `githooks/` directory. The hooks run a cheap hash check and then refresh the local install after relevant fugit changes on `post-commit`, `post-checkout`, `post-merge`, `post-rewrite`, and `pre-push`.
+
+By default the refresh is best-effort and does not block the triggering git action if the reinstall fails. If you want pushes/checkouts to fail hard when the local install cannot be refreshed, set:
+
+```bash
+export FUGIT_DEV_AUTO_INSTALL_STRICT=1
+```
 
 ## Privacy
 
