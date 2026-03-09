@@ -27,7 +27,7 @@ fn main() {
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false);
 
-    let build_version = match git_sha {
+    let build_version = match git_sha.as_deref() {
         Some(sha) if git_dirty => format!("{pkg_version}+{sha}.dirty"),
         Some(sha) => format!("{pkg_version}+{sha}"),
         None => pkg_version.clone(),
