@@ -3875,14 +3875,15 @@ fn maybe_run_auto_update_maintenance() {
         return;
     }
     let _ = write_update_state(&state);
-    if state.update_available && state.policy.auto_apply_enabled {
-        if let Err(err) = apply_update(&mut state, false) {
-            state.last_apply_status = Some("error".to_string());
-            state.last_apply_error = Some(err.to_string());
-            state.status = "apply_failed".to_string();
-            state.updated_at_utc = now_utc();
-            let _ = write_update_state(&state);
-        }
+    if state.update_available
+        && state.policy.auto_apply_enabled
+        && let Err(err) = apply_update(&mut state, false)
+    {
+        state.last_apply_status = Some("error".to_string());
+        state.last_apply_error = Some(err.to_string());
+        state.status = "apply_failed".to_string();
+        state.updated_at_utc = now_utc();
+        let _ = write_update_state(&state);
     }
 }
 
