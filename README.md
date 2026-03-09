@@ -86,6 +86,8 @@ fugit skill doctor
 fugit skill doctor --json
 ```
 
+`fugit --version` now includes a build fingerprint when fugit is built from a git checkout, for example `fugit 0.1.0+a5ce333236d7`. That makes it obvious when two installed binaries are not the same build even if the package version has not changed.
+
 `fugit skill doctor --json` now reports whether the installed Codex skill matches the running CLI and whether the skill references command paths this binary does not support. If `unsupported_command_paths` is non-empty or the installed skill does not match the embedded bundle, reinstall from this repo, run `fugit skill install-codex --overwrite`, then `hash -r` or open a new shell if the old binary is still cached.
 
 ### 4. Agent Skill Setup

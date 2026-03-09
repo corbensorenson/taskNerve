@@ -81,7 +81,7 @@ const IGNORE_ROOT_ENTRIES: &[&str] = &[
 
 #[derive(Debug, Parser)]
 #[command(name = "fugit")]
-#[command(version = env!("CARGO_PKG_VERSION"))]
+#[command(version = env!("FUGIT_BUILD_VERSION"))]
 #[command(about = "Timeline-first versioning with GitHub bridge for multi-agent work")]
 struct Cli {
     #[arg(long, global = true, default_value = ".")]
@@ -3157,7 +3157,10 @@ fn fugit_skill_doctor_report() -> serde_json::Value {
         "ok": ok,
         "checks": checks,
         "cli": {
-            "version": env!("CARGO_PKG_VERSION"),
+            "version": env!("FUGIT_BUILD_VERSION"),
+            "package_version": env!("CARGO_PKG_VERSION"),
+            "git_sha": env!("FUGIT_BUILD_GIT_SHA"),
+            "git_dirty": env!("FUGIT_BUILD_GIT_DIRTY") == "true",
             "executable": current_exe,
             "supported_task_commands": supported_task_command_names(),
             "supported_command_paths": supported_cli_command_paths().into_iter().collect::<Vec<_>>()

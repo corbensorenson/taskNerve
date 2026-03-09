@@ -141,7 +141,15 @@ git -C "$REPO_C" add README.txt
 git -C "$REPO_C" commit -m "seed repo-c" >/dev/null
 
 echo "[vigorous-e2e] init/status/backend"
-"$BIN" --version >/dev/null
+"$BIN" --version >"$TMP_ROOT/version.txt"
+python3 - "$TMP_ROOT/version.txt" <<'PY'
+import sys
+version = open(sys.argv[1], "r", encoding="utf-8").read().strip()
+if not version.startswith("fugit 0.1.0"):
+    raise SystemExit(f"[vigorous-e2e] unexpected version output: {version}")
+if "+" not in version:
+    raise SystemExit(f"[vigorous-e2e] expected build fingerprint in version output: {version}")
+PY
 "$BIN" --repo-root "$REPO_A" init --branch trunk >/dev/null
 "$BIN" --repo-root "$REPO_A" status --json >"$TMP_ROOT/status.json"
 json_assert "$TMP_ROOT/status.json" 'payload.get("schema_version") == "timeline.status.v1" and payload.get("branch") == "trunk"' "status schema/branch mismatch after init"

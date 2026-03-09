@@ -19,7 +19,9 @@ Use this skill when any of the following are true:
 ## Workflow
 
 0. If the installed CLI and skill may have drifted, verify once instead of probing `--help` repeatedly:
+- `fugit --version`
 - `fugit skill doctor --json`
+- When built from a git checkout, `fugit --version` should include a build fingerprint such as `0.1.0+a5ce333236d7`; that is the fastest way to tell whether two installed binaries are actually the same build.
 - If `unsupported_command_paths` is non-empty, reinstall fugit from the canonical repo and align the local skill with:
 - `fugit skill install-codex --overwrite`
 
