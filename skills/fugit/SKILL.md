@@ -60,6 +60,11 @@ Use this skill when any of the following are true:
 
 7. Mark tasks done or release claim:
 - `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --summary "<what finished>"`
+- By default this also queues a background bridge sync so the completed-task note is pushed without blocking the agent on network I/O.
+- Inspect that worker with:
+- `fugit --repo-root . bridge auto-sync show --json`
+- Tune or disable it with:
+- `fugit --repo-root . bridge auto-sync set --enabled false`
 - Reopen only when work is intentionally back on the queue:
 - `fugit --repo-root . task reopen --task-id <task_id> --agent <agent_id>`
 - `fugit --repo-root . task release --task-id <task_id> --agent <agent_id>`
@@ -88,6 +93,8 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . bridge auth status`
 - `fugit --repo-root . bridge auth login --token "$FUGIT_GIT_TOKEN" --helper <helper>`
 - `fugit --repo-root . bridge sync-github --remote origin --branch <branch>`
+- Manual detached push is also available:
+- `fugit --repo-root . bridge sync-github --background --note "manual backup sweep"`
 
 11. Pull safely when local edits exist:
 - `fugit --repo-root . bridge pull-github --remote origin --branch <branch> --autostash`

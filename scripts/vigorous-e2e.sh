@@ -15,7 +15,7 @@ if [[ ! -x "$BIN" ]]; then
 fi
 
 TMP_ROOT="$(mktemp -d /tmp/fugit-vigorous-e2e-XXXXXX)"
-trap 'rm -rf "$TMP_ROOT"' EXIT
+trap 'rm -rf "$TMP_ROOT" >/dev/null 2>&1 || true' EXIT
 
 export FUGIT_HOME="$TMP_ROOT/fugit-home"
 export CODEX_HOME="$TMP_ROOT/codex-home"
@@ -60,6 +60,31 @@ ok = eval(expr, {"rows": rows})
 if not ok:
     raise SystemExit(f"[vigorous-e2e] assertion failed: {message}\nexpr={expr}\nrows={rows}")
 PY
+}
+
+wait_for_auto_sync() {
+  local repo_root="$1"
+  local json_file="$TMP_ROOT/auto-sync-status.json"
+  for _ in $(seq 1 80); do
+    "$BIN" --repo-root "$repo_root" bridge auto-sync show --json >"$json_file"
+    if python3 - "$json_file" <<'PY'
+import json, sys
+payload = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+status = payload.get("status")
+pending = payload.get("pending_trigger")
+finished = payload.get("last_finished_at_utc")
+if status in {"success", "noop", "committed_local"} and not pending and finished:
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+    then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "[vigorous-e2e] auto sync did not settle in time" >&2
+  cat "$json_file" >&2
+  exit 1
 }
 
 echo "[vigorous-e2e] preparing repositories"
@@ -146,7 +171,16 @@ json_assert "$TMP_ROOT/task-in-progress.json" 'any(row.get("task_id") == "'"$TAS
 "$BIN" --repo-root "$REPO_A" task request --agent agent.runner --skip-owned --json >"$TMP_ROOT/task-request-skip-owned.json"
 json_assert "$TMP_ROOT/task-request-skip-owned.json" 'payload.get("dispatch_kind") == "open" and payload.get("task",{}).get("task_id") == "'"$TASK_C"'" and payload.get("skip_owned") is True' "task request --skip-owned should bypass the agent's existing claim"
 "$BIN" --repo-root "$REPO_A" task release --task-id "$TASK_C" --agent agent.runner >/dev/null
-"$BIN" --repo-root "$REPO_A" task done --task-id "$TASK_A" --agent agent.runner --summary "root lane complete" --artifact "$TMP_ROOT/task-a-edit.json" --command "cargo test" >/dev/null
+"$BIN" --repo-root "$REPO_A" task done --task-id "$TASK_A" --agent agent.runner --summary "root lane complete" --artifact "$TMP_ROOT/task-a-edit.json" --command "cargo test" --json >"$TMP_ROOT/task-done.json"
+json_assert "$TMP_ROOT/task-done.json" 'payload.get("completed_summary") == "root lane complete" and payload.get("auto_bridge_sync", {}).get("status") is not None' "task done should include completion metadata and auto bridge sync status"
+wait_for_auto_sync "$REPO_A"
+"$BIN" --repo-root "$REPO_A" bridge auto-sync show --json >"$TMP_ROOT/auto-sync-after-task-done.json"
+json_assert "$TMP_ROOT/auto-sync-after-task-done.json" 'payload.get("status") in {"success","committed_local","noop"} and "task done:" in (payload.get("last_note") or "") and payload.get("last_trigger") == "task_done"' "task done should queue bridge auto-sync with task note"
+AUTO_SYNC_SUBJECT="$(git --git-dir "$REMOTE_BARE" log --format=%s -1 trunk)"
+if [[ "$AUTO_SYNC_SUBJECT" != timeline\ sync:\ task\ done:* ]]; then
+  echo "[vigorous-e2e] unexpected auto-sync subject: $AUTO_SYNC_SUBJECT" >&2
+  exit 1
+fi
 "$BIN" --repo-root "$REPO_A" task request --agent agent.runner --json >"$TMP_ROOT/task-request-2.json"
 json_assert "$TMP_ROOT/task-request-2.json" 'payload.get("assigned") is True' "second task request should assign dependent task after completion"
 "$BIN" --repo-root "$REPO_A" task show --task-id "$TASK_A" --json >"$TMP_ROOT/task-a-done.json"

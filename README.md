@@ -145,6 +145,8 @@ Task lifecycle operations (`add`, `edit`, `claim`, `done`, `reopen`, `release`, 
 
 By default, `task request` also auto-seeds one queue-scout task per known agent when no real work is dispatchable. Use `task policy` to turn this off or require explicit approval before those scout tasks can be claimed.
 
+By default, `task done` also queues a background `bridge sync-github` run. The bridge commit subject includes the completed task note, and `fugit bridge auto-sync show` lets agents verify that backup is healthy without blocking task completion on network I/O.
+
 ## Bulk Task Import
 
 Use this when migrating large plan backlogs into fugit without fragile shell glue.
@@ -209,6 +211,9 @@ fugit --repo-root . task remove --task-id <task_id>
 fugit --repo-root . task approve --all-pending-auto-replenish --agent reviewer
 fugit --repo-root . task policy show --json
 fugit --repo-root . task policy set --auto-replenish-confirmation true --replenish-agent agent.alpha --replenish-agent agent.beta --agent reviewer
+fugit --repo-root . bridge auto-sync show --json
+fugit --repo-root . bridge auto-sync set --enabled true --on-task-done true --event-count 12
+fugit --repo-root . bridge sync-github --background --note "manual backup sweep"
 fugit --repo-root . task sync --plan the_final_plan.md --json
 fugit --repo-root . task request --agent agent.worker --no-claim --max 3 --json
 fugit --repo-root . task request --agent agent.worker --skip-owned --json
@@ -237,7 +242,7 @@ fugit --repo-root . bridge sync-github --no-push --repair-journal
 - `fugit task add|show|current|edit|remove|approve|policy|sync|import|list|request|claim|done|reopen|release|gui`
 - `fugit project add|list|use|remove`
 - `fugit backend show|set`
-- `fugit bridge summary|auth|sync-github|pull-github`
+- `fugit bridge summary|auth|auto-sync|sync-github|pull-github`
 - `fugit gc --dry-run --json`
 - `fugit mcp serve`
 

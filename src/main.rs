@@ -30,10 +30,13 @@ const SCHEMA_LOCKS: &str = "timeline.locks.v1";
 const SCHEMA_TASKS: &str = "timeline.tasks.v1";
 const SCHEMA_PROJECTS: &str = "fugit.projects.v1";
 const SCHEMA_BRIDGE_AUTH: &str = "timeline.bridge_auth.v1";
+const SCHEMA_BRIDGE_AUTO_SYNC: &str = "timeline.bridge_auto_sync.v1";
+const SCHEMA_BRIDGE_AUTO_SYNC_LOCK: &str = "timeline.bridge_auto_sync_lock.v1";
 const BACKEND_MODE_GIT_BRIDGE: &str = "git_bridge";
 const BACKEND_MODE_FUGIT_CLOUD: &str = "fugit_cloud";
 const AUTO_REPLENISH_SOURCE_PLAN: &str = ".fugit:auto_replenish";
 const SYSTEM_AGENT_ID: &str = "fugit.system";
+const AUTO_BRIDGE_SYNC_STALE_MINUTES: i64 = 30;
 const TASK_GUI_MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const FUGIT_SKILL_ID: &str = "fugit";
 const FUGIT_SKILL_MD: &str = include_str!("../skills/fugit/SKILL.md");
@@ -265,6 +268,10 @@ enum BridgeAction {
         markdown: bool,
     },
     Auth(BridgeAuthArgs),
+    AutoSync {
+        #[command(subcommand)]
+        action: BridgeAutoSyncAction,
+    },
     SyncGithub {
         #[arg(long)]
         remote: Option<String>,
@@ -280,6 +287,14 @@ enum BridgeAction {
         burst_push: bool,
         #[arg(long, default_value_t = false)]
         repair_journal: bool,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long, default_value_t = false)]
+        background: bool,
+        #[arg(long, hide = true, default_value_t = false)]
+        background_worker: bool,
+        #[arg(long, hide = true)]
+        trigger: Option<String>,
     },
     PullGithub {
         #[arg(long)]
@@ -332,6 +347,26 @@ enum BridgeAuthAction {
         host: Option<String>,
         #[arg(long)]
         username: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum BridgeAutoSyncAction {
+    Show {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Set {
+        #[arg(long)]
+        enabled: Option<bool>,
+        #[arg(long)]
+        on_task_done: Option<bool>,
+        #[arg(long)]
+        event_count: Option<usize>,
+        #[arg(long)]
+        no_push: Option<bool>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
 }
 
@@ -978,6 +1013,14 @@ struct TimelineConfig {
     storage_namespace: Option<String>,
     #[serde(default)]
     billing_account_id: Option<String>,
+    #[serde(default = "default_auto_bridge_sync_enabled")]
+    auto_bridge_sync_enabled: bool,
+    #[serde(default = "default_auto_bridge_sync_on_task_done")]
+    auto_bridge_sync_on_task_done: bool,
+    #[serde(default = "default_auto_bridge_sync_event_count")]
+    auto_bridge_sync_event_count: usize,
+    #[serde(default = "default_auto_bridge_sync_no_push")]
+    auto_bridge_sync_no_push: bool,
     #[serde(default = "default_auto_replenish_enabled")]
     auto_replenish_enabled: bool,
     #[serde(default = "default_auto_replenish_require_confirmation")]
@@ -1059,6 +1102,48 @@ struct BridgeAuthState {
     host: String,
     username: String,
     helper: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BridgeAutoSyncState {
+    schema_version: String,
+    updated_at_utc: String,
+    status: String,
+    enabled: bool,
+    on_task_done: bool,
+    event_count: usize,
+    no_push: bool,
+    last_requested_at_utc: Option<String>,
+    last_started_at_utc: Option<String>,
+    last_finished_at_utc: Option<String>,
+    last_note: Option<String>,
+    last_trigger: Option<String>,
+    last_remote: Option<String>,
+    last_branch: Option<String>,
+    last_result: Option<String>,
+    last_error: Option<String>,
+    pending_trigger: bool,
+    pending_note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BridgeAutoSyncLock {
+    schema_version: String,
+    lock_id: String,
+    created_at_utc: String,
+}
+
+#[derive(Debug, Clone)]
+struct BridgeSyncGithubOptions {
+    remote: String,
+    branch: String,
+    event_count: usize,
+    no_push: bool,
+    pack_threads: Option<usize>,
+    burst_push: bool,
+    repair_journal: bool,
+    note: Option<String>,
+    trigger: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -2212,6 +2297,78 @@ fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
             ensure_git_repo(repo_root)?;
             cmd_bridge_auth(repo_root, &config, auth_args)?;
         }
+        BridgeAction::AutoSync { action } => match action {
+            BridgeAutoSyncAction::Show { json } => {
+                let state = load_bridge_auto_sync_state(repo_root, &config)?;
+                let payload = bridge_auto_sync_payload(&config, &state);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    println!(
+                        "[fugit-bridge-auto-sync] enabled={} on_task_done={} status={} pending={} remote={} branch={}",
+                        payload["enabled"].as_bool().unwrap_or(true),
+                        payload["on_task_done"].as_bool().unwrap_or(true),
+                        payload["status"].as_str().unwrap_or("unknown"),
+                        payload["pending_trigger"].as_bool().unwrap_or(false),
+                        config.default_bridge_remote,
+                        config.default_bridge_branch
+                    );
+                }
+            }
+            BridgeAutoSyncAction::Set {
+                enabled,
+                on_task_done,
+                event_count,
+                no_push,
+                json,
+            } => {
+                let mut next_config = config.clone();
+                let mut changed = false;
+                if let Some(enabled) = enabled
+                    && next_config.auto_bridge_sync_enabled != enabled
+                {
+                    next_config.auto_bridge_sync_enabled = enabled;
+                    changed = true;
+                }
+                if let Some(on_task_done) = on_task_done
+                    && next_config.auto_bridge_sync_on_task_done != on_task_done
+                {
+                    next_config.auto_bridge_sync_on_task_done = on_task_done;
+                    changed = true;
+                }
+                if let Some(event_count) = event_count
+                    && next_config.auto_bridge_sync_event_count != event_count.max(1)
+                {
+                    next_config.auto_bridge_sync_event_count = event_count.max(1);
+                    changed = true;
+                }
+                if let Some(no_push) = no_push
+                    && next_config.auto_bridge_sync_no_push != no_push
+                {
+                    next_config.auto_bridge_sync_no_push = no_push;
+                    changed = true;
+                }
+                if changed {
+                    next_config.updated_at_utc = now_utc();
+                    write_pretty_json(&timeline_config_path(repo_root), &next_config)?;
+                }
+                let mut state = load_bridge_auto_sync_state(repo_root, &next_config)?;
+                state.updated_at_utc = now_utc();
+                write_bridge_auto_sync_state(repo_root, &state)?;
+                let payload = bridge_auto_sync_payload(&next_config, &state);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    println!(
+                        "[fugit-bridge-auto-sync] enabled={} on_task_done={} event_count={} no_push={}",
+                        payload["enabled"].as_bool().unwrap_or(true),
+                        payload["on_task_done"].as_bool().unwrap_or(true),
+                        payload["event_count"].as_u64().unwrap_or(0),
+                        payload["no_push"].as_bool().unwrap_or(false)
+                    );
+                }
+            }
+        },
         BridgeAction::SyncGithub {
             remote,
             branch,
@@ -2220,98 +2377,68 @@ fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
             pack_threads,
             burst_push,
             repair_journal,
+            note,
+            background,
+            background_worker,
+            trigger,
         } => {
-            ensure_git_repo(repo_root)?;
-
-            let remote = remote.unwrap_or(config.default_bridge_remote);
-            let branch = branch.unwrap_or(config.default_bridge_branch);
-            if let Some(remote_url) = git_remote_url(repo_root, &remote)?
-                && (remote_url.starts_with("http://") || remote_url.starts_with("https://"))
-                && let Some(host) = parse_git_host(&remote_url)
-            {
-                let cred = git_credential_fill(repo_root, &host, None)?;
-                let has_password = cred.as_ref().and_then(|row| row.password.clone()).is_some();
-                if !has_password {
-                    bail!(
-                        "missing credentials for remote host '{}'; run `fugit bridge auth login --remote {}` first",
-                        host,
-                        remote
-                    );
-                }
-            }
-            if repair_journal {
-                let report = repair_branch_event_journal(repo_root, &branches.active_branch)?;
-                if report
-                    .get("repaired")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false)
-                {
-                    println!(
-                        "[fugit-bridge] repaired_event_journal branch={} dropped_lines={} backup={}",
-                        branches.active_branch,
-                        report
-                            .get("dropped_count")
-                            .and_then(serde_json::Value::as_u64)
-                            .unwrap_or(0),
-                        report
-                            .get("backup_file")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("unknown")
-                    );
-                }
-            }
-            let mut events = read_branch_events(repo_root, &branches.active_branch)?;
-            if events.len() > event_count {
-                let start = events.len().saturating_sub(event_count);
-                events = events.split_off(start);
-            }
-
-            let (subject, body) = build_bridge_commit_message(&events);
-
-            run_git(repo_root, &["add", "-A"])?;
-            let staged_clean = ProcessCommand::new("git")
-                .current_dir(repo_root)
-                .args(["diff", "--cached", "--quiet"])
-                .status()
-                .with_context(|| "failed checking staged git diff")?
-                .success();
-
-            if staged_clean {
-                println!("[fugit-bridge] no staged changes after git add -A; skipping commit/push");
-                return Ok(());
-            }
-
-            let mut cmd = ProcessCommand::new("git");
-            cmd.current_dir(repo_root)
-                .arg("commit")
-                .arg("-m")
-                .arg(subject)
-                .arg("-m")
-                .arg(body);
-            run_process(cmd, "failed committing timeline bridge sync")?;
-
-            if no_push {
+            let options = BridgeSyncGithubOptions {
+                remote: remote.unwrap_or(config.default_bridge_remote.clone()),
+                branch: branch.unwrap_or(config.default_bridge_branch.clone()),
+                event_count: event_count.max(1),
+                no_push,
+                pack_threads,
+                burst_push,
+                repair_journal,
+                note: normalize_optional_text(note, "bridge sync note")?,
+                trigger: normalize_optional_text(trigger, "bridge sync trigger")?,
+            };
+            if background {
+                let payload = queue_bridge_auto_sync_background(repo_root, &config, &options)?;
                 println!(
-                    "[fugit-bridge] committed locally (push skipped): remote={} branch={}",
-                    remote, branch
+                    "[fugit-bridge] background_sync queued={} already_running={} remote={} branch={} trigger={}",
+                    payload["queued"].as_bool().unwrap_or(false),
+                    payload["already_running"].as_bool().unwrap_or(false),
+                    payload["remote"].as_str().unwrap_or("origin"),
+                    payload["branch"].as_str().unwrap_or("trunk"),
+                    payload["trigger"].as_str().unwrap_or("manual")
                 );
+            } else if background_worker {
+                if let Err(err) = run_bridge_auto_sync_worker(
+                    repo_root,
+                    &config,
+                    &branches.active_branch,
+                    options,
+                ) {
+                    let mut state = load_bridge_auto_sync_state(repo_root, &config)
+                        .unwrap_or_else(|_| default_bridge_auto_sync_state(&config));
+                    state.updated_at_utc = now_utc();
+                    state.status = "error".to_string();
+                    state.last_error = Some(err.to_string());
+                    let _ = write_bridge_auto_sync_state(repo_root, &state);
+                    remove_bridge_auto_sync_lock(repo_root);
+                }
             } else {
-                if pack_threads.is_some() || burst_push {
-                    let threads = resolve_parallel_jobs(pack_threads, burst_push);
-                    run_git_with_configs(
-                        repo_root,
-                        &[("pack.threads", threads.to_string())],
-                        &["push", &remote, &format!("HEAD:{}", branch)],
-                    )?;
+                let report =
+                    perform_bridge_sync_github(repo_root, &branches.active_branch, &options)?;
+                if !report["committed"].as_bool().unwrap_or(false) {
                     println!(
-                        "[fugit-bridge] committed+pushed remote={} branch={} pack_threads={}",
-                        remote, branch, threads
+                        "[fugit-bridge] {}",
+                        report["message"]
+                            .as_str()
+                            .unwrap_or("no staged changes after git add -A; skipping commit/push")
                     );
-                } else {
-                    run_git(repo_root, &["push", &remote, &format!("HEAD:{}", branch)])?;
+                } else if report["pushed"].as_bool().unwrap_or(false) {
                     println!(
                         "[fugit-bridge] committed+pushed remote={} branch={}",
-                        remote, branch
+                        report["remote"].as_str().unwrap_or("origin"),
+                        report["branch"].as_str().unwrap_or("trunk")
+                    );
+                } else {
+                    println!(
+                        "[fugit-bridge] committed locally (push skipped): remote={} branch={}",
+                        report["remote"].as_str().unwrap_or("origin"),
+                        report["branch"].as_str().unwrap_or("trunk")
                     );
                 }
             }
@@ -4208,15 +4335,21 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
             let task = state.tasks[task_index].clone();
             append_task_timeline_event(repo_root, &task, &agent_id, "done", None)?;
+            let config = load_timeline_config_or_default(repo_root)?;
+            let auto_bridge_sync =
+                maybe_queue_auto_bridge_sync_for_task_done(repo_root, &config, &task);
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&state.tasks[task_index])?
-                );
+                let mut payload = serde_json::to_value(&state.tasks[task_index])?;
+                if let Some(object) = payload.as_object_mut() {
+                    object.insert("auto_bridge_sync".to_string(), auto_bridge_sync);
+                }
+                println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!(
-                    "[fugit-task] completed {} by {}",
-                    state.tasks[task_index].task_id, agent_id
+                    "[fugit-task] completed {} by {} auto_bridge_sync={}",
+                    state.tasks[task_index].task_id,
+                    agent_id,
+                    auto_bridge_sync["status"].as_str().unwrap_or("unknown")
                 );
             }
         }
@@ -7671,14 +7804,44 @@ fn write_mcp_message(writer: &mut dyn Write, message: &serde_json::Value) -> Res
         .with_context(|| "failed flushing MCP response")
 }
 
-fn build_bridge_commit_message(events: &[TimelineEvent]) -> (String, String) {
-    let subject = format!(
-        "timeline sync: {} ({} event{})",
-        Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
-        events.len(),
-        if events.len() == 1 { "" } else { "s" }
-    );
+fn truncate_bridge_subject(value: &str, max_chars: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let mut out = String::new();
+    for ch in trimmed.chars().take(max_chars.saturating_sub(3)) {
+        out.push(ch);
+    }
+    out.push_str("...");
+    out
+}
+
+fn build_bridge_commit_message(events: &[TimelineEvent], note: Option<&str>) -> (String, String) {
+    let note_subject = note
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| truncate_bridge_subject(value, 72));
+    let subject = if let Some(note_subject) = note_subject {
+        format!(
+            "timeline sync: {} ({} event{})",
+            note_subject,
+            events.len(),
+            if events.len() == 1 { "" } else { "s" }
+        )
+    } else {
+        format!(
+            "timeline sync: {} ({} event{})",
+            Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
+            events.len(),
+            if events.len() == 1 { "" } else { "s" }
+        )
+    };
     let mut lines = Vec::<String>::new();
+    if let Some(note) = note.map(str::trim).filter(|value| !value.is_empty()) {
+        lines.push(format!("Trigger note: {}", note));
+        lines.push(String::new());
+    }
     lines.push("Timeline events included in this sync:".to_string());
     for event in events {
         lines.push(format!(
@@ -7690,6 +7853,381 @@ fn build_bridge_commit_message(events: &[TimelineEvent]) -> (String, String) {
         lines.push("- no timeline events found (manual sync)".to_string());
     }
     (subject, lines.join("\n"))
+}
+
+fn perform_bridge_sync_github(
+    repo_root: &Path,
+    active_branch: &str,
+    options: &BridgeSyncGithubOptions,
+) -> Result<serde_json::Value> {
+    ensure_git_repo(repo_root)?;
+
+    if let Some(remote_url) = git_remote_url(repo_root, &options.remote)?
+        && (remote_url.starts_with("http://") || remote_url.starts_with("https://"))
+        && let Some(host) = parse_git_host(&remote_url)
+    {
+        let cred = git_credential_fill(repo_root, &host, None)?;
+        let has_password = cred.as_ref().and_then(|row| row.password.clone()).is_some();
+        if !has_password {
+            bail!(
+                "missing credentials for remote host '{}'; run `fugit bridge auth login --remote {}` first",
+                host,
+                options.remote
+            );
+        }
+    }
+    if options.repair_journal {
+        let report = repair_branch_event_journal(repo_root, active_branch)?;
+        if report
+            .get("repaired")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            println!(
+                "[fugit-bridge] repaired_event_journal branch={} dropped_lines={} backup={}",
+                active_branch,
+                report
+                    .get("dropped_count")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                report
+                    .get("backup_file")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown")
+            );
+        }
+    }
+    let mut events = read_branch_events(repo_root, active_branch)?;
+    if events.len() > options.event_count {
+        let start = events.len().saturating_sub(options.event_count);
+        events = events.split_off(start);
+    }
+
+    let (subject, body) = build_bridge_commit_message(&events, options.note.as_deref());
+
+    run_git(repo_root, &["add", "-A"])?;
+    let staged_clean = ProcessCommand::new("git")
+        .current_dir(repo_root)
+        .args(["diff", "--cached", "--quiet"])
+        .status()
+        .with_context(|| "failed checking staged git diff")?
+        .success();
+
+    if staged_clean {
+        return Ok(json!({
+            "schema_version": "fugit.bridge.sync_github.v1",
+            "generated_at_utc": now_utc(),
+            "remote": options.remote,
+            "branch": options.branch,
+            "note": options.note,
+            "trigger": options.trigger,
+            "included_event_count": events.len(),
+            "committed": false,
+            "pushed": false,
+            "no_push": options.no_push,
+            "message": "no staged changes after git add -A; skipping commit/push",
+            "commit_subject": subject
+        }));
+    }
+
+    let mut cmd = ProcessCommand::new("git");
+    cmd.current_dir(repo_root)
+        .arg("commit")
+        .arg("-m")
+        .arg(&subject)
+        .arg("-m")
+        .arg(&body);
+    run_process(cmd, "failed committing timeline bridge sync")?;
+
+    let pushed = if options.no_push {
+        false
+    } else {
+        if options.pack_threads.is_some() || options.burst_push {
+            let threads = resolve_parallel_jobs(options.pack_threads, options.burst_push);
+            run_git_with_configs(
+                repo_root,
+                &[("pack.threads", threads.to_string())],
+                &["push", &options.remote, &format!("HEAD:{}", options.branch)],
+            )?;
+        } else {
+            run_git(
+                repo_root,
+                &["push", &options.remote, &format!("HEAD:{}", options.branch)],
+            )?;
+        }
+        true
+    };
+
+    Ok(json!({
+        "schema_version": "fugit.bridge.sync_github.v1",
+        "generated_at_utc": now_utc(),
+        "remote": options.remote,
+        "branch": options.branch,
+        "note": options.note,
+        "trigger": options.trigger,
+        "included_event_count": events.len(),
+        "committed": true,
+        "pushed": pushed,
+        "no_push": options.no_push,
+        "commit_subject": subject
+    }))
+}
+
+fn queue_bridge_auto_sync_background(
+    repo_root: &Path,
+    config: &TimelineConfig,
+    options: &BridgeSyncGithubOptions,
+) -> Result<serde_json::Value> {
+    let mut state = load_bridge_auto_sync_state(repo_root, config)?;
+    let now = now_utc();
+    if let Some(lock) = load_bridge_auto_sync_lock(repo_root)? {
+        if bridge_auto_sync_lock_is_stale(&lock) {
+            remove_bridge_auto_sync_lock(repo_root);
+        } else {
+            state.updated_at_utc = now.clone();
+            state.status = "running".to_string();
+            state.last_requested_at_utc = Some(now);
+            state.pending_trigger = true;
+            state.pending_note = options.note.clone();
+            state.last_trigger = options.trigger.clone();
+            state.last_remote = Some(options.remote.clone());
+            state.last_branch = Some(options.branch.clone());
+            write_bridge_auto_sync_state(repo_root, &state)?;
+            return Ok(json!({
+                "schema_version": "fugit.bridge.auto_sync.request.v1",
+                "generated_at_utc": now_utc(),
+                "accepted": true,
+                "queued": true,
+                "already_running": true,
+                "status": state.status,
+                "note": options.note,
+                "trigger": options.trigger,
+                "remote": options.remote,
+                "branch": options.branch
+            }));
+        }
+    }
+
+    let lock = BridgeAutoSyncLock {
+        schema_version: SCHEMA_BRIDGE_AUTO_SYNC_LOCK.to_string(),
+        lock_id: format!("auto_sync_{}", Uuid::new_v4().simple()),
+        created_at_utc: now.clone(),
+    };
+    write_bridge_auto_sync_lock(repo_root, &lock)?;
+
+    state.updated_at_utc = now.clone();
+    state.status = "queued".to_string();
+    state.last_requested_at_utc = Some(now);
+    state.last_note = options.note.clone();
+    state.last_trigger = options.trigger.clone();
+    state.last_remote = Some(options.remote.clone());
+    state.last_branch = Some(options.branch.clone());
+    state.last_result = None;
+    state.last_error = None;
+    state.pending_trigger = false;
+    state.pending_note = None;
+    write_bridge_auto_sync_state(repo_root, &state)?;
+
+    let current_exe =
+        std::env::current_exe().with_context(|| "failed resolving current executable")?;
+    let mut cmd = ProcessCommand::new(current_exe);
+    cmd.arg("--repo-root")
+        .arg(repo_root)
+        .arg("bridge")
+        .arg("sync-github")
+        .arg("--remote")
+        .arg(&options.remote)
+        .arg("--branch")
+        .arg(&options.branch)
+        .arg("--event-count")
+        .arg(options.event_count.to_string())
+        .arg("--background-worker");
+    if options.no_push {
+        cmd.arg("--no-push");
+    }
+    if options.repair_journal {
+        cmd.arg("--repair-journal");
+    }
+    if let Some(note) = options.note.as_deref() {
+        cmd.arg("--note").arg(note);
+    }
+    if let Some(trigger) = options.trigger.as_deref() {
+        cmd.arg("--trigger").arg(trigger);
+    }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Err(err) = cmd.spawn() {
+        remove_bridge_auto_sync_lock(repo_root);
+        state.updated_at_utc = now_utc();
+        state.status = "error".to_string();
+        state.last_error = Some(format!("failed spawning bridge auto-sync worker: {}", err));
+        write_bridge_auto_sync_state(repo_root, &state)?;
+        bail!("failed spawning bridge auto-sync worker: {}", err);
+    }
+
+    Ok(json!({
+        "schema_version": "fugit.bridge.auto_sync.request.v1",
+        "generated_at_utc": now_utc(),
+        "accepted": true,
+        "queued": true,
+        "already_running": false,
+        "status": "queued",
+        "note": options.note,
+        "trigger": options.trigger,
+        "remote": options.remote,
+        "branch": options.branch
+    }))
+}
+
+fn run_bridge_auto_sync_worker(
+    repo_root: &Path,
+    config: &TimelineConfig,
+    active_branch: &str,
+    initial_options: BridgeSyncGithubOptions,
+) -> Result<()> {
+    let mut current_options = initial_options;
+    let mut guard_loops = 0_usize;
+    loop {
+        guard_loops += 1;
+        if guard_loops > 8 {
+            let mut state = load_bridge_auto_sync_state(repo_root, config)?;
+            state.updated_at_utc = now_utc();
+            state.status = "error".to_string();
+            state.last_error = Some("bridge auto-sync exceeded retry loop guard".to_string());
+            write_bridge_auto_sync_state(repo_root, &state)?;
+            remove_bridge_auto_sync_lock(repo_root);
+            bail!("bridge auto-sync exceeded retry loop guard");
+        }
+
+        let mut state = load_bridge_auto_sync_state(repo_root, config)?;
+        state.updated_at_utc = now_utc();
+        state.status = "running".to_string();
+        state.last_started_at_utc = Some(now_utc());
+        state.last_note = current_options.note.clone();
+        state.last_trigger = current_options.trigger.clone();
+        state.last_remote = Some(current_options.remote.clone());
+        state.last_branch = Some(current_options.branch.clone());
+        state.last_error = None;
+        write_bridge_auto_sync_state(repo_root, &state)?;
+
+        let result = perform_bridge_sync_github(repo_root, active_branch, &current_options);
+        let mut state = load_bridge_auto_sync_state(repo_root, config)?;
+        state.updated_at_utc = now_utc();
+        state.last_finished_at_utc = Some(now_utc());
+        match result {
+            Ok(report) => {
+                let committed = report
+                    .get("committed")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let pushed = report
+                    .get("pushed")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                state.status = if !committed {
+                    "noop".to_string()
+                } else if pushed {
+                    "success".to_string()
+                } else {
+                    "committed_local".to_string()
+                };
+                state.last_result = Some(
+                    report
+                        .get("commit_subject")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("bridge sync complete")
+                        .to_string(),
+                );
+                state.last_error = None;
+            }
+            Err(err) => {
+                state.status = "error".to_string();
+                state.last_error = Some(err.to_string());
+                state.last_result = None;
+            }
+        }
+
+        let mut next_note = None;
+        if state.pending_trigger {
+            next_note = state
+                .pending_note
+                .clone()
+                .or_else(|| current_options.note.clone());
+            state.pending_trigger = false;
+            state.pending_note = None;
+            state.status = "queued".to_string();
+        }
+        write_bridge_auto_sync_state(repo_root, &state)?;
+
+        if let Some(note) = next_note {
+            current_options.note = Some(note);
+            current_options.trigger = Some("bridge_auto_sync_pending".to_string());
+            continue;
+        }
+        break;
+    }
+    remove_bridge_auto_sync_lock(repo_root);
+    Ok(())
+}
+
+fn maybe_queue_auto_bridge_sync_for_task_done(
+    repo_root: &Path,
+    config: &TimelineConfig,
+    task: &FugitTask,
+) -> serde_json::Value {
+    let mut state = load_bridge_auto_sync_state(repo_root, config)
+        .unwrap_or_else(|_| default_bridge_auto_sync_state(config));
+    if !config.auto_bridge_sync_enabled {
+        state.updated_at_utc = now_utc();
+        state.status = "disabled".to_string();
+        let _ = write_bridge_auto_sync_state(repo_root, &state);
+        return json!({
+            "enabled": false,
+            "queued": false,
+            "status": "disabled"
+        });
+    }
+    if !config.auto_bridge_sync_on_task_done {
+        state.updated_at_utc = now_utc();
+        state.status = "task_done_disabled".to_string();
+        let _ = write_bridge_auto_sync_state(repo_root, &state);
+        return json!({
+            "enabled": true,
+            "queued": false,
+            "status": "task_done_disabled"
+        });
+    }
+
+    let note = task_timeline_summary("done", task, None);
+    let options = BridgeSyncGithubOptions {
+        remote: config.default_bridge_remote.clone(),
+        branch: config.default_bridge_branch.clone(),
+        event_count: config.auto_bridge_sync_event_count,
+        no_push: config.auto_bridge_sync_no_push,
+        pack_threads: None,
+        burst_push: false,
+        repair_journal: false,
+        note: Some(note),
+        trigger: Some("task_done".to_string()),
+    };
+    match queue_bridge_auto_sync_background(repo_root, config, &options) {
+        Ok(payload) => payload,
+        Err(err) => {
+            let mut state = load_bridge_auto_sync_state(repo_root, config)
+                .unwrap_or_else(|_| default_bridge_auto_sync_state(config));
+            state.updated_at_utc = now_utc();
+            state.status = "error".to_string();
+            state.last_error = Some(err.to_string());
+            let _ = write_bridge_auto_sync_state(repo_root, &state);
+            json!({
+                "enabled": true,
+                "queued": false,
+                "status": "error",
+                "error": err.to_string()
+            })
+        }
+    }
 }
 
 fn ensure_git_repo(repo_root: &Path) -> Result<()> {
@@ -7995,6 +8533,10 @@ fn build_default_timeline_config(repo_root: &Path) -> TimelineConfig {
         cloud_endpoint: None,
         storage_namespace: None,
         billing_account_id: None,
+        auto_bridge_sync_enabled: default_auto_bridge_sync_enabled(),
+        auto_bridge_sync_on_task_done: default_auto_bridge_sync_on_task_done(),
+        auto_bridge_sync_event_count: default_auto_bridge_sync_event_count(),
+        auto_bridge_sync_no_push: default_auto_bridge_sync_no_push(),
         auto_replenish_enabled: default_auto_replenish_enabled(),
         auto_replenish_require_confirmation: default_auto_replenish_require_confirmation(),
         auto_replenish_agents: Vec::new(),
@@ -8006,6 +8548,101 @@ fn load_timeline_config_or_default(repo_root: &Path) -> Result<TimelineConfig> {
         load_json_optional::<TimelineConfig>(&timeline_config_path(repo_root))?
             .unwrap_or_else(|| build_default_timeline_config(repo_root)),
     )
+}
+
+fn default_bridge_auto_sync_state(config: &TimelineConfig) -> BridgeAutoSyncState {
+    BridgeAutoSyncState {
+        schema_version: SCHEMA_BRIDGE_AUTO_SYNC.to_string(),
+        updated_at_utc: now_utc(),
+        status: "idle".to_string(),
+        enabled: config.auto_bridge_sync_enabled,
+        on_task_done: config.auto_bridge_sync_on_task_done,
+        event_count: config.auto_bridge_sync_event_count,
+        no_push: config.auto_bridge_sync_no_push,
+        last_requested_at_utc: None,
+        last_started_at_utc: None,
+        last_finished_at_utc: None,
+        last_note: None,
+        last_trigger: None,
+        last_remote: None,
+        last_branch: None,
+        last_result: None,
+        last_error: None,
+        pending_trigger: false,
+        pending_note: None,
+    }
+}
+
+fn load_bridge_auto_sync_state(
+    repo_root: &Path,
+    config: &TimelineConfig,
+) -> Result<BridgeAutoSyncState> {
+    let mut state = load_json_optional::<BridgeAutoSyncState>(
+        &timeline_bridge_auto_sync_state_path(repo_root),
+    )?
+    .unwrap_or_else(|| default_bridge_auto_sync_state(config));
+    if state.schema_version.trim().is_empty() {
+        state.schema_version = SCHEMA_BRIDGE_AUTO_SYNC.to_string();
+    }
+    state.enabled = config.auto_bridge_sync_enabled;
+    state.on_task_done = config.auto_bridge_sync_on_task_done;
+    state.event_count = config.auto_bridge_sync_event_count;
+    state.no_push = config.auto_bridge_sync_no_push;
+    Ok(state)
+}
+
+fn load_bridge_auto_sync_lock(repo_root: &Path) -> Result<Option<BridgeAutoSyncLock>> {
+    load_json_optional::<BridgeAutoSyncLock>(&timeline_bridge_auto_sync_lock_path(repo_root))
+}
+
+fn bridge_auto_sync_lock_is_stale(lock: &BridgeAutoSyncLock) -> bool {
+    match parse_rfc3339_utc(&lock.created_at_utc) {
+        Some(created_at) => {
+            created_at + Duration::minutes(AUTO_BRIDGE_SYNC_STALE_MINUTES) <= Utc::now()
+        }
+        None => true,
+    }
+}
+
+fn write_bridge_auto_sync_state(repo_root: &Path, state: &BridgeAutoSyncState) -> Result<()> {
+    write_pretty_json(&timeline_bridge_auto_sync_state_path(repo_root), state)
+}
+
+fn write_bridge_auto_sync_lock(repo_root: &Path, lock: &BridgeAutoSyncLock) -> Result<()> {
+    write_pretty_json(&timeline_bridge_auto_sync_lock_path(repo_root), lock)
+}
+
+fn remove_bridge_auto_sync_lock(repo_root: &Path) {
+    let path = timeline_bridge_auto_sync_lock_path(repo_root);
+    if path.exists() {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn bridge_auto_sync_payload(
+    config: &TimelineConfig,
+    state: &BridgeAutoSyncState,
+) -> serde_json::Value {
+    json!({
+        "schema_version": "fugit.bridge.auto_sync.v1",
+        "generated_at_utc": now_utc(),
+        "enabled": config.auto_bridge_sync_enabled,
+        "on_task_done": config.auto_bridge_sync_on_task_done,
+        "event_count": config.auto_bridge_sync_event_count,
+        "no_push": config.auto_bridge_sync_no_push,
+        "status": state.status,
+        "last_requested_at_utc": state.last_requested_at_utc,
+        "last_started_at_utc": state.last_started_at_utc,
+        "last_finished_at_utc": state.last_finished_at_utc,
+        "last_note": state.last_note,
+        "last_trigger": state.last_trigger,
+        "last_remote": state.last_remote,
+        "last_branch": state.last_branch,
+        "last_result": state.last_result,
+        "last_error": state.last_error,
+        "pending_trigger": state.pending_trigger,
+        "pending_note": state.pending_note
+    })
 }
 
 fn detect_git_branch(repo_root: &Path) -> Option<String> {
@@ -10623,6 +11260,22 @@ fn default_backend_mode() -> String {
     BACKEND_MODE_GIT_BRIDGE.to_string()
 }
 
+fn default_auto_bridge_sync_enabled() -> bool {
+    true
+}
+
+fn default_auto_bridge_sync_on_task_done() -> bool {
+    true
+}
+
+fn default_auto_bridge_sync_event_count() -> usize {
+    12
+}
+
+fn default_auto_bridge_sync_no_push() -> bool {
+    false
+}
+
 fn default_auto_replenish_enabled() -> bool {
     true
 }
@@ -10681,6 +11334,14 @@ fn timeline_tasks_path(repo_root: &Path) -> PathBuf {
 
 fn timeline_bridge_auth_path(repo_root: &Path) -> PathBuf {
     timeline_root(repo_root).join("bridge_auth.json")
+}
+
+fn timeline_bridge_auto_sync_state_path(repo_root: &Path) -> PathBuf {
+    timeline_root(repo_root).join("bridge_auto_sync.json")
+}
+
+fn timeline_bridge_auto_sync_lock_path(repo_root: &Path) -> PathBuf {
+    timeline_root(repo_root).join("bridge_auto_sync.lock.json")
 }
 
 fn timeline_branch_root(repo_root: &Path, branch: &str) -> PathBuf {
@@ -11216,6 +11877,10 @@ mod tests {
             cloud_endpoint: None,
             storage_namespace: None,
             billing_account_id: None,
+            auto_bridge_sync_enabled: true,
+            auto_bridge_sync_on_task_done: true,
+            auto_bridge_sync_event_count: 12,
+            auto_bridge_sync_no_push: false,
             auto_replenish_enabled: true,
             auto_replenish_require_confirmation: true,
             auto_replenish_agents: vec!["agent.alpha".to_string(), "agent.beta".to_string()],
