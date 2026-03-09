@@ -7767,7 +7767,9 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             }
             TaskViewAction::List { json } => {
                 let mut state = load_task_view_state(repo_root)?;
-                state.views.sort_by(|left, right| left.name.cmp(&right.name));
+                state
+                    .views
+                    .sort_by(|left, right| left.name.cmp(&right.name));
                 if json {
                     println!("{}", serde_json::to_string_pretty(&state)?);
                 } else {
@@ -14061,10 +14063,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 name.to_string(),
                 "--json".to_string(),
             ];
-            if let Some(description) = args
-                .get("description")
-                .and_then(serde_json::Value::as_str)
-            {
+            if let Some(description) = args.get("description").and_then(serde_json::Value::as_str) {
                 cli_args.push("--description".to_string());
                 cli_args.push(description.to_string());
             }
@@ -20606,7 +20605,10 @@ fn merge_task_query_filter(
     TaskQueryFilter {
         required_tags: dedupe_keep_order(tags),
         focus: override_filter.focus.clone().or_else(|| base.focus.clone()),
-        prefix: override_filter.prefix.clone().or_else(|| base.prefix.clone()),
+        prefix: override_filter
+            .prefix
+            .clone()
+            .or_else(|| base.prefix.clone()),
         contains: override_filter
             .contains
             .clone()
@@ -20716,7 +20718,9 @@ fn save_task_view(
         updated_at_utc: now.clone(),
     };
     state.views.push(view.clone());
-    state.views.sort_by(|left, right| left.name.cmp(&right.name));
+    state
+        .views
+        .sort_by(|left, right| left.name.cmp(&right.name));
     state.updated_at_utc = now;
     write_pretty_json(&timeline_task_views_path(repo_root), &state)?;
     Ok(view)
@@ -22329,8 +22333,8 @@ fn comment_syntax_for_path(rel_path: &str) -> Option<CommentSyntax> {
             line_prefixes: &[],
             block_pairs: COMMENT_BLOCK_HTML,
         }),
-        "py" | "rb" | "sh" | "bash" | "zsh" | "yaml" | "yml" | "toml" | "ini" | "cfg"
-        | "conf" | "properties" | "mk" => Some(CommentSyntax {
+        "py" | "rb" | "sh" | "bash" | "zsh" | "yaml" | "yml" | "toml" | "ini" | "cfg" | "conf"
+        | "properties" | "mk" => Some(CommentSyntax {
             line_prefixes: COMMENT_PREFIX_HASH,
             block_pairs: &[],
         }),
@@ -22420,7 +22424,11 @@ fn extract_comment_segments_from_line<'a>(
         let next_line_prefix = syntax
             .line_prefixes
             .iter()
-            .filter_map(|prefix| line[cursor..].find(prefix).map(|idx| (cursor + idx, *prefix)))
+            .filter_map(|prefix| {
+                line[cursor..]
+                    .find(prefix)
+                    .map(|idx| (cursor + idx, *prefix))
+            })
             .min_by_key(|(idx, _)| *idx);
         let next_block = syntax
             .block_pairs
@@ -22482,7 +22490,12 @@ fn build_comment_task_rows(
     repo_root: &Path,
     markers: &[String],
     default_priority: Option<i32>,
-) -> Result<(Vec<TaskImportRow>, Vec<CommentTaskMatch>, usize, BTreeMap<String, usize>)> {
+) -> Result<(
+    Vec<TaskImportRow>,
+    Vec<CommentTaskMatch>,
+    usize,
+    BTreeMap<String, usize>,
+)> {
     let mut rows = Vec::<TaskImportRow>::new();
     let mut matches = Vec::<CommentTaskMatch>::new();
     let mut marker_counts = BTreeMap::<String, usize>::new();
@@ -22527,8 +22540,7 @@ fn build_comment_task_rows(
         let mut active_block_end = None;
         let mut duplicate_counts = BTreeMap::<(String, String), usize>::new();
         for (line_idx, line) in content.lines().enumerate() {
-            for segment in
-                extract_comment_segments_from_line(line, &syntax, &mut active_block_end)
+            for segment in extract_comment_segments_from_line(line, &syntax, &mut active_block_end)
             {
                 let cleaned = normalize_comment_segment_text(segment);
                 if cleaned.is_empty() {
@@ -25124,15 +25136,15 @@ mod tests {
         assert_eq!(resolved.status, Some(TaskStatusArg::Open));
         assert!(resolved.ready_only);
         assert_eq!(resolved.limit, 12);
-        assert_eq!(resolved.fields, vec!["task_id".to_string(), "title".to_string()]);
+        assert_eq!(
+            resolved.fields,
+            vec!["task_id".to_string(), "title".to_string()]
+        );
         assert_eq!(
             resolved.filters.required_tags,
             vec!["semantic".to_string(), "seed".to_string()]
         );
-        assert_eq!(
-            resolved.filters.title_contains.as_deref(),
-            Some("compiler")
-        );
+        assert_eq!(resolved.filters.title_contains.as_deref(), Some("compiler"));
         assert_eq!(resolved.filters.contains.as_deref(), Some("tree-sitter"));
     }
 
@@ -25153,9 +25165,21 @@ mod tests {
         assert_eq!(matches.len(), 3);
         assert_eq!(marker_counts.get("TODO"), Some(&2_usize));
         assert_eq!(marker_counts.get("FIXME"), Some(&1_usize));
-        assert!(matches.iter().any(|row| row.path == "src/lib.rs" && row.line == 1));
-        assert!(matches.iter().any(|row| row.path == "src/lib.rs" && row.marker == "FIXME"));
-        assert!(matches.iter().any(|row| row.path == "README.md" && row.marker == "TODO"));
+        assert!(
+            matches
+                .iter()
+                .any(|row| row.path == "src/lib.rs" && row.line == 1)
+        );
+        assert!(
+            matches
+                .iter()
+                .any(|row| row.path == "src/lib.rs" && row.marker == "FIXME")
+        );
+        assert!(
+            matches
+                .iter()
+                .any(|row| row.path == "README.md" && row.marker == "TODO")
+        );
     }
 
     #[test]
