@@ -23,10 +23,12 @@
 - Added default-on quality gates: `task done` now registers regression/benchmark checks, `check add|list|run|deprecate|policy` manages them, and bridge sync runs active checks before commit/push.
 - Added targeted task pickup with `task request --task-id <task_id>`, including MCP support, so agents can request a specific queue item after inspecting the backlog.
 - Added project discovery with recent-activity ordering, `task gui --background --port 0`, and an installed `fugit-gui` desktop launcher (`~/Applications/Fugit GUI.app` on macOS, `.desktop` entry on Linux).
+- Added advisor automation with provider discovery/assignment, distinct reviewer vs task-manager model selection, safe command-wrapper support for Codex/Claude/local runners, low-task background queueing from `task request`, GUI controls, and MCP tools.
 - Improved the Unix installer to print the installed version and warn when `PATH` still resolves to a different `fugit` binary.
 - Added multi-project registry (`project add|list|use|remove`) and GUI project switching to keep task streams isolated across repos.
 - Hardened release validation script to run dependency advisory checks with `cargo-audit` when available.
 - Removed project-specific identifiers from README examples to keep docs fingerprint-neutral.
+- Documented advisor/runtime privacy expectations so credentials and personal data stay out of tracked project files.
 - Integrated task lifecycle operations with timeline events (`task add|edit|claim|done|release|remove`).
 - Extended task GUI with a per-project timeline explorer (branch selection + paged scrollable history).
 - Added vigorous end-to-end validation script (`scripts/vigorous-e2e.sh`) covering CLI, GUI API, bridge, and MCP flows.

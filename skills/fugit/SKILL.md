@@ -45,6 +45,7 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . task request --agent <agent_id> --claim-ttl-minutes 30 --steal-after-minutes 90`
 - Optional routing hints: `--focus <token>`, `--prefix <token>`, `--contains <token>`, plus `--tag <tag>`
 - When the queue is genuinely exhausted, `task request` will auto-seed per-agent scout tasks by default so agents can replenish backlog instead of stalling.
+- When standard work gets low, `task request` can also queue advisor review/task-manager runs in the background so backlog generation does not stall.
 - To require human approval before those scout tasks run:
 - `fugit --repo-root . task policy set --auto-replenish-confirmation true --agent <agent_id>`
 - To approve them explicitly:
@@ -95,6 +96,16 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . task request --agent <agent_id> --no-claim --max 3 --json`
 - Run the active regression/benchmark suite manually:
 - `fugit --repo-root . check run --json`
+- Inspect or run advisor automation:
+- `fugit --repo-root . advisor show --json`
+- `fugit --repo-root . advisor policy show --json`
+- `fugit --repo-root . advisor review --background`
+- `fugit --repo-root . advisor research --background`
+- Assign distinct models/providers per role:
+- `fugit --repo-root . advisor provider assign --role reviewer --provider <provider_id> --model <model>`
+- `fugit --repo-root . advisor provider assign --role task-manager --provider <provider_id> --model <model>`
+- Add a custom wrapper when using a local runner or another terminal agent:
+- `fugit --repo-root . advisor provider add-command --name <name> --executable <cmd> --arg "{role}" --arg "{model}"`
 
 9. Coordinate ownership when multiple agents touch overlapping files:
 - `fugit --repo-root . lock add --pattern "src/**" --agent <agent_id> --ttl-minutes 30`
@@ -128,6 +139,7 @@ Recoverability repair:
 - Desktop-friendly launcher after install: `fugit-gui`
 - Built-in board supports create/edit/remove directly from the browser.
 - Confirmation-gated scout tasks can also be approved directly from the browser.
+- The board also exposes advisor provider/model selection, low-task policy toggles, and manual review/research triggers.
 - Timeline explorer: use the branch selector and `load older` in the GUI to scroll project history.
 - MCP launch tool: `fugit_task_gui_launch`
 
@@ -172,6 +184,9 @@ Use this contract to keep task execution deterministic across agents.
 2. If no task is returned, first check whether auto-replenish is waiting for approval:
 - `fugit --repo-root . task policy show --json`
 - `fugit --repo-root . task approve --all-pending-auto-replenish --agent <agent_id>`
+- Also inspect advisor low-task policy if the backlog is thin:
+- `fugit --repo-root . advisor policy show --json`
+- `fugit --repo-root . advisor show --json`
 - If auto-replenish is disabled or not appropriate, create an explicit task instead of silent work:
 - `fugit --repo-root . task add --title "<deliverable>" --priority <n>`
 - If a plan changes, update the existing task instead of leaving drift behind:
@@ -218,6 +233,11 @@ Expose these tools to agents via MCP:
 - `fugit_checkout`
 - `fugit_lock_add`
 - `fugit_lock_list`
+- `fugit_advisor_show`
+- `fugit_advisor_policy_show`
+- `fugit_advisor_policy_set`
+- `fugit_advisor_review`
+- `fugit_advisor_research`
 - `fugit_task_add`
 - `fugit_task_show`
 - `fugit_task_current`

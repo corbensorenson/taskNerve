@@ -87,14 +87,43 @@ PY
   exit 1
 }
 
+wait_for_advisor_worker() {
+  local repo_root="$1"
+  local role="$2"
+  local json_file="$TMP_ROOT/advisor-status-${role}.json"
+  for _ in $(seq 1 80); do
+    "$BIN" --repo-root "$repo_root" advisor show --json >"$json_file"
+    if python3 - "$json_file" "$role" <<'PY'
+import json, sys
+payload = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+role = sys.argv[2]
+worker = (payload.get("workers") or {}).get(role, {})
+status = worker.get("status")
+finished = worker.get("last_finished_at_utc")
+if status == "success" and finished:
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+    then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "[vigorous-e2e] advisor worker ${role} did not settle in time" >&2
+  cat "$json_file" >&2
+  exit 1
+}
+
 echo "[vigorous-e2e] preparing repositories"
 REPO_A="$TMP_ROOT/repo-a"
 REPO_B="$TMP_ROOT/repo-b"
+REPO_C="$TMP_ROOT/repo-c"
 REMOTE_BARE="$TMP_ROOT/remote.git"
 CLONE_B="$TMP_ROOT/clone-b"
 
 create_git_repo "$REPO_A"
 create_git_repo "$REPO_B"
+create_git_repo "$REPO_C"
 git init --bare "$REMOTE_BARE" >/dev/null
 
 echo "alpha" >"$REPO_A/README.txt"
@@ -106,6 +135,10 @@ git -C "$REPO_A" push -u origin trunk >/dev/null
 echo "beta" >"$REPO_B/README.txt"
 git -C "$REPO_B" add README.txt
 git -C "$REPO_B" commit -m "seed repo-b" >/dev/null
+
+echo "gamma" >"$REPO_C/README.txt"
+git -C "$REPO_C" add README.txt
+git -C "$REPO_C" commit -m "seed repo-c" >/dev/null
 
 echo "[vigorous-e2e] init/status/backend"
 "$BIN" --version >/dev/null
@@ -217,6 +250,75 @@ json_assert "$TMP_ROOT/auto-request-claimed.json" 'payload.get("assigned") is Tr
 "$BIN" --repo-root "$REPO_B" task add --title "real follow-up" --priority 50 --agent agent.manager --json >"$TMP_ROOT/auto-real-task.json"
 "$BIN" --repo-root "$REPO_B" task request --agent agent.alpha --json >"$TMP_ROOT/auto-request-real.json"
 json_assert "$TMP_ROOT/auto-request-real.json" 'payload.get("assigned") is True and payload.get("task", {}).get("auto_replenish") is False and payload.get("task", {}).get("title") == "real follow-up"' "real tasks should outrank owned auto-replenish fallback work"
+
+echo "[vigorous-e2e] advisor providers + low-task automation"
+"$BIN" --repo-root "$REPO_C" init --branch trunk >/dev/null
+cat >"$TMP_ROOT/fake-advisor.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+ROLE=""
+MODEL=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --role)
+      ROLE="$2"
+      shift 2
+      ;;
+    --model)
+      MODEL="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+cat >/dev/null
+if [[ "$ROLE" == "reviewer" ]]; then
+  cat <<JSON
+{"summary":"Reviewer pass queued a docs follow-up","notes":["model=${MODEL}"],"findings":[{"title":"README needs advisor workflow coverage","severity":"low","detail":"The public docs do not explain the advisor flow yet.","evidence_paths":["README.md"]}],"tasks":[{"key":"review_docs","title":"Document advisor workflow","detail":"Add CLI and GUI advisor usage to the README.","priority":36,"tags":["advisor","docs"],"depends_on_keys":[]}]}
+JSON
+else
+  cat <<JSON
+{"summary":"Task manager refreshed the backlog","notes":["model=${MODEL}"],"findings":[],"tasks":[{"key":"advisor_contract","title":"Define advisor run contract","detail":"Document provider selection, low-water triggers, and task-sync rules.","priority":44,"tags":["advisor","docs"],"depends_on_keys":[]},{"key":"advisor_e2e","title":"Add advisor e2e coverage","detail":"Exercise low-water automation and manual review runs.","priority":40,"tags":["advisor","test"],"depends_on_keys":["advisor_contract"]}]}
+JSON
+fi
+EOF
+chmod +x "$TMP_ROOT/fake-advisor.sh"
+"$BIN" --repo-root "$REPO_C" advisor provider add-command --name fake-advisor --executable "$TMP_ROOT/fake-advisor.sh" --arg "--role" --arg "{role}" --arg "--model" --arg "{model}" --json >"$TMP_ROOT/advisor-provider.json"
+ADVISOR_PROVIDER_ID="$(python3 - "$TMP_ROOT/advisor-provider.json" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1]))["provider_id"])
+PY
+)"
+"$BIN" --repo-root "$REPO_C" advisor provider assign --role reviewer --provider "$ADVISOR_PROVIDER_ID" --model claude-pro --json >"$TMP_ROOT/advisor-assign-reviewer.json"
+"$BIN" --repo-root "$REPO_C" advisor provider assign --role task-manager --provider "$ADVISOR_PROVIDER_ID" --model qwen-lite --json >"$TMP_ROOT/advisor-assign-manager.json"
+"$BIN" --repo-root "$REPO_C" advisor policy set --enabled true --auto-task-generation true --auto-review true --low-task-threshold 1 --require-confirmation true --json >"$TMP_ROOT/advisor-policy.json"
+json_assert "$TMP_ROOT/advisor-policy.json" 'payload.get("enabled") is True and payload.get("require_confirmation") is True and payload.get("low_task_threshold") == 1' "advisor policy should persist low-task defaults"
+"$BIN" --repo-root "$REPO_C" task request --agent agent.lowwater --no-claim --json >"$TMP_ROOT/advisor-lowwater-request.json"
+json_assert "$TMP_ROOT/advisor-lowwater-request.json" 'payload.get("advisor", {}).get("triggered") is True' "low-task request should queue advisor automation"
+wait_for_advisor_worker "$REPO_C" reviewer
+wait_for_advisor_worker "$REPO_C" task_manager
+"$BIN" --repo-root "$REPO_C" advisor show --json >"$TMP_ROOT/advisor-show.json"
+json_assert "$TMP_ROOT/advisor-show.json" 'payload.get("assignments", {}).get("reviewer", {}).get("provider_id") == "'"$ADVISOR_PROVIDER_ID"'" and payload.get("workers", {}).get("task_manager", {}).get("status") == "success"' "advisor show should expose assignments and worker status"
+"$BIN" --repo-root "$REPO_C" task list --json >"$TMP_ROOT/advisor-task-list.json"
+json_assert "$TMP_ROOT/advisor-task-list.json" 'any(row.get("title") == "Define advisor run contract" and row.get("awaiting_confirmation") is True for row in payload)' "advisor research should sync confirmation-gated tasks into the queue"
+ADVISOR_TASK_ID="$(python3 - "$TMP_ROOT/advisor-task-list.json" <<'PY'
+import json,sys
+rows=json.load(open(sys.argv[1]))
+for row in rows:
+    if row.get("title") == "Define advisor run contract":
+        print(row["task_id"])
+        break
+else:
+    raise SystemExit("advisor task not found")
+PY
+)"
+"$BIN" --repo-root "$REPO_C" task approve --task-id "$ADVISOR_TASK_ID" --agent agent.review >/dev/null
+"$BIN" --repo-root "$REPO_C" advisor review --goal "manual docs review" --sync-suggested-tasks --json >"$TMP_ROOT/advisor-review.json"
+json_assert "$TMP_ROOT/advisor-review.json" 'payload.get("findings_count") >= 1 and payload.get("generated_task_count") >= 1 and payload.get("synced_task_count") >= 1' "manual advisor review should record findings and sync suggested tasks when requested"
+"$BIN" --repo-root "$REPO_C" advisor runs --json >"$TMP_ROOT/advisor-runs.json"
+json_assert "$TMP_ROOT/advisor-runs.json" 'len(payload) >= 2' "advisor runs should record both low-water and manual executions"
 
 echo "[vigorous-e2e] task sync + reopen"
 cat >"$REPO_A/the_final_plan.md" <<'EOF'

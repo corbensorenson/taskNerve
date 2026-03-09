@@ -34,11 +34,17 @@ const SCHEMA_PROJECTS: &str = "fugit.projects.v1";
 const SCHEMA_BRIDGE_AUTH: &str = "timeline.bridge_auth.v1";
 const SCHEMA_BRIDGE_AUTO_SYNC: &str = "timeline.bridge_auto_sync.v1";
 const SCHEMA_BRIDGE_AUTO_SYNC_LOCK: &str = "timeline.bridge_auto_sync_lock.v1";
+const SCHEMA_ADVISOR_STATE: &str = "fugit.advisor.v1";
+const SCHEMA_ADVISOR_RUN: &str = "fugit.advisor_run.v1";
+const SCHEMA_ADVISOR_WORKER_STATE: &str = "fugit.advisor_worker_state.v1";
+const SCHEMA_ADVISOR_WORKER_LOCK: &str = "fugit.advisor_worker_lock.v1";
 const BACKEND_MODE_GIT_BRIDGE: &str = "git_bridge";
 const BACKEND_MODE_FUGIT_CLOUD: &str = "fugit_cloud";
 const AUTO_REPLENISH_SOURCE_PLAN: &str = ".fugit:auto_replenish";
+const ADVISOR_AUTO_PLAN_FILE: &str = ".fugit/advisor/auto_backlog.tsv";
 const SYSTEM_AGENT_ID: &str = "fugit.system";
 const AUTO_BRIDGE_SYNC_STALE_MINUTES: i64 = 30;
+const ADVISOR_WORKER_STALE_MINUTES: i64 = 45;
 const TASK_GUI_MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const FUGIT_SKILL_ID: &str = "fugit";
 const FUGIT_SKILL_MD: &str = include_str!("../skills/fugit/SKILL.md");
@@ -91,6 +97,7 @@ enum Command {
     Check(CheckArgs),
     Lock(LockArgs),
     Task(TaskArgs),
+    Advisor(AdvisorArgs),
     Project(ProjectArgs),
     Mcp(McpArgs),
 }
@@ -407,6 +414,234 @@ struct CheckArgs {
     action: CheckAction,
 }
 
+#[derive(Debug, Parser)]
+struct AdvisorArgs {
+    #[command(subcommand)]
+    action: AdvisorAction,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum AdvisorRoleArg {
+    Reviewer,
+    #[value(alias = "task_manager")]
+    TaskManager,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum AdvisorProviderKind {
+    Codex,
+    Claude,
+    Ollama,
+    Command,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum AdvisorPlanModeArg {
+    AutoBacklog,
+    GoalScoped,
+}
+
+#[derive(Debug, Subcommand)]
+enum AdvisorAction {
+    Show {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Runs {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Provider {
+        #[command(subcommand)]
+        action: AdvisorProviderAction,
+    },
+    Policy {
+        #[command(subcommand)]
+        action: AdvisorPolicyAction,
+    },
+    Review {
+        #[arg(long)]
+        goal: Option<String>,
+        #[arg(long)]
+        provider: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, default_value_t = false)]
+        allow_online_research: bool,
+        #[arg(long, default_value_t = false)]
+        sync_suggested_tasks: bool,
+        #[arg(long, default_value_t = false)]
+        background: bool,
+        #[arg(long, hide = true, default_value_t = false)]
+        background_worker: bool,
+        #[arg(long, hide = true)]
+        trigger: Option<String>,
+        #[arg(long, value_enum, hide = true, default_value_t = AdvisorPlanModeArg::GoalScoped)]
+        plan_mode: AdvisorPlanModeArg,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Research {
+        #[arg(long)]
+        goal: Option<String>,
+        #[arg(long)]
+        provider: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, default_value_t = false)]
+        allow_online_research: bool,
+        #[arg(long)]
+        require_confirmation: Option<bool>,
+        #[arg(long, default_value_t = false)]
+        background: bool,
+        #[arg(long, hide = true, default_value_t = false)]
+        background_worker: bool,
+        #[arg(long, hide = true)]
+        trigger: Option<String>,
+        #[arg(long, value_enum, hide = true, default_value_t = AdvisorPlanModeArg::GoalScoped)]
+        plan_mode: AdvisorPlanModeArg,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AdvisorProviderAction {
+    Discover {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    List {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    AddCodex {
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        executable: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        local_provider: Option<String>,
+        #[arg(long, value_enum)]
+        assign_role: Option<AdvisorRoleArg>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    AddClaude {
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        executable: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, value_enum)]
+        assign_role: Option<AdvisorRoleArg>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    AddOllama {
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        executable: Option<String>,
+        #[arg(long)]
+        model: String,
+        #[arg(long, value_enum)]
+        assign_role: Option<AdvisorRoleArg>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    AddCommand {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        executable: String,
+        #[arg(long = "arg", allow_hyphen_values = true)]
+        args: Vec<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, value_enum)]
+        assign_role: Option<AdvisorRoleArg>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Edit {
+        #[arg(long)]
+        provider_id: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        executable: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        local_provider: Option<String>,
+        #[arg(long = "arg", allow_hyphen_values = true)]
+        args: Vec<String>,
+        #[arg(long, default_value_t = false)]
+        clear_args: bool,
+        #[arg(long)]
+        enabled: Option<bool>,
+        #[arg(long, value_enum)]
+        assign_role: Option<AdvisorRoleArg>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Assign {
+        #[arg(long, value_enum)]
+        role: AdvisorRoleArg,
+        #[arg(long)]
+        provider: Option<String>,
+        #[arg(long, default_value_t = false)]
+        clear: bool,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, default_value_t = false)]
+        clear_model: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Remove {
+        #[arg(long)]
+        provider_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AdvisorPolicyAction {
+    Show {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Set {
+        #[arg(long)]
+        enabled: Option<bool>,
+        #[arg(long)]
+        auto_task_generation: Option<bool>,
+        #[arg(long)]
+        auto_review: Option<bool>,
+        #[arg(long)]
+        low_task_threshold: Option<usize>,
+        #[arg(long)]
+        require_confirmation: Option<bool>,
+        #[arg(long)]
+        allow_online_research: Option<bool>,
+        #[arg(long)]
+        auto_trigger_cooldown_minutes: Option<i64>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 enum CheckAction {
     List {
@@ -630,6 +865,175 @@ struct TaskState {
     tasks: Vec<FugitTask>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AdvisorProvider {
+    provider_id: String,
+    name: String,
+    kind: AdvisorProviderKind,
+    executable: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    local_provider: Option<String>,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    created_at_utc: String,
+    updated_at_utc: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AdvisorRoleSelection {
+    #[serde(default)]
+    provider_id: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AdvisorPolicy {
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default = "default_true")]
+    auto_task_generation: bool,
+    #[serde(default = "default_true")]
+    auto_review: bool,
+    #[serde(default = "default_advisor_low_task_threshold")]
+    low_task_threshold: usize,
+    #[serde(default = "default_false")]
+    require_confirmation: bool,
+    #[serde(default = "default_false")]
+    allow_online_research: bool,
+    #[serde(default = "default_advisor_auto_trigger_cooldown_minutes")]
+    auto_trigger_cooldown_minutes: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AdvisorState {
+    schema_version: String,
+    updated_at_utc: String,
+    policy: AdvisorPolicy,
+    #[serde(default)]
+    providers: Vec<AdvisorProvider>,
+    reviewer: AdvisorRoleSelection,
+    task_manager: AdvisorRoleSelection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AdvisorFinding {
+    title: String,
+    severity: String,
+    detail: String,
+    #[serde(default)]
+    evidence_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AdvisorGeneratedTask {
+    #[serde(default)]
+    key: Option<String>,
+    title: String,
+    #[serde(default)]
+    detail: Option<String>,
+    #[serde(default)]
+    priority: Option<i32>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    depends_on_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AdvisorModelOutput {
+    summary: String,
+    #[serde(default)]
+    notes: Vec<String>,
+    #[serde(default)]
+    findings: Vec<AdvisorFinding>,
+    #[serde(default)]
+    tasks: Vec<AdvisorGeneratedTask>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AdvisorRunRecord {
+    schema_version: String,
+    run_id: String,
+    generated_at_utc: String,
+    role: AdvisorRoleArg,
+    status: String,
+    provider_id: String,
+    provider_name: String,
+    provider_kind: AdvisorProviderKind,
+    model: Option<String>,
+    goal: Option<String>,
+    trigger: String,
+    allow_online_research: bool,
+    summary: String,
+    findings_count: usize,
+    generated_task_count: usize,
+    synced_task_count: usize,
+    raw_output_path: String,
+    report_path: String,
+    #[serde(default)]
+    plan_path: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AdvisorWorkerState {
+    schema_version: String,
+    role: AdvisorRoleArg,
+    updated_at_utc: String,
+    status: String,
+    enabled: bool,
+    last_requested_at_utc: Option<String>,
+    last_started_at_utc: Option<String>,
+    last_finished_at_utc: Option<String>,
+    last_goal: Option<String>,
+    last_trigger: Option<String>,
+    last_result: Option<String>,
+    last_error: Option<String>,
+    last_run_id: Option<String>,
+    pending: bool,
+    pending_goal: Option<String>,
+    pending_trigger: Option<String>,
+    pending_allow_online_research: bool,
+    pending_require_confirmation: Option<bool>,
+    pending_provider_id: Option<String>,
+    pending_model: Option<String>,
+    pending_sync_suggested_tasks: bool,
+    pending_plan_mode: AdvisorPlanModeArg,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AdvisorWorkerLock {
+    schema_version: String,
+    role: AdvisorRoleArg,
+    lock_id: String,
+    created_at_utc: String,
+}
+
+#[derive(Debug, Clone)]
+struct AdvisorRunOptions {
+    role: AdvisorRoleArg,
+    goal: Option<String>,
+    provider_id_override: Option<String>,
+    model_override: Option<String>,
+    allow_online_research: bool,
+    require_confirmation_override: Option<bool>,
+    sync_suggested_tasks: bool,
+    trigger: String,
+    plan_mode: AdvisorPlanModeArg,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedAdvisorProvider {
+    provider: AdvisorProvider,
+    model: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct TaskImportRow {
     key: String,
@@ -642,17 +1046,12 @@ struct TaskImportRow {
     agent: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 enum TaskTextPatch {
+    #[default]
     Keep,
     Clear,
     Set(String),
-}
-
-impl Default for TaskTextPatch {
-    fn default() -> Self {
-        Self::Keep
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -812,6 +1211,28 @@ struct TaskGuiApproveRequest {
     task_id: Option<String>,
     all_pending_auto_replenish: Option<bool>,
     agent: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskGuiAdvisorPolicyRequest {
+    enabled: Option<bool>,
+    auto_task_generation: Option<bool>,
+    auto_review: Option<bool>,
+    low_task_threshold: Option<usize>,
+    require_confirmation: Option<bool>,
+    allow_online_research: Option<bool>,
+    reviewer_provider_id: Option<String>,
+    reviewer_model: Option<String>,
+    task_manager_provider_id: Option<String>,
+    task_manager_model: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskGuiAdvisorRunRequest {
+    role: String,
+    goal: Option<String>,
+    allow_online_research: Option<bool>,
+    background: Option<bool>,
 }
 
 #[derive(Debug, Parser)]
@@ -1375,6 +1796,7 @@ fn try_main() -> Result<()> {
         Command::Check(args) => cmd_check(&repo_root, args),
         Command::Lock(args) => cmd_lock(&repo_root, args),
         Command::Task(args) => cmd_task(&repo_root, args),
+        Command::Advisor(args) => cmd_advisor(&repo_root, args),
         Command::Project(args) => cmd_project(args),
         Command::Mcp(args) => cmd_mcp(&repo_root, args),
     }
@@ -1715,6 +2137,14 @@ fn fugit_skill_bundle(include_skill_body: bool, include_openai_yaml: bool) -> se
                 "fugit_check_run",
                 "fugit_check_policy_show",
                 "fugit_check_policy_set",
+                "fugit_advisor_show",
+                "fugit_advisor_runs",
+                "fugit_advisor_provider_list",
+                "fugit_advisor_provider_assign",
+                "fugit_advisor_policy_show",
+                "fugit_advisor_policy_set",
+                "fugit_advisor_review",
+                "fugit_advisor_research",
                 "fugit_skill_bundle",
                 "fugit_skill_install_codex",
                 "fugit_task_gui_launch",
@@ -1928,6 +2358,7 @@ fn checkpoint_repair_mode_label(mode: CheckpointRepairModeArg) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn checkpoint_json_error(
     repo_root: &Path,
     branch: Option<&str>,
@@ -3948,11 +4379,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 .find(|task| task.task_id == task_id)
                 .ok_or_else(|| anyhow!("task not found: {}", task_id))?;
             let payload = task_to_json_payload(task, &status_map);
-            if json {
-                println!("{}", serde_json::to_string_pretty(&payload)?);
-            } else {
-                println!("{}", serde_json::to_string_pretty(&payload)?);
-            }
+            let _ = json;
+            println!("{}", serde_json::to_string_pretty(&payload)?);
         }
         TaskAction::Current { agent, json } => {
             if state_changed {
@@ -4504,6 +4932,22 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             }
             let now = Utc::now();
             let config = load_timeline_config_or_default(repo_root)?;
+            let advisor = if requested_task_id.is_none() {
+                maybe_queue_auto_advisor_runs(repo_root, &state).unwrap_or_else(|err| {
+                    json!({
+                        "enabled": true,
+                        "triggered": false,
+                        "status": "error",
+                        "error": err.to_string()
+                    })
+                })
+            } else {
+                json!({
+                    "enabled": true,
+                    "triggered": false,
+                    "status": "task_id_request_bypassed"
+                })
+            };
             let requested_task_index = requested_task_id
                 .as_deref()
                 .and_then(|task_id| state.tasks.iter().position(|task| task.task_id == task_id));
@@ -4631,6 +5075,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                         "updated_task_ids": auto_replenish.updated_task_ids,
                         "pending_confirmation_task_ids": auto_replenish.pending_confirmation_task_ids
                     },
+                    "advisor": advisor,
                     "tasks": [],
                     "task": requested_task_index.map(|task_index| {
                         task_to_json_payload(&state.tasks[task_index], &task_status_map(&state))
@@ -4741,6 +5186,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     "updated_task_ids": auto_replenish.updated_task_ids,
                     "pending_confirmation_task_ids": auto_replenish.pending_confirmation_task_ids
                 },
+                "advisor": advisor,
                 "tasks": task_rows,
                 "task": task_to_json_payload(&task, &status_map)
             });
@@ -5089,6 +5535,425 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
+    match args.action {
+        AdvisorAction::Show { json } => {
+            let payload = advisor_snapshot_payload(repo_root, 10)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!(
+                    "[fugit-advisor] enabled={} providers={} reviewer={} task_manager={} recent_runs={}",
+                    payload["policy"]["enabled"].as_bool().unwrap_or(false),
+                    payload["providers"]
+                        .as_array()
+                        .map(|rows| rows.len())
+                        .unwrap_or(0),
+                    payload["assignments"]["reviewer"]["provider_id"]
+                        .as_str()
+                        .unwrap_or("unassigned"),
+                    payload["assignments"]["task_manager"]["provider_id"]
+                        .as_str()
+                        .unwrap_or("unassigned"),
+                    payload["runs"]
+                        .as_array()
+                        .map(|rows| rows.len())
+                        .unwrap_or(0)
+                );
+            }
+        }
+        AdvisorAction::Runs { limit, json } => {
+            let runs = load_advisor_runs(repo_root, limit)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&runs)?);
+            } else {
+                println!("[fugit-advisor] recent_runs={}", runs.len());
+                for run in runs {
+                    println!(
+                        "- {} [{}] {} provider={} tasks={} findings={} trigger={}",
+                        run.run_id,
+                        advisor_role_label(run.role),
+                        run.summary,
+                        run.provider_name,
+                        run.generated_task_count,
+                        run.findings_count,
+                        run.trigger
+                    );
+                }
+            }
+        }
+        AdvisorAction::Provider { action } => {
+            let mut state = ensure_advisor_state(repo_root)?;
+            match action {
+                AdvisorProviderAction::Discover { json } => {
+                    let payload = json!({
+                        "schema_version": "fugit.advisor.provider.discover.v1",
+                        "generated_at_utc": now_utc(),
+                        "providers": discover_builtin_advisor_providers(),
+                    });
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&payload)?);
+                    } else {
+                        println!(
+                            "[fugit-advisor] discovered_providers={}",
+                            payload["providers"]
+                                .as_array()
+                                .map(|rows| rows.len())
+                                .unwrap_or(0)
+                        );
+                    }
+                }
+                AdvisorProviderAction::List { json } => {
+                    let payload = advisor_provider_list_payload(&state);
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&payload)?);
+                    } else {
+                        println!(
+                            "[fugit-advisor] providers={}",
+                            payload.as_array().map(|rows| rows.len()).unwrap_or(0)
+                        );
+                        if let Some(rows) = payload.as_array() {
+                            for row in rows {
+                                println!(
+                                    "- {} [{}] enabled={} model={}",
+                                    row["provider_id"].as_str().unwrap_or("unknown"),
+                                    row["kind"].as_str().unwrap_or("unknown"),
+                                    row["enabled"].as_bool().unwrap_or(false),
+                                    row["model"].as_str().unwrap_or("default")
+                                );
+                            }
+                        }
+                    }
+                }
+                AdvisorProviderAction::AddCodex {
+                    name,
+                    executable,
+                    model,
+                    local_provider,
+                    assign_role,
+                    json,
+                } => {
+                    let provider = add_or_update_advisor_provider(
+                        &mut state,
+                        AdvisorProviderKind::Codex,
+                        name.unwrap_or_else(|| "Codex".to_string()),
+                        executable.unwrap_or_else(|| "codex".to_string()),
+                        Vec::new(),
+                        normalize_optional_text(model, "advisor model")?,
+                        normalize_optional_text(local_provider, "advisor local provider")?,
+                        assign_role,
+                    )?;
+                    write_advisor_state(repo_root, &state)?;
+                    emit_advisor_provider_payload(&provider, json)?;
+                }
+                AdvisorProviderAction::AddClaude {
+                    name,
+                    executable,
+                    model,
+                    assign_role,
+                    json,
+                } => {
+                    let provider = add_or_update_advisor_provider(
+                        &mut state,
+                        AdvisorProviderKind::Claude,
+                        name.unwrap_or_else(|| "Claude".to_string()),
+                        executable.unwrap_or_else(|| "claude".to_string()),
+                        Vec::new(),
+                        normalize_optional_text(model, "advisor model")?,
+                        None,
+                        assign_role,
+                    )?;
+                    write_advisor_state(repo_root, &state)?;
+                    emit_advisor_provider_payload(&provider, json)?;
+                }
+                AdvisorProviderAction::AddOllama {
+                    name,
+                    executable,
+                    model,
+                    assign_role,
+                    json,
+                } => {
+                    let provider = add_or_update_advisor_provider(
+                        &mut state,
+                        AdvisorProviderKind::Ollama,
+                        name.unwrap_or_else(|| format!("Ollama {}", model.trim())),
+                        executable.unwrap_or_else(|| "ollama".to_string()),
+                        Vec::new(),
+                        Some(normalize_required_text(model, "advisor model")?),
+                        None,
+                        assign_role,
+                    )?;
+                    write_advisor_state(repo_root, &state)?;
+                    emit_advisor_provider_payload(&provider, json)?;
+                }
+                AdvisorProviderAction::AddCommand {
+                    name,
+                    executable,
+                    args,
+                    model,
+                    assign_role,
+                    json,
+                } => {
+                    let provider = add_or_update_advisor_provider(
+                        &mut state,
+                        AdvisorProviderKind::Command,
+                        name,
+                        normalize_required_text(executable, "advisor executable")?,
+                        args,
+                        normalize_optional_text(model, "advisor model")?,
+                        None,
+                        assign_role,
+                    )?;
+                    write_advisor_state(repo_root, &state)?;
+                    emit_advisor_provider_payload(&provider, json)?;
+                }
+                AdvisorProviderAction::Edit {
+                    provider_id,
+                    name,
+                    executable,
+                    model,
+                    local_provider,
+                    args,
+                    clear_args,
+                    enabled,
+                    assign_role,
+                    json,
+                } => {
+                    let provider = edit_advisor_provider(
+                        &mut state,
+                        &provider_id,
+                        name,
+                        executable,
+                        if clear_args {
+                            Some(Vec::new())
+                        } else if args.is_empty() {
+                            None
+                        } else {
+                            Some(args)
+                        },
+                        normalize_optional_text(model, "advisor model")?,
+                        normalize_optional_text(local_provider, "advisor local provider")?,
+                        enabled,
+                        assign_role,
+                    )?;
+                    write_advisor_state(repo_root, &state)?;
+                    emit_advisor_provider_payload(&provider, json)?;
+                }
+                AdvisorProviderAction::Assign {
+                    role,
+                    provider,
+                    clear,
+                    model,
+                    clear_model,
+                    json,
+                } => {
+                    assign_advisor_role_provider(
+                        &mut state,
+                        role,
+                        if clear {
+                            None
+                        } else {
+                            normalize_optional_text(provider, "advisor provider id")?
+                        },
+                        if clear_model {
+                            Some(None)
+                        } else {
+                            normalize_optional_text(model, "advisor model")?.map(Some)
+                        },
+                    )?;
+                    write_advisor_state(repo_root, &state)?;
+                    let payload = advisor_assignment_payload(&state);
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&payload)?);
+                    } else {
+                        println!(
+                            "[fugit-advisor] role={} provider={} model={}",
+                            advisor_role_label(role),
+                            payload[advisor_role_json_key(role)]["provider_id"]
+                                .as_str()
+                                .unwrap_or("unassigned"),
+                            payload[advisor_role_json_key(role)]["model"]
+                                .as_str()
+                                .unwrap_or("default")
+                        );
+                    }
+                }
+                AdvisorProviderAction::Remove { provider_id, json } => {
+                    let provider = remove_advisor_provider(&mut state, &provider_id)?;
+                    write_advisor_state(repo_root, &state)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&provider)?);
+                    } else {
+                        println!("[fugit-advisor] removed {}", provider.provider_id);
+                    }
+                }
+            }
+        }
+        AdvisorAction::Policy { action } => {
+            let mut state = ensure_advisor_state(repo_root)?;
+            match action {
+                AdvisorPolicyAction::Show { json } => {
+                    let payload = advisor_policy_payload(&state);
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&payload)?);
+                    } else {
+                        println!(
+                            "[fugit-advisor-policy] enabled={} auto_task_generation={} auto_review={} low_task_threshold={} require_confirmation={} allow_online_research={}",
+                            payload["enabled"].as_bool().unwrap_or(false),
+                            payload["auto_task_generation"].as_bool().unwrap_or(false),
+                            payload["auto_review"].as_bool().unwrap_or(false),
+                            payload["low_task_threshold"].as_u64().unwrap_or(0),
+                            payload["require_confirmation"].as_bool().unwrap_or(false),
+                            payload["allow_online_research"].as_bool().unwrap_or(false)
+                        );
+                    }
+                }
+                AdvisorPolicyAction::Set {
+                    enabled,
+                    auto_task_generation,
+                    auto_review,
+                    low_task_threshold,
+                    require_confirmation,
+                    allow_online_research,
+                    auto_trigger_cooldown_minutes,
+                    json,
+                } => {
+                    let changed = update_advisor_policy(
+                        &mut state,
+                        enabled,
+                        auto_task_generation,
+                        auto_review,
+                        low_task_threshold,
+                        require_confirmation,
+                        allow_online_research,
+                        auto_trigger_cooldown_minutes,
+                    );
+                    if changed {
+                        write_advisor_state(repo_root, &state)?;
+                    }
+                    let payload = advisor_policy_payload(&state);
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&payload)?);
+                    } else {
+                        println!(
+                            "[fugit-advisor-policy] enabled={} auto_task_generation={} auto_review={} low_task_threshold={}",
+                            payload["enabled"].as_bool().unwrap_or(false),
+                            payload["auto_task_generation"].as_bool().unwrap_or(false),
+                            payload["auto_review"].as_bool().unwrap_or(false),
+                            payload["low_task_threshold"].as_u64().unwrap_or(0)
+                        );
+                    }
+                }
+            }
+        }
+        AdvisorAction::Review {
+            goal,
+            provider,
+            model,
+            allow_online_research,
+            sync_suggested_tasks,
+            background,
+            background_worker,
+            trigger,
+            plan_mode,
+            json,
+        } => {
+            let options = AdvisorRunOptions {
+                role: AdvisorRoleArg::Reviewer,
+                goal: normalize_optional_text(goal, "advisor goal")?,
+                provider_id_override: normalize_optional_text(provider, "advisor provider id")?,
+                model_override: normalize_optional_text(model, "advisor model")?,
+                allow_online_research,
+                require_confirmation_override: None,
+                sync_suggested_tasks,
+                trigger: normalize_optional_text(trigger, "advisor trigger")?
+                    .unwrap_or_else(|| "manual_review".to_string()),
+                plan_mode,
+            };
+            if background {
+                let payload = queue_advisor_background(repo_root, &options)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    println!(
+                        "[fugit-advisor] queued role={} status={} trigger={}",
+                        advisor_role_label(options.role),
+                        payload["status"].as_str().unwrap_or("queued"),
+                        payload["trigger"].as_str().unwrap_or("manual_review")
+                    );
+                }
+            } else if background_worker {
+                run_advisor_background_worker(repo_root, &options)?;
+            } else {
+                let run = execute_advisor_run(repo_root, &options)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&run)?);
+                } else {
+                    println!(
+                        "[fugit-advisor] {} provider={} findings={} tasks={} summary={}",
+                        run.run_id,
+                        run.provider_name,
+                        run.findings_count,
+                        run.generated_task_count,
+                        run.summary
+                    );
+                }
+            }
+        }
+        AdvisorAction::Research {
+            goal,
+            provider,
+            model,
+            allow_online_research,
+            require_confirmation,
+            background,
+            background_worker,
+            trigger,
+            plan_mode,
+            json,
+        } => {
+            let options = AdvisorRunOptions {
+                role: AdvisorRoleArg::TaskManager,
+                goal: normalize_optional_text(goal, "advisor goal")?,
+                provider_id_override: normalize_optional_text(provider, "advisor provider id")?,
+                model_override: normalize_optional_text(model, "advisor model")?,
+                allow_online_research,
+                require_confirmation_override: require_confirmation,
+                sync_suggested_tasks: true,
+                trigger: normalize_optional_text(trigger, "advisor trigger")?
+                    .unwrap_or_else(|| "manual_research".to_string()),
+                plan_mode,
+            };
+            if background {
+                let payload = queue_advisor_background(repo_root, &options)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    println!(
+                        "[fugit-advisor] queued role={} status={} trigger={}",
+                        advisor_role_label(options.role),
+                        payload["status"].as_str().unwrap_or("queued"),
+                        payload["trigger"].as_str().unwrap_or("manual_research")
+                    );
+                }
+            } else if background_worker {
+                run_advisor_background_worker(repo_root, &options)?;
+            } else {
+                let run = execute_advisor_run(repo_root, &options)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&run)?);
+                } else {
+                    println!(
+                        "[fugit-advisor] {} provider={} synced_tasks={} summary={}",
+                        run.run_id, run.provider_name, run.synced_task_count, run.summary
+                    );
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -5485,6 +6350,65 @@ fn handle_task_gui_connection(
             limit,
             offset,
         ) {
+            Ok(payload) => write_http_json(stream, "200 OK", &payload),
+            Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
+        };
+    }
+
+    if path == "/api/advisor" {
+        if method != "GET" {
+            return write_http_json_error(
+                stream,
+                "405 Method Not Allowed",
+                "GET required for /api/advisor",
+            );
+        }
+        let selected_project = query.get("project").map(String::as_str).or(default_project);
+        return match task_gui_advisor_payload(repo_root, selected_project) {
+            Ok(payload) => write_http_json(stream, "200 OK", &payload),
+            Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
+        };
+    }
+
+    if path == "/api/advisor/policy" {
+        if method != "POST" {
+            return write_http_json_error(
+                stream,
+                "405 Method Not Allowed",
+                "POST required for /api/advisor/policy",
+            );
+        }
+        if !request_content_type_is_json(&request) {
+            return write_http_json_error(
+                stream,
+                "415 Unsupported Media Type",
+                "application/json body required for /api/advisor/policy",
+            );
+        }
+        let selected_project = query.get("project").map(String::as_str).or(default_project);
+        return match task_gui_update_advisor_policy(repo_root, selected_project, &request.body) {
+            Ok(payload) => write_http_json(stream, "200 OK", &payload),
+            Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
+        };
+    }
+
+    if path == "/api/advisor/run" {
+        if method != "POST" {
+            return write_http_json_error(
+                stream,
+                "405 Method Not Allowed",
+                "POST required for /api/advisor/run",
+            );
+        }
+        if !request_content_type_is_json(&request) {
+            return write_http_json_error(
+                stream,
+                "415 Unsupported Media Type",
+                "application/json body required for /api/advisor/run",
+            );
+        }
+        let selected_project = query.get("project").map(String::as_str).or(default_project);
+        return match task_gui_run_advisor(repo_root, selected_project, &request.body) {
             Ok(payload) => write_http_json(stream, "200 OK", &payload),
             Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
         };
@@ -6017,6 +6941,147 @@ fn task_gui_approve_task(
     }))
 }
 
+fn task_gui_advisor_payload(
+    repo_root: &Path,
+    project_selector: Option<&str>,
+) -> Result<serde_json::Value> {
+    let (_projects, selected, selected_repo) =
+        resolve_task_gui_project_selection(repo_root, project_selector)?;
+    let mut payload = advisor_snapshot_payload(&selected_repo, 10)?;
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "selected_project".to_string(),
+            json!({
+                "key": selected.key,
+                "name": selected.name,
+                "repo_root": selected.repo_root
+            }),
+        );
+    }
+    Ok(payload)
+}
+
+fn task_gui_update_advisor_policy(
+    repo_root: &Path,
+    project_selector: Option<&str>,
+    body: &[u8],
+) -> Result<serde_json::Value> {
+    let request: TaskGuiAdvisorPolicyRequest =
+        serde_json::from_slice(body).with_context(|| "invalid advisor policy payload")?;
+    let (_projects, selected, selected_repo) =
+        resolve_task_gui_project_selection(repo_root, project_selector)?;
+    let mut state = ensure_advisor_state(&selected_repo)?;
+    let _ = update_advisor_policy(
+        &mut state,
+        request.enabled,
+        request.auto_task_generation,
+        request.auto_review,
+        request.low_task_threshold,
+        request.require_confirmation,
+        request.allow_online_research,
+        None,
+    );
+    if request.reviewer_provider_id.is_some() || request.reviewer_model.is_some() {
+        let provider_patch = request.reviewer_provider_id.as_ref().map(|value| {
+            if value.trim().is_empty() {
+                None
+            } else {
+                Some(value.clone())
+            }
+        });
+        let existing_provider = state.reviewer.provider_id.clone();
+        assign_advisor_role_provider(
+            &mut state,
+            AdvisorRoleArg::Reviewer,
+            provider_patch.unwrap_or(existing_provider),
+            Some(request.reviewer_model.and_then(|value| {
+                if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value)
+                }
+            })),
+        )?;
+    }
+    if request.task_manager_provider_id.is_some() || request.task_manager_model.is_some() {
+        let provider_patch = request.task_manager_provider_id.as_ref().map(|value| {
+            if value.trim().is_empty() {
+                None
+            } else {
+                Some(value.clone())
+            }
+        });
+        let existing_provider = state.task_manager.provider_id.clone();
+        assign_advisor_role_provider(
+            &mut state,
+            AdvisorRoleArg::TaskManager,
+            provider_patch.unwrap_or(existing_provider),
+            Some(request.task_manager_model.and_then(|value| {
+                if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value)
+                }
+            })),
+        )?;
+    }
+    write_advisor_state(&selected_repo, &state)?;
+    Ok(json!({
+        "ok": true,
+        "action": "advisor_policy",
+        "selected_project": {
+            "key": selected.key,
+            "name": selected.name,
+            "repo_root": selected.repo_root
+        },
+        "policy": advisor_policy_payload(&state),
+        "assignments": advisor_assignment_payload(&state)
+    }))
+}
+
+fn task_gui_run_advisor(
+    repo_root: &Path,
+    project_selector: Option<&str>,
+    body: &[u8],
+) -> Result<serde_json::Value> {
+    let request: TaskGuiAdvisorRunRequest =
+        serde_json::from_slice(body).with_context(|| "invalid advisor run payload")?;
+    let (_projects, selected, selected_repo) =
+        resolve_task_gui_project_selection(repo_root, project_selector)?;
+    let role = match request.role.trim().to_ascii_lowercase().as_str() {
+        "reviewer" | "review" => AdvisorRoleArg::Reviewer,
+        "task_manager" | "task-manager" | "research" => AdvisorRoleArg::TaskManager,
+        other => bail!("unknown advisor role '{}'", other),
+    };
+    let options = AdvisorRunOptions {
+        role,
+        goal: normalize_optional_text(request.goal, "advisor goal")?,
+        provider_id_override: None,
+        model_override: None,
+        allow_online_research: request.allow_online_research.unwrap_or(false),
+        require_confirmation_override: None,
+        sync_suggested_tasks: matches!(role, AdvisorRoleArg::TaskManager),
+        trigger: "task_gui_manual".to_string(),
+        plan_mode: AdvisorPlanModeArg::GoalScoped,
+    };
+    let payload = if request.background.unwrap_or(true) {
+        queue_advisor_background(&selected_repo, &options)?
+    } else {
+        serde_json::to_value(execute_advisor_run(&selected_repo, &options)?)?
+    };
+    Ok(json!({
+        "ok": true,
+        "action": "advisor_run",
+        "selected_project": {
+            "key": selected.key,
+            "name": selected.name,
+            "repo_root": selected.repo_root
+        },
+        "role": advisor_role_label(role),
+        "result": payload
+    }))
+}
+
 fn task_gui_payload(repo_root: &Path, project_selector: Option<&str>) -> Result<serde_json::Value> {
     let (projects, selected, selected_repo) =
         resolve_task_gui_project_selection(repo_root, project_selector)?;
@@ -6470,6 +7535,59 @@ fn task_gui_html() -> &'static str {
       color: var(--muted);
       font-size: 11px;
     }
+    .panel-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .advisor-shell {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      background: #f8fafc;
+    }
+    .advisor-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: flex-start;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+    .advisor-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+    }
+    .advisor-grid select,
+    .advisor-grid input,
+    .advisor-shell button {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+      padding: 8px 10px;
+    }
+    .advisor-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
+    .run-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .run-row {
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 9px 10px;
+      font-size: 12px;
+    }
     .empty {
       margin-top: 20px;
       border: 1px dashed var(--border);
@@ -6540,15 +7658,68 @@ fn task_gui_html() -> &'static str {
       <div class="empty" id="empty" style="display:none;">No tasks yet. Create one here or import a backlog with <code>fugit task import --file /path/to/tasks.tsv</code>.</div>
     </section>
     <section class="panel">
-      <div class="timeline-controls">
-        <strong>timeline</strong>
-        <select id="branchSelect"></select>
-        <button id="refreshTimeline" type="button">refresh</button>
-        <button id="loadOlder" type="button">load older</button>
+      <div class="panel-stack">
+        <section class="advisor-shell">
+          <div class="advisor-top">
+            <div>
+              <strong>advisor</strong>
+              <div class="meta" id="advisorMeta">loading advisor...</div>
+            </div>
+            <div class="panel-actions">
+              <button id="refreshAdvisor" type="button">refresh</button>
+              <button id="saveAdvisorPolicy" type="button">save advisor</button>
+            </div>
+          </div>
+          <div class="advisor-grid">
+            <label class="field">
+              <span>reviewer provider</span>
+              <select id="reviewerProviderSelect"></select>
+            </label>
+            <label class="field">
+              <span>reviewer model</span>
+              <input id="reviewerModelInput" type="text" autocomplete="off" placeholder="optional override">
+            </label>
+            <label class="field">
+              <span>task manager provider</span>
+              <select id="taskManagerProviderSelect"></select>
+            </label>
+            <label class="field">
+              <span>task manager model</span>
+              <input id="taskManagerModelInput" type="text" autocomplete="off" placeholder="optional override">
+            </label>
+            <label class="field">
+              <span>low task threshold</span>
+              <input id="advisorLowThresholdInput" type="number" min="1" step="1">
+            </label>
+            <label class="field">
+              <span>goal / research topic</span>
+              <input id="advisorGoalInput" type="text" autocomplete="off" placeholder="optional manual focus">
+            </label>
+          </div>
+          <div class="advisor-actions">
+            <label class="pill"><input id="advisorEnabledInput" type="checkbox"> advisor enabled</label>
+            <label class="pill"><input id="advisorAutoTaskInput" type="checkbox"> auto task manager</label>
+            <label class="pill"><input id="advisorAutoReviewInput" type="checkbox"> auto reviewer</label>
+            <label class="pill"><input id="advisorRequireConfirmInput" type="checkbox"> confirm new advisor tasks</label>
+            <label class="pill"><input id="advisorOnlineInput" type="checkbox"> allow online research</label>
+          </div>
+          <div class="advisor-actions">
+            <button id="runAdvisorReview" type="button">run review</button>
+            <button id="runAdvisorResearch" type="button">run research</button>
+          </div>
+          <div class="run-list" id="advisorRuns"></div>
+          <div class="empty" id="advisorEmpty" style="display:none;">No advisor runs yet. Trigger review or research here, or let low-task mode queue it automatically.</div>
+        </section>
+        <div class="timeline-controls">
+          <strong>timeline</strong>
+          <select id="branchSelect"></select>
+          <button id="refreshTimeline" type="button">refresh</button>
+          <button id="loadOlder" type="button">load older</button>
+        </div>
+        <div class="meta" id="timelineMeta">loading timeline...</div>
+        <div class="timeline-list" id="timelineList"></div>
+        <div class="empty" id="timelineEmpty" style="display:none;">No timeline events yet for this branch.</div>
       </div>
-      <div class="meta" id="timelineMeta">loading timeline...</div>
-      <div class="timeline-list" id="timelineList"></div>
-      <div class="empty" id="timelineEmpty" style="display:none;">No timeline events yet for this branch.</div>
     </section>
   </main>
   <script>
@@ -6689,9 +7860,90 @@ fn task_gui_html() -> &'static str {
         closeEditor();
         syncUrl();
         refresh();
+        refreshAdvisor();
         refreshTimeline(true);
       };
     };
+
+    const renderAdvisor = (payload) => {
+      const providers = payload.providers || [];
+      const assignments = payload.assignments || {};
+      const policy = payload.policy || {};
+      const workers = payload.workers || {};
+      const runs = payload.runs || [];
+      const reviewer = assignments.reviewer || {};
+      const taskManager = assignments.task_manager || {};
+      const providerOptions = (selectedId) => [
+        `<option value="">unassigned</option>`,
+        ...providers.map((provider) => {
+          const selected = provider.provider_id === selectedId ? " selected" : "";
+          const label = `${provider.name} (${provider.kind})`;
+          return `<option value="${escapeHtml(provider.provider_id)}"${selected}>${escapeHtml(label)}</option>`;
+        })
+      ].join("");
+
+      byId("reviewerProviderSelect").innerHTML = providerOptions(reviewer.provider_id || "");
+      byId("taskManagerProviderSelect").innerHTML = providerOptions(taskManager.provider_id || "");
+      byId("reviewerModelInput").value = reviewer.model || "";
+      byId("taskManagerModelInput").value = taskManager.model || "";
+      byId("advisorLowThresholdInput").value = String(policy.low_task_threshold || 2);
+      byId("advisorEnabledInput").checked = Boolean(policy.enabled);
+      byId("advisorAutoTaskInput").checked = Boolean(policy.auto_task_generation);
+      byId("advisorAutoReviewInput").checked = Boolean(policy.auto_review);
+      byId("advisorRequireConfirmInput").checked = Boolean(policy.require_confirmation);
+      byId("advisorOnlineInput").checked = Boolean(policy.allow_online_research);
+
+      const reviewerState = workers.reviewer || {};
+      const taskManagerState = workers.task_manager || {};
+      byId("advisorMeta").textContent = `reviewer=${reviewerState.status || "idle"} • task_manager=${taskManagerState.status || "idle"} • providers=${providers.length}`;
+
+      byId("advisorEmpty").style.display = runs.length === 0 ? "block" : "none";
+      byId("advisorRuns").innerHTML = runs.map((run) => `
+        <article class="run-row">
+          <div><strong>${escapeHtml(run.role || "advisor")}</strong> • ${escapeHtml(run.provider_name || "unknown")} • ${escapeHtml(run.summary || "(no summary)")}</div>
+          <div class="meta-row">trigger=${escapeHtml(run.trigger || "manual")} • tasks=${escapeHtml(run.generated_task_count || 0)} • findings=${escapeHtml(run.findings_count || 0)}</div>
+        </article>
+      `).join("");
+    };
+
+    async function refreshAdvisor() {
+      try {
+        const response = await fetch(`/api/advisor${projectQuery()}`, { cache: "no-store" });
+        const payload = await readJsonResponse(response);
+        renderAdvisor(payload);
+      } catch (error) {
+        byId("advisorMeta").textContent = `failed to load advisor: ${error}`;
+      }
+    }
+
+    const collectAdvisorPolicyPayload = () => ({
+      enabled: byId("advisorEnabledInput").checked,
+      auto_task_generation: byId("advisorAutoTaskInput").checked,
+      auto_review: byId("advisorAutoReviewInput").checked,
+      low_task_threshold: Number(byId("advisorLowThresholdInput").value || "2"),
+      require_confirmation: byId("advisorRequireConfirmInput").checked,
+      allow_online_research: byId("advisorOnlineInput").checked,
+      reviewer_provider_id: byId("reviewerProviderSelect").value || "",
+      reviewer_model: byId("reviewerModelInput").value.trim(),
+      task_manager_provider_id: byId("taskManagerProviderSelect").value || "",
+      task_manager_model: byId("taskManagerModelInput").value.trim()
+    });
+
+    async function runAdvisor(role) {
+      const payload = {
+        role,
+        goal: byId("advisorGoalInput").value.trim() || null,
+        allow_online_research: byId("advisorOnlineInput").checked,
+        background: true
+      };
+      const response = await fetch(`/api/advisor/run${projectQuery()}`, {
+        method: "POST",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      return readJsonResponse(response);
+    }
 
     const renderTasks = (tasks) => {
       const editor = byId("taskEditor");
@@ -6898,6 +8150,7 @@ fn task_gui_html() -> &'static str {
         renderTasks(tasks);
         if (selectedProject !== previousProject) {
           resetTimeline();
+          await refreshAdvisor();
           await refreshTimeline(true);
         }
       } catch (error) {
@@ -6955,6 +8208,42 @@ fn task_gui_html() -> &'static str {
 
     byId("refreshTasks").onclick = () => {
       refresh();
+    };
+    byId("refreshAdvisor").onclick = () => {
+      refreshAdvisor();
+    };
+    byId("saveAdvisorPolicy").onclick = async () => {
+      try {
+        const response = await fetch(`/api/advisor/policy${projectQuery()}`, {
+          method: "POST",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(collectAdvisorPolicyPayload())
+        });
+        await readJsonResponse(response);
+        setActionMessage("saved advisor policy");
+        await refreshAdvisor();
+      } catch (error) {
+        setActionMessage(`advisor save failed: ${error}`, "error");
+      }
+    };
+    byId("runAdvisorReview").onclick = async () => {
+      try {
+        const result = await runAdvisor("reviewer");
+        setActionMessage(`queued advisor review (${result.result?.status || result.result?.trigger || "ok"})`);
+        await refreshAdvisor();
+      } catch (error) {
+        setActionMessage(`advisor review failed: ${error}`, "error");
+      }
+    };
+    byId("runAdvisorResearch").onclick = async () => {
+      try {
+        const result = await runAdvisor("task_manager");
+        setActionMessage(`queued advisor research (${result.result?.status || result.result?.trigger || "ok"})`);
+        await refreshAdvisor();
+      } catch (error) {
+        setActionMessage(`advisor research failed: ${error}`, "error");
+      }
     };
     byId("newTaskButton").onclick = () => {
       openEditor("create");
@@ -7018,10 +8307,11 @@ fn task_gui_html() -> &'static str {
     };
     agentInput.onblur = agentInput.onchange;
 
-    refresh().then(() => refreshTimeline(true));
+    refresh().then(() => refreshAdvisor()).then(() => refreshTimeline(true));
     setInterval(() => {
       if (!document.hidden) {
         refresh();
+        refreshAdvisor();
       }
     }, 1200);
   </script>
@@ -7459,6 +8749,92 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "require_on_task_done": { "type": "boolean" },
                     "run_before_sync": { "type": "boolean" },
                     "agent": { "type": "string" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_advisor_show",
+            "description": "Show advisor providers, role assignments, policy, worker state, and recent runs.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "fugit_advisor_runs",
+            "description": "List recent advisor runs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "minimum": 1 }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_advisor_provider_list",
+            "description": "List configured and discovered advisor providers.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "fugit_advisor_provider_assign",
+            "description": "Assign an advisor provider and optional model override to reviewer or task_manager.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["role"],
+                "properties": {
+                    "role": { "type": "string", "enum": ["reviewer", "task_manager"] },
+                    "provider": { "type": "string" },
+                    "clear": { "type": "boolean" },
+                    "model": { "type": "string" },
+                    "clear_model": { "type": "boolean" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_advisor_policy_show",
+            "description": "Inspect advisor low-task automation policy.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "fugit_advisor_policy_set",
+            "description": "Update advisor automation policy and low-task thresholds.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": { "type": "boolean" },
+                    "auto_task_generation": { "type": "boolean" },
+                    "auto_review": { "type": "boolean" },
+                    "low_task_threshold": { "type": "integer", "minimum": 1 },
+                    "require_confirmation": { "type": "boolean" },
+                    "allow_online_research": { "type": "boolean" },
+                    "auto_trigger_cooldown_minutes": { "type": "integer", "minimum": 1 }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_advisor_review",
+            "description": "Run or queue an advisor review pass with the configured reviewer model.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "goal": { "type": "string" },
+                    "provider": { "type": "string" },
+                    "model": { "type": "string" },
+                    "allow_online_research": { "type": "boolean" },
+                    "sync_suggested_tasks": { "type": "boolean" },
+                    "background": { "type": "boolean" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_advisor_research",
+            "description": "Run or queue a smart task-manager pass that syncs generated tasks into the backlog.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "goal": { "type": "string" },
+                    "provider": { "type": "string" },
+                    "model": { "type": "string" },
+                    "allow_online_research": { "type": "boolean" },
+                    "require_confirmation": { "type": "boolean" },
+                    "background": { "type": "boolean" }
                 }
             }
         }),
@@ -8496,6 +9872,198 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
+        "fugit_advisor_show" => run_self_cli_json(
+            repo_root,
+            &[
+                "advisor".to_string(),
+                "show".to_string(),
+                "--json".to_string(),
+            ],
+        )?,
+        "fugit_advisor_runs" => {
+            let mut cli_args = vec![
+                "advisor".to_string(),
+                "runs".to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(limit) = args.get("limit").and_then(serde_json::Value::as_u64) {
+                cli_args.push("--limit".to_string());
+                cli_args.push(limit.to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_advisor_provider_list" => run_self_cli_json(
+            repo_root,
+            &[
+                "advisor".to_string(),
+                "provider".to_string(),
+                "list".to_string(),
+                "--json".to_string(),
+            ],
+        )?,
+        "fugit_advisor_provider_assign" => {
+            let role = args
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_advisor_provider_assign requires role"))?;
+            let mut cli_args = vec![
+                "advisor".to_string(),
+                "provider".to_string(),
+                "assign".to_string(),
+                "--role".to_string(),
+                role.to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(provider) = args.get("provider").and_then(serde_json::Value::as_str) {
+                cli_args.push("--provider".to_string());
+                cli_args.push(provider.to_string());
+            }
+            if args
+                .get("clear")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--clear".to_string());
+            }
+            if let Some(model) = args.get("model").and_then(serde_json::Value::as_str) {
+                cli_args.push("--model".to_string());
+                cli_args.push(model.to_string());
+            }
+            if args
+                .get("clear_model")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--clear-model".to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_advisor_policy_show" => run_self_cli_json(
+            repo_root,
+            &[
+                "advisor".to_string(),
+                "policy".to_string(),
+                "show".to_string(),
+                "--json".to_string(),
+            ],
+        )?,
+        "fugit_advisor_policy_set" => {
+            let mut cli_args = vec![
+                "advisor".to_string(),
+                "policy".to_string(),
+                "set".to_string(),
+                "--json".to_string(),
+            ];
+            for (name, flag) in [
+                ("enabled", "--enabled"),
+                ("auto_task_generation", "--auto-task-generation"),
+                ("auto_review", "--auto-review"),
+                ("require_confirmation", "--require-confirmation"),
+                ("allow_online_research", "--allow-online-research"),
+            ] {
+                if let Some(value) = args.get(name).and_then(serde_json::Value::as_bool) {
+                    cli_args.push(flag.to_string());
+                    cli_args.push(value.to_string());
+                }
+            }
+            if let Some(value) = args
+                .get("low_task_threshold")
+                .and_then(serde_json::Value::as_u64)
+            {
+                cli_args.push("--low-task-threshold".to_string());
+                cli_args.push(value.to_string());
+            }
+            if let Some(value) = args
+                .get("auto_trigger_cooldown_minutes")
+                .and_then(serde_json::Value::as_i64)
+            {
+                cli_args.push("--auto-trigger-cooldown-minutes".to_string());
+                cli_args.push(value.to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_advisor_review" => {
+            let mut cli_args = vec![
+                "advisor".to_string(),
+                "review".to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(goal) = args.get("goal").and_then(serde_json::Value::as_str) {
+                cli_args.push("--goal".to_string());
+                cli_args.push(goal.to_string());
+            }
+            if let Some(provider) = args.get("provider").and_then(serde_json::Value::as_str) {
+                cli_args.push("--provider".to_string());
+                cli_args.push(provider.to_string());
+            }
+            if let Some(model) = args.get("model").and_then(serde_json::Value::as_str) {
+                cli_args.push("--model".to_string());
+                cli_args.push(model.to_string());
+            }
+            if args
+                .get("allow_online_research")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--allow-online-research".to_string());
+            }
+            if args
+                .get("sync_suggested_tasks")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--sync-suggested-tasks".to_string());
+            }
+            if args
+                .get("background")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--background".to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_advisor_research" => {
+            let mut cli_args = vec![
+                "advisor".to_string(),
+                "research".to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(goal) = args.get("goal").and_then(serde_json::Value::as_str) {
+                cli_args.push("--goal".to_string());
+                cli_args.push(goal.to_string());
+            }
+            if let Some(provider) = args.get("provider").and_then(serde_json::Value::as_str) {
+                cli_args.push("--provider".to_string());
+                cli_args.push(provider.to_string());
+            }
+            if let Some(model) = args.get("model").and_then(serde_json::Value::as_str) {
+                cli_args.push("--model".to_string());
+                cli_args.push(model.to_string());
+            }
+            if args
+                .get("allow_online_research")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--allow-online-research".to_string());
+            }
+            if let Some(require_confirmation) = args
+                .get("require_confirmation")
+                .and_then(serde_json::Value::as_bool)
+            {
+                cli_args.push("--require-confirmation".to_string());
+                cli_args.push(require_confirmation.to_string());
+            }
+            if args
+                .get("background")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--background".to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
         "fugit_task_gui_launch" => {
             let mut cli_args = vec![
                 "task".to_string(),
@@ -9225,6 +10793,1816 @@ fn maybe_queue_auto_bridge_sync_for_task_done(
             })
         }
     }
+}
+
+fn advisor_role_label(role: AdvisorRoleArg) -> &'static str {
+    match role {
+        AdvisorRoleArg::Reviewer => "reviewer",
+        AdvisorRoleArg::TaskManager => "task_manager",
+    }
+}
+
+fn advisor_role_json_key(role: AdvisorRoleArg) -> &'static str {
+    advisor_role_label(role)
+}
+
+fn advisor_role_agent_id(role: AdvisorRoleArg) -> String {
+    format!("fugit.advisor.{}", advisor_role_label(role))
+}
+
+fn default_advisor_policy() -> AdvisorPolicy {
+    AdvisorPolicy {
+        enabled: true,
+        auto_task_generation: true,
+        auto_review: true,
+        low_task_threshold: default_advisor_low_task_threshold(),
+        require_confirmation: false,
+        allow_online_research: false,
+        auto_trigger_cooldown_minutes: default_advisor_auto_trigger_cooldown_minutes(),
+    }
+}
+
+fn default_advisor_state() -> AdvisorState {
+    let now = now_utc();
+    AdvisorState {
+        schema_version: SCHEMA_ADVISOR_STATE.to_string(),
+        updated_at_utc: now,
+        policy: default_advisor_policy(),
+        providers: Vec::new(),
+        reviewer: AdvisorRoleSelection {
+            provider_id: None,
+            model: None,
+        },
+        task_manager: AdvisorRoleSelection {
+            provider_id: None,
+            model: None,
+        },
+    }
+}
+
+fn advisor_provider_payload(provider: &AdvisorProvider) -> serde_json::Value {
+    json!({
+        "provider_id": provider.provider_id,
+        "name": provider.name,
+        "kind": match provider.kind {
+            AdvisorProviderKind::Codex => "codex",
+            AdvisorProviderKind::Claude => "claude",
+            AdvisorProviderKind::Ollama => "ollama",
+            AdvisorProviderKind::Command => "command"
+        },
+        "executable": provider.executable,
+        "args": provider.args,
+        "model": provider.model,
+        "local_provider": provider.local_provider,
+        "enabled": provider.enabled,
+        "created_at_utc": provider.created_at_utc,
+        "updated_at_utc": provider.updated_at_utc
+    })
+}
+
+fn advisor_provider_list_payload(state: &AdvisorState) -> serde_json::Value {
+    serde_json::Value::Array(
+        state
+            .providers
+            .iter()
+            .map(advisor_provider_payload)
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn advisor_assignment_payload(state: &AdvisorState) -> serde_json::Value {
+    json!({
+        "reviewer": {
+            "provider_id": state.reviewer.provider_id,
+            "model": state.reviewer.model
+        },
+        "task_manager": {
+            "provider_id": state.task_manager.provider_id,
+            "model": state.task_manager.model
+        }
+    })
+}
+
+fn advisor_policy_payload(state: &AdvisorState) -> serde_json::Value {
+    json!({
+        "enabled": state.policy.enabled,
+        "auto_task_generation": state.policy.auto_task_generation,
+        "auto_review": state.policy.auto_review,
+        "low_task_threshold": state.policy.low_task_threshold,
+        "require_confirmation": state.policy.require_confirmation,
+        "allow_online_research": state.policy.allow_online_research,
+        "auto_trigger_cooldown_minutes": state.policy.auto_trigger_cooldown_minutes
+    })
+}
+
+fn emit_advisor_provider_payload(provider: &AdvisorProvider, json: bool) -> Result<()> {
+    let payload = advisor_provider_payload(provider);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "[fugit-advisor] provider={} kind={} enabled={} model={}",
+            payload["provider_id"].as_str().unwrap_or("unknown"),
+            payload["kind"].as_str().unwrap_or("unknown"),
+            payload["enabled"].as_bool().unwrap_or(false),
+            payload["model"].as_str().unwrap_or("default")
+        );
+    }
+    Ok(())
+}
+
+fn ensure_advisor_state(repo_root: &Path) -> Result<AdvisorState> {
+    let path = timeline_advisor_state_path(repo_root);
+    let mut state =
+        load_json_optional::<AdvisorState>(&path)?.unwrap_or_else(default_advisor_state);
+    if state.schema_version.trim().is_empty() {
+        state.schema_version = SCHEMA_ADVISOR_STATE.to_string();
+    }
+    if state.updated_at_utc.trim().is_empty() {
+        state.updated_at_utc = now_utc();
+    }
+    let discovered = discover_builtin_advisor_providers();
+    let mut changed = merge_discovered_advisor_providers(&mut state, discovered);
+    changed |= ensure_default_advisor_assignments(&mut state);
+    if changed {
+        write_advisor_state(repo_root, &state)?;
+    }
+    Ok(state)
+}
+
+fn write_advisor_state(repo_root: &Path, state: &AdvisorState) -> Result<()> {
+    write_pretty_json(&timeline_advisor_state_path(repo_root), state)
+}
+
+fn discover_builtin_advisor_providers() -> Vec<AdvisorProvider> {
+    let mut providers = Vec::<AdvisorProvider>::new();
+    if command_exists("codex") {
+        providers.push(builtin_advisor_provider(
+            "builtin_codex",
+            "Codex",
+            AdvisorProviderKind::Codex,
+            "codex",
+            None,
+            None,
+        ));
+    }
+    if command_exists("claude") {
+        providers.push(builtin_advisor_provider(
+            "builtin_claude",
+            "Claude",
+            AdvisorProviderKind::Claude,
+            "claude",
+            None,
+            None,
+        ));
+    }
+    if command_exists("ollama") {
+        for model in detect_ollama_models() {
+            let slug = normalize_markdown_import_key(&model);
+            providers.push(builtin_advisor_provider(
+                &format!("builtin_ollama_{}", slug),
+                &format!("Ollama {}", model),
+                AdvisorProviderKind::Ollama,
+                "ollama",
+                Some(model),
+                None,
+            ));
+        }
+    }
+    providers
+}
+
+fn builtin_advisor_provider(
+    provider_id: &str,
+    name: &str,
+    kind: AdvisorProviderKind,
+    executable: &str,
+    model: Option<String>,
+    local_provider: Option<String>,
+) -> AdvisorProvider {
+    let now = now_utc();
+    AdvisorProvider {
+        provider_id: provider_id.to_string(),
+        name: name.to_string(),
+        kind,
+        executable: executable.to_string(),
+        args: Vec::new(),
+        model,
+        local_provider,
+        enabled: true,
+        created_at_utc: now.clone(),
+        updated_at_utc: now,
+    }
+}
+
+fn merge_discovered_advisor_providers(
+    state: &mut AdvisorState,
+    discovered: Vec<AdvisorProvider>,
+) -> bool {
+    let mut changed = false;
+    for provider in discovered {
+        if state
+            .providers
+            .iter()
+            .all(|existing| existing.provider_id != provider.provider_id)
+        {
+            state.providers.push(provider);
+            changed = true;
+        }
+    }
+    if changed {
+        state.providers.sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
+        state.updated_at_utc = now_utc();
+    }
+    changed
+}
+
+fn ensure_default_advisor_assignments(state: &mut AdvisorState) -> bool {
+    let mut changed = false;
+    if state.reviewer.provider_id.is_none()
+        && let Some(provider) = state
+            .providers
+            .iter()
+            .find(|provider| provider.kind == AdvisorProviderKind::Claude && provider.enabled)
+            .or_else(|| {
+                state.providers.iter().find(|provider| {
+                    provider.kind == AdvisorProviderKind::Codex && provider.enabled
+                })
+            })
+            .or_else(|| state.providers.iter().find(|provider| provider.enabled))
+    {
+        state.reviewer.provider_id = Some(provider.provider_id.clone());
+        changed = true;
+    }
+    if state.task_manager.provider_id.is_none()
+        && let Some(provider) = state
+            .providers
+            .iter()
+            .find(|provider| provider.kind == AdvisorProviderKind::Codex && provider.enabled)
+            .or_else(|| state.providers.iter().find(|provider| provider.enabled))
+    {
+        state.task_manager.provider_id = Some(provider.provider_id.clone());
+        changed = true;
+    }
+    if changed {
+        state.updated_at_utc = now_utc();
+    }
+    changed
+}
+
+fn command_exists(command: &str) -> bool {
+    ProcessCommand::new("which")
+        .arg(command)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn detect_ollama_models() -> Vec<String> {
+    let output = match ProcessCommand::new("ollama").arg("list").output() {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+    let mut models = Vec::<String>::new();
+    for (index, line) in String::from_utf8_lossy(&output.stdout).lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if index == 0 && trimmed.to_ascii_lowercase().starts_with("name ") {
+            continue;
+        }
+        if let Some(model) = trimmed.split_whitespace().next()
+            && !model.trim().is_empty()
+        {
+            models.push(model.trim().to_string());
+        }
+    }
+    dedupe_keep_order(models)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_or_update_advisor_provider(
+    state: &mut AdvisorState,
+    kind: AdvisorProviderKind,
+    name: String,
+    executable: String,
+    args: Vec<String>,
+    model: Option<String>,
+    local_provider: Option<String>,
+    assign_role: Option<AdvisorRoleArg>,
+) -> Result<AdvisorProvider> {
+    let provider_id = format!("provider_{}", normalize_markdown_import_key(&name));
+    let now = now_utc();
+    let provider = if let Some(index) = state
+        .providers
+        .iter()
+        .position(|provider| provider.provider_id == provider_id)
+    {
+        state.providers[index].name = name;
+        state.providers[index].kind = kind;
+        state.providers[index].executable = executable;
+        state.providers[index].args = args;
+        state.providers[index].model = model;
+        state.providers[index].local_provider = local_provider;
+        state.providers[index].enabled = true;
+        state.providers[index].updated_at_utc = now.clone();
+        state.providers[index].clone()
+    } else {
+        let provider = AdvisorProvider {
+            provider_id: provider_id.clone(),
+            name,
+            kind,
+            executable,
+            args,
+            model,
+            local_provider,
+            enabled: true,
+            created_at_utc: now.clone(),
+            updated_at_utc: now.clone(),
+        };
+        state.providers.push(provider.clone());
+        state.providers.sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
+        provider
+    };
+    if let Some(role) = assign_role {
+        assign_advisor_role_provider(
+            state,
+            role,
+            Some(provider.provider_id.clone()),
+            Some(provider.model.clone()),
+        )?;
+    }
+    state.updated_at_utc = now;
+    Ok(provider)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn edit_advisor_provider(
+    state: &mut AdvisorState,
+    provider_id: &str,
+    name: Option<String>,
+    executable: Option<String>,
+    args: Option<Vec<String>>,
+    model: Option<String>,
+    local_provider: Option<String>,
+    enabled: Option<bool>,
+    assign_role: Option<AdvisorRoleArg>,
+) -> Result<AdvisorProvider> {
+    let Some(index) = state
+        .providers
+        .iter()
+        .position(|provider| provider.provider_id == provider_id)
+    else {
+        bail!("advisor provider not found: {}", provider_id);
+    };
+    if let Some(name) = name {
+        state.providers[index].name = name;
+    }
+    if let Some(executable) = executable {
+        state.providers[index].executable = executable;
+    }
+    if let Some(args) = args {
+        state.providers[index].args = args;
+    }
+    if let Some(model) = model {
+        state.providers[index].model = Some(model);
+    }
+    if let Some(local_provider) = local_provider {
+        state.providers[index].local_provider = Some(local_provider);
+    }
+    if let Some(enabled) = enabled {
+        state.providers[index].enabled = enabled;
+    }
+    state.providers[index].updated_at_utc = now_utc();
+    let provider = state.providers[index].clone();
+    if let Some(role) = assign_role {
+        assign_advisor_role_provider(
+            state,
+            role,
+            Some(provider.provider_id.clone()),
+            Some(provider.model.clone()),
+        )?;
+    }
+    state.updated_at_utc = now_utc();
+    Ok(provider)
+}
+
+fn assign_advisor_role_provider(
+    state: &mut AdvisorState,
+    role: AdvisorRoleArg,
+    provider_id: Option<String>,
+    model_patch: Option<Option<String>>,
+) -> Result<()> {
+    if let Some(provider_id) = provider_id.as_deref()
+        && state
+            .providers
+            .iter()
+            .all(|provider| provider.provider_id != provider_id)
+    {
+        bail!("advisor provider not found: {}", provider_id);
+    }
+    let selection = match role {
+        AdvisorRoleArg::Reviewer => &mut state.reviewer,
+        AdvisorRoleArg::TaskManager => &mut state.task_manager,
+    };
+    selection.provider_id = provider_id;
+    if let Some(model) = model_patch {
+        selection.model = model;
+    }
+    state.updated_at_utc = now_utc();
+    Ok(())
+}
+
+fn remove_advisor_provider(state: &mut AdvisorState, provider_id: &str) -> Result<AdvisorProvider> {
+    let Some(index) = state
+        .providers
+        .iter()
+        .position(|provider| provider.provider_id == provider_id)
+    else {
+        bail!("advisor provider not found: {}", provider_id);
+    };
+    let removed = state.providers.remove(index);
+    if state.reviewer.provider_id.as_deref() == Some(provider_id) {
+        state.reviewer.provider_id = None;
+    }
+    if state.task_manager.provider_id.as_deref() == Some(provider_id) {
+        state.task_manager.provider_id = None;
+    }
+    let _ = ensure_default_advisor_assignments(state);
+    state.updated_at_utc = now_utc();
+    Ok(removed)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_advisor_policy(
+    state: &mut AdvisorState,
+    enabled: Option<bool>,
+    auto_task_generation: Option<bool>,
+    auto_review: Option<bool>,
+    low_task_threshold: Option<usize>,
+    require_confirmation: Option<bool>,
+    allow_online_research: Option<bool>,
+    auto_trigger_cooldown_minutes: Option<i64>,
+) -> bool {
+    let mut changed = false;
+    if let Some(enabled) = enabled
+        && state.policy.enabled != enabled
+    {
+        state.policy.enabled = enabled;
+        changed = true;
+    }
+    if let Some(auto_task_generation) = auto_task_generation
+        && state.policy.auto_task_generation != auto_task_generation
+    {
+        state.policy.auto_task_generation = auto_task_generation;
+        changed = true;
+    }
+    if let Some(auto_review) = auto_review
+        && state.policy.auto_review != auto_review
+    {
+        state.policy.auto_review = auto_review;
+        changed = true;
+    }
+    if let Some(low_task_threshold) = low_task_threshold {
+        let value = low_task_threshold.max(1);
+        if state.policy.low_task_threshold != value {
+            state.policy.low_task_threshold = value;
+            changed = true;
+        }
+    }
+    if let Some(require_confirmation) = require_confirmation
+        && state.policy.require_confirmation != require_confirmation
+    {
+        state.policy.require_confirmation = require_confirmation;
+        changed = true;
+    }
+    if let Some(allow_online_research) = allow_online_research
+        && state.policy.allow_online_research != allow_online_research
+    {
+        state.policy.allow_online_research = allow_online_research;
+        changed = true;
+    }
+    if let Some(auto_trigger_cooldown_minutes) = auto_trigger_cooldown_minutes {
+        let value = auto_trigger_cooldown_minutes.max(1);
+        if state.policy.auto_trigger_cooldown_minutes != value {
+            state.policy.auto_trigger_cooldown_minutes = value;
+            changed = true;
+        }
+    }
+    if changed {
+        state.updated_at_utc = now_utc();
+    }
+    changed
+}
+
+fn advisor_snapshot_payload(repo_root: &Path, limit: usize) -> Result<serde_json::Value> {
+    let state = ensure_advisor_state(repo_root)?;
+    let reviewer_worker = load_advisor_worker_state(repo_root, AdvisorRoleArg::Reviewer, &state)?;
+    let task_manager_worker =
+        load_advisor_worker_state(repo_root, AdvisorRoleArg::TaskManager, &state)?;
+    Ok(json!({
+        "schema_version": "fugit.advisor.snapshot.v1",
+        "generated_at_utc": now_utc(),
+        "policy": advisor_policy_payload(&state),
+        "providers": advisor_provider_list_payload(&state),
+        "assignments": advisor_assignment_payload(&state),
+        "workers": {
+            "reviewer": reviewer_worker,
+            "task_manager": task_manager_worker
+        },
+        "runs": load_advisor_runs(repo_root, limit)?
+    }))
+}
+
+fn load_advisor_runs(repo_root: &Path, limit: usize) -> Result<Vec<AdvisorRunRecord>> {
+    let path = timeline_advisor_runs_path(repo_root);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let file =
+        fs::File::open(&path).with_context(|| format!("failed opening {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut rows = Vec::<AdvisorRunRecord>::new();
+    for line in reader.lines() {
+        let line = line.with_context(|| format!("failed reading {}", path.display()))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(row) = serde_json::from_str::<AdvisorRunRecord>(&line) {
+            rows.push(row);
+        }
+    }
+    if rows.len() > limit {
+        let start = rows.len().saturating_sub(limit);
+        rows = rows.split_off(start);
+    }
+    rows.reverse();
+    Ok(rows)
+}
+
+fn default_advisor_worker_state(role: AdvisorRoleArg, state: &AdvisorState) -> AdvisorWorkerState {
+    AdvisorWorkerState {
+        schema_version: SCHEMA_ADVISOR_WORKER_STATE.to_string(),
+        role,
+        updated_at_utc: now_utc(),
+        status: "idle".to_string(),
+        enabled: state.policy.enabled,
+        last_requested_at_utc: None,
+        last_started_at_utc: None,
+        last_finished_at_utc: None,
+        last_goal: None,
+        last_trigger: None,
+        last_result: None,
+        last_error: None,
+        last_run_id: None,
+        pending: false,
+        pending_goal: None,
+        pending_trigger: None,
+        pending_allow_online_research: false,
+        pending_require_confirmation: None,
+        pending_provider_id: None,
+        pending_model: None,
+        pending_sync_suggested_tasks: false,
+        pending_plan_mode: AdvisorPlanModeArg::GoalScoped,
+    }
+}
+
+fn load_advisor_worker_state(
+    repo_root: &Path,
+    role: AdvisorRoleArg,
+    state: &AdvisorState,
+) -> Result<AdvisorWorkerState> {
+    let path = timeline_advisor_worker_state_path(repo_root, role);
+    let mut worker = load_json_optional::<AdvisorWorkerState>(&path)?
+        .unwrap_or_else(|| default_advisor_worker_state(role, state));
+    if worker.schema_version.trim().is_empty() {
+        worker.schema_version = SCHEMA_ADVISOR_WORKER_STATE.to_string();
+    }
+    worker.enabled = state.policy.enabled;
+    worker.role = role;
+    Ok(worker)
+}
+
+fn write_advisor_worker_state(repo_root: &Path, state: &AdvisorWorkerState) -> Result<()> {
+    write_pretty_json(
+        &timeline_advisor_worker_state_path(repo_root, state.role),
+        state,
+    )
+}
+
+fn load_advisor_worker_lock(
+    repo_root: &Path,
+    role: AdvisorRoleArg,
+) -> Result<Option<AdvisorWorkerLock>> {
+    load_json_optional::<AdvisorWorkerLock>(&timeline_advisor_worker_lock_path(repo_root, role))
+}
+
+fn write_advisor_worker_lock(repo_root: &Path, lock: &AdvisorWorkerLock) -> Result<()> {
+    write_pretty_json(
+        &timeline_advisor_worker_lock_path(repo_root, lock.role),
+        lock,
+    )
+}
+
+fn remove_advisor_worker_lock(repo_root: &Path, role: AdvisorRoleArg) {
+    let _ = fs::remove_file(timeline_advisor_worker_lock_path(repo_root, role));
+}
+
+fn advisor_worker_lock_is_stale(lock: &AdvisorWorkerLock) -> bool {
+    match parse_rfc3339_utc(&lock.created_at_utc) {
+        Some(created_at) => {
+            created_at + Duration::minutes(ADVISOR_WORKER_STALE_MINUTES) <= Utc::now()
+        }
+        None => true,
+    }
+}
+
+fn advisor_worker_recently_requested(worker: &AdvisorWorkerState, cooldown_minutes: i64) -> bool {
+    let Some(last_requested_at_utc) = worker.last_requested_at_utc.as_deref() else {
+        return false;
+    };
+    let Some(last_requested_at) = parse_rfc3339_utc(last_requested_at_utc) else {
+        return false;
+    };
+    last_requested_at + Duration::minutes(cooldown_minutes.max(1)) > Utc::now()
+}
+
+fn queue_advisor_background(
+    repo_root: &Path,
+    options: &AdvisorRunOptions,
+) -> Result<serde_json::Value> {
+    let advisor_state = ensure_advisor_state(repo_root)?;
+    let mut worker = load_advisor_worker_state(repo_root, options.role, &advisor_state)?;
+    let now = now_utc();
+    if let Some(lock) = load_advisor_worker_lock(repo_root, options.role)? {
+        if advisor_worker_lock_is_stale(&lock) {
+            remove_advisor_worker_lock(repo_root, options.role);
+        } else {
+            worker.updated_at_utc = now.clone();
+            worker.status = "running".to_string();
+            worker.last_requested_at_utc = Some(now);
+            worker.pending = true;
+            worker.pending_goal = options.goal.clone();
+            worker.pending_trigger = Some(options.trigger.clone());
+            worker.pending_allow_online_research = options.allow_online_research;
+            worker.pending_require_confirmation = options.require_confirmation_override;
+            worker.pending_provider_id = options.provider_id_override.clone();
+            worker.pending_model = options.model_override.clone();
+            worker.pending_sync_suggested_tasks = options.sync_suggested_tasks;
+            worker.pending_plan_mode = options.plan_mode;
+            write_advisor_worker_state(repo_root, &worker)?;
+            return Ok(json!({
+                "schema_version": "fugit.advisor.queue.v1",
+                "generated_at_utc": now_utc(),
+                "role": advisor_role_label(options.role),
+                "queued": true,
+                "already_running": true,
+                "status": worker.status,
+                "trigger": options.trigger,
+                "goal": options.goal
+            }));
+        }
+    }
+
+    let lock = AdvisorWorkerLock {
+        schema_version: SCHEMA_ADVISOR_WORKER_LOCK.to_string(),
+        role: options.role,
+        lock_id: format!(
+            "advisor_{}_{}",
+            advisor_role_label(options.role),
+            Uuid::new_v4().simple()
+        ),
+        created_at_utc: now.clone(),
+    };
+    write_advisor_worker_lock(repo_root, &lock)?;
+    worker.updated_at_utc = now.clone();
+    worker.status = "queued".to_string();
+    worker.last_requested_at_utc = Some(now.clone());
+    worker.last_goal = options.goal.clone();
+    worker.last_trigger = Some(options.trigger.clone());
+    worker.last_result = None;
+    worker.last_error = None;
+    worker.pending = false;
+    worker.pending_goal = None;
+    worker.pending_trigger = None;
+    write_advisor_worker_state(repo_root, &worker)?;
+
+    let current_exe =
+        std::env::current_exe().with_context(|| "failed resolving current executable")?;
+    let mut cmd = ProcessCommand::new(current_exe);
+    cmd.arg("--repo-root").arg(repo_root).arg("advisor");
+    match options.role {
+        AdvisorRoleArg::Reviewer => cmd.arg("review"),
+        AdvisorRoleArg::TaskManager => cmd.arg("research"),
+    };
+    cmd.arg("--background-worker")
+        .arg("--trigger")
+        .arg(&options.trigger)
+        .arg("--plan-mode")
+        .arg(match options.plan_mode {
+            AdvisorPlanModeArg::AutoBacklog => "auto-backlog",
+            AdvisorPlanModeArg::GoalScoped => "goal-scoped",
+        });
+    if let Some(goal) = options.goal.as_deref() {
+        cmd.arg("--goal").arg(goal);
+    }
+    if let Some(provider_id) = options.provider_id_override.as_deref() {
+        cmd.arg("--provider").arg(provider_id);
+    }
+    if let Some(model) = options.model_override.as_deref() {
+        cmd.arg("--model").arg(model);
+    }
+    if options.allow_online_research {
+        cmd.arg("--allow-online-research");
+    }
+    if options.sync_suggested_tasks && matches!(options.role, AdvisorRoleArg::Reviewer) {
+        cmd.arg("--sync-suggested-tasks");
+    }
+    if let Some(require_confirmation) = options.require_confirmation_override {
+        cmd.arg("--require-confirmation")
+            .arg(if require_confirmation {
+                "true"
+            } else {
+                "false"
+            });
+    }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Err(err) = cmd.spawn() {
+        remove_advisor_worker_lock(repo_root, options.role);
+        worker.updated_at_utc = now_utc();
+        worker.status = "error".to_string();
+        worker.last_error = Some(format!("failed spawning advisor worker: {}", err));
+        write_advisor_worker_state(repo_root, &worker)?;
+        bail!("failed spawning advisor worker: {}", err);
+    }
+
+    Ok(json!({
+        "schema_version": "fugit.advisor.queue.v1",
+        "generated_at_utc": now_utc(),
+        "role": advisor_role_label(options.role),
+        "queued": true,
+        "already_running": false,
+        "status": "queued",
+        "trigger": options.trigger,
+        "goal": options.goal
+    }))
+}
+
+fn run_advisor_background_worker(
+    repo_root: &Path,
+    initial_options: &AdvisorRunOptions,
+) -> Result<()> {
+    let mut current_options = initial_options.clone();
+    let mut guard_loops = 0_usize;
+    loop {
+        guard_loops += 1;
+        if guard_loops > 4 {
+            let advisor_state = ensure_advisor_state(repo_root)?;
+            let mut worker =
+                load_advisor_worker_state(repo_root, current_options.role, &advisor_state)?;
+            worker.updated_at_utc = now_utc();
+            worker.status = "error".to_string();
+            worker.last_error = Some("advisor worker exceeded retry loop guard".to_string());
+            write_advisor_worker_state(repo_root, &worker)?;
+            remove_advisor_worker_lock(repo_root, current_options.role);
+            bail!("advisor worker exceeded retry loop guard");
+        }
+
+        let advisor_state = ensure_advisor_state(repo_root)?;
+        let mut worker =
+            load_advisor_worker_state(repo_root, current_options.role, &advisor_state)?;
+        worker.updated_at_utc = now_utc();
+        worker.status = "running".to_string();
+        worker.last_started_at_utc = Some(now_utc());
+        worker.last_goal = current_options.goal.clone();
+        worker.last_trigger = Some(current_options.trigger.clone());
+        worker.last_error = None;
+        write_advisor_worker_state(repo_root, &worker)?;
+
+        let result = execute_advisor_run(repo_root, &current_options);
+        let advisor_state = ensure_advisor_state(repo_root)?;
+        let mut worker =
+            load_advisor_worker_state(repo_root, current_options.role, &advisor_state)?;
+        worker.updated_at_utc = now_utc();
+        worker.last_finished_at_utc = Some(now_utc());
+        match result {
+            Ok(run) => {
+                worker.status = "success".to_string();
+                worker.last_result = Some(run.summary.clone());
+                worker.last_run_id = Some(run.run_id.clone());
+                worker.last_error = None;
+            }
+            Err(err) => {
+                worker.status = "error".to_string();
+                worker.last_error = Some(err.to_string());
+                worker.last_result = None;
+            }
+        }
+
+        let pending_options = if worker.pending {
+            let next = AdvisorRunOptions {
+                role: current_options.role,
+                goal: worker.pending_goal.clone(),
+                provider_id_override: worker.pending_provider_id.clone(),
+                model_override: worker.pending_model.clone(),
+                allow_online_research: worker.pending_allow_online_research,
+                require_confirmation_override: worker.pending_require_confirmation,
+                sync_suggested_tasks: worker.pending_sync_suggested_tasks,
+                trigger: worker
+                    .pending_trigger
+                    .clone()
+                    .unwrap_or_else(|| current_options.trigger.clone()),
+                plan_mode: worker.pending_plan_mode,
+            };
+            worker.pending = false;
+            worker.pending_goal = None;
+            worker.pending_trigger = None;
+            worker.pending_provider_id = None;
+            worker.pending_model = None;
+            Some(next)
+        } else {
+            None
+        };
+        write_advisor_worker_state(repo_root, &worker)?;
+        if let Some(next_options) = pending_options {
+            current_options = next_options;
+            continue;
+        }
+        break;
+    }
+    remove_advisor_worker_lock(repo_root, current_options.role);
+    Ok(())
+}
+
+fn execute_advisor_run(repo_root: &Path, options: &AdvisorRunOptions) -> Result<AdvisorRunRecord> {
+    let advisor_state = ensure_advisor_state(repo_root)?;
+    if !advisor_state.policy.enabled {
+        bail!("advisor policy is disabled");
+    }
+    let resolved = resolve_advisor_provider(&advisor_state, options)?;
+    let prompt = build_advisor_prompt(repo_root, &advisor_state, options)?;
+    let execution = execute_advisor_provider(repo_root, &resolved, options, &prompt)?;
+    let mut parsed = parse_advisor_model_output(&execution.raw_output)?;
+    sanitize_advisor_model_output(&mut parsed)?;
+
+    let run_id = format!("advisor_{}", Uuid::new_v4().simple());
+    let run_dir = timeline_advisor_run_dir(repo_root, &run_id);
+    fs::create_dir_all(&run_dir)
+        .with_context(|| format!("failed creating {}", run_dir.display()))?;
+    let raw_output_path = run_dir.join("raw.txt");
+    let report_path = run_dir.join("report.json");
+    fs::write(&raw_output_path, execution.raw_output.as_bytes())
+        .with_context(|| format!("failed writing {}", raw_output_path.display()))?;
+
+    let task_sync = if matches!(options.role, AdvisorRoleArg::TaskManager)
+        || (matches!(options.role, AdvisorRoleArg::Reviewer) && options.sync_suggested_tasks)
+    {
+        Some(sync_advisor_generated_tasks(
+            repo_root,
+            &advisor_state,
+            options,
+            &parsed.tasks,
+            &run_id,
+        )?)
+    } else {
+        None
+    };
+    let synced_task_count = task_sync
+        .as_ref()
+        .map(|payload| payload.synced_task_count)
+        .unwrap_or(0);
+    let plan_path = task_sync
+        .as_ref()
+        .and_then(|payload| payload.plan_path.clone());
+
+    let report_payload = json!({
+        "schema_version": SCHEMA_ADVISOR_RUN,
+        "generated_at_utc": now_utc(),
+        "run_id": run_id,
+        "role": advisor_role_label(options.role),
+        "trigger": options.trigger,
+        "goal": options.goal,
+        "provider": advisor_provider_payload(&resolved.provider),
+        "model": resolved.model,
+        "allow_online_research": options.allow_online_research,
+        "execution": {
+            "command": execution.command_rendered
+        },
+        "output": parsed,
+        "task_sync": task_sync
+    });
+    write_pretty_json(&report_path, &report_payload)?;
+
+    let record = AdvisorRunRecord {
+        schema_version: SCHEMA_ADVISOR_RUN.to_string(),
+        run_id: run_id.clone(),
+        generated_at_utc: now_utc(),
+        role: options.role,
+        status: "success".to_string(),
+        provider_id: resolved.provider.provider_id.clone(),
+        provider_name: resolved.provider.name.clone(),
+        provider_kind: resolved.provider.kind,
+        model: resolved.model.clone(),
+        goal: options.goal.clone(),
+        trigger: options.trigger.clone(),
+        allow_online_research: options.allow_online_research,
+        summary: parsed.summary.clone(),
+        findings_count: parsed.findings.len(),
+        generated_task_count: parsed.tasks.len(),
+        synced_task_count,
+        raw_output_path: raw_output_path.display().to_string(),
+        report_path: report_path.display().to_string(),
+        plan_path,
+        error: None,
+    };
+    append_jsonl(&timeline_advisor_runs_path(repo_root), &record)?;
+    append_advisor_timeline_event(repo_root, &record)?;
+    Ok(record)
+}
+
+fn resolve_advisor_provider(
+    state: &AdvisorState,
+    options: &AdvisorRunOptions,
+) -> Result<ResolvedAdvisorProvider> {
+    let role_selection = match options.role {
+        AdvisorRoleArg::Reviewer => &state.reviewer,
+        AdvisorRoleArg::TaskManager => &state.task_manager,
+    };
+    let provider_id = options
+        .provider_id_override
+        .as_deref()
+        .or(role_selection.provider_id.as_deref())
+        .ok_or_else(|| {
+            anyhow!(
+                "advisor role '{}' is not assigned to a provider",
+                advisor_role_label(options.role)
+            )
+        })?;
+    let provider = state
+        .providers
+        .iter()
+        .find(|provider| provider.provider_id == provider_id && provider.enabled)
+        .cloned()
+        .ok_or_else(|| {
+            anyhow!(
+                "advisor provider '{}' is unavailable or disabled",
+                provider_id
+            )
+        })?;
+    Ok(ResolvedAdvisorProvider {
+        model: options
+            .model_override
+            .clone()
+            .or_else(|| role_selection.model.clone())
+            .or_else(|| provider.model.clone()),
+        provider,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct AdvisorProviderExecution {
+    raw_output: String,
+    command_rendered: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AdvisorTaskSyncPayload {
+    plan_path: Option<String>,
+    synced_task_count: usize,
+    created_count: usize,
+    updated_count: usize,
+    reopened_count: usize,
+    removed_count: usize,
+    confirmation_synced_count: usize,
+}
+
+fn build_advisor_prompt(
+    repo_root: &Path,
+    advisor_state: &AdvisorState,
+    options: &AdvisorRunOptions,
+) -> Result<String> {
+    let digest = build_advisor_repo_digest(repo_root)?;
+    let role = advisor_role_label(options.role);
+    let goal = options.goal.as_deref().unwrap_or(match options.role {
+        AdvisorRoleArg::Reviewer => {
+            "Review the project for the highest-leverage issues and architectural risks."
+        }
+        AdvisorRoleArg::TaskManager => {
+            "Generate the next highest-leverage backlog for this project."
+        }
+    });
+    let online_policy = if options.allow_online_research
+        || advisor_state.policy.allow_online_research
+    {
+        "Online research is allowed if your local CLI/runtime supports it, but only use it when it materially improves the result and cite source URLs in notes."
+    } else {
+        "Do not use web or online research. Stay within the repository and deterministic context below."
+    };
+    let task_import_policy = match options.role {
+        AdvisorRoleArg::Reviewer if !options.sync_suggested_tasks => {
+            "You may include suggested tasks in the JSON, but they will be treated as suggestions unless explicitly synced."
+        }
+        _ => {
+            "The tasks you output will be imported into the fugit backlog, so avoid duplicates and keep them concrete."
+        }
+    };
+    Ok(format!(
+        r#"You are fugit's {role}.
+
+Goal:
+{goal}
+
+Operating rules:
+- Stay focused on high-leverage work.
+- Be concise and concrete.
+- Do not modify files.
+- Do not reveal secrets or credentials.
+- Avoid copyrighted long quotes.
+- {online_policy}
+- {task_import_policy}
+- Prefer deterministic reasoning from the repository state and recent task/timeline context.
+- If you are unsure, prefer fewer better tasks instead of speculative filler.
+
+Return JSON only with this shape:
+{{
+  "summary": "one short sentence",
+  "notes": ["optional short note"],
+  "findings": [
+    {{
+      "title": "short label",
+      "severity": "high|medium|low",
+      "detail": "one paragraph",
+      "evidence_paths": ["relative/path.ext"]
+    }}
+  ],
+  "tasks": [
+    {{
+      "key": "optional_stable_key",
+      "title": "task title",
+      "detail": "optional implementation note",
+      "priority": 0,
+      "tags": ["advisor"],
+      "depends_on_keys": []
+    }}
+  ]
+}}
+
+Repository root: {repo_root}
+Role: {role}
+Trigger: {trigger}
+Allow online research: {allow_online}
+
+Deterministic repository digest:
+{digest}
+"#,
+        repo_root = repo_root.display(),
+        trigger = options.trigger,
+        allow_online = options.allow_online_research || advisor_state.policy.allow_online_research,
+        digest = digest
+    ))
+}
+
+fn build_advisor_repo_digest(repo_root: &Path) -> Result<String> {
+    let mut sections = Vec::<String>::new();
+    let branch = detect_git_branch(repo_root).unwrap_or_else(|| "unknown".to_string());
+    sections.push(format!("branch: {}", branch));
+
+    let status_output = ProcessCommand::new("git")
+        .current_dir(repo_root)
+        .args(["status", "--short"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
+        .unwrap_or_default();
+    let status_lines = status_output
+        .lines()
+        .take(40)
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    sections.push(if status_lines.is_empty() {
+        "git status: clean or unavailable".to_string()
+    } else {
+        format!("git status:\n{}", status_lines.join("\n"))
+    });
+
+    let top_level = fs::read_dir(repo_root)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(Result::ok))
+        .filter_map(|entry| entry.file_name().to_str().map(ToString::to_string))
+        .filter(|name| !IGNORE_ROOT_ENTRIES.contains(&name.as_str()))
+        .take(40)
+        .collect::<Vec<_>>();
+    sections.push(format!("top-level entries: {}", top_level.join(", ")));
+
+    let interesting_files = collect_advisor_interesting_files(repo_root);
+    if !interesting_files.is_empty() {
+        sections.push(format!(
+            "interesting files:\n{}",
+            interesting_files.join("\n")
+        ));
+    }
+
+    let task_state = load_task_state(repo_root)?;
+    let status_map = task_status_map(&task_state);
+    let mut indices: Vec<usize> = (0..task_state.tasks.len()).collect();
+    sort_task_indices(&task_state, &mut indices);
+    let task_lines = indices
+        .into_iter()
+        .take(20)
+        .map(|idx| {
+            let task = &task_state.tasks[idx];
+            format!(
+                "- [{}] {} :: {} :: ready={} :: tags={}",
+                task_status_label(&task.status),
+                task.task_id,
+                task.title,
+                task_is_ready_for_dispatch(task, &status_map),
+                task.tags.join(",")
+            )
+        })
+        .collect::<Vec<_>>();
+    sections.push(format!(
+        "task queue summary: total={} open={} claimed={} done={}",
+        task_state.tasks.len(),
+        task_state
+            .tasks
+            .iter()
+            .filter(|task| task.status == TaskStatus::Open)
+            .count(),
+        task_state
+            .tasks
+            .iter()
+            .filter(|task| task.status == TaskStatus::Claimed)
+            .count(),
+        task_state
+            .tasks
+            .iter()
+            .filter(|task| task.status == TaskStatus::Done)
+            .count(),
+    ));
+    if !task_lines.is_empty() {
+        sections.push(format!("top tasks:\n{}", task_lines.join("\n")));
+    }
+
+    if timeline_is_initialized(repo_root)
+        && let Ok((_config, branches)) = load_initialized_state(repo_root)
+        && let Ok(events) = read_branch_events(repo_root, &branches.active_branch)
+    {
+        let recent = timeline_events_page(&events, 0, 12);
+        if !recent.is_empty() {
+            sections.push(format!(
+                "recent timeline:\n{}",
+                recent
+                    .into_iter()
+                    .map(|event| format!(
+                        "- {} [{}] {}",
+                        event.created_at_utc, event.agent_id, event.summary
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+    }
+
+    Ok(sections.join("\n\n"))
+}
+
+fn collect_advisor_interesting_files(repo_root: &Path) -> Vec<String> {
+    let mut rows = Vec::<String>::new();
+    let walker = WalkDir::new(repo_root)
+        .max_depth(3)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file());
+    for entry in walker {
+        let path = entry.path();
+        let Ok(relative) = path.strip_prefix(repo_root) else {
+            continue;
+        };
+        let rel = normalize_relpath(relative);
+        let lowercase = rel.to_ascii_lowercase();
+        let interesting = lowercase == "readme.md"
+            || lowercase.ends_with("/readme.md")
+            || lowercase.contains("architecture")
+            || lowercase.ends_with("cargo.toml")
+            || lowercase.ends_with("package.json")
+            || lowercase.starts_with("src/")
+            || lowercase.starts_with("docs/");
+        if interesting {
+            rows.push(rel);
+        }
+        if rows.len() >= 60 {
+            break;
+        }
+    }
+    rows
+}
+
+fn execute_advisor_provider(
+    repo_root: &Path,
+    provider: &ResolvedAdvisorProvider,
+    options: &AdvisorRunOptions,
+    prompt: &str,
+) -> Result<AdvisorProviderExecution> {
+    let run_tmp_dir = timeline_advisor_temp_dir(repo_root);
+    fs::create_dir_all(&run_tmp_dir)
+        .with_context(|| format!("failed creating {}", run_tmp_dir.display()))?;
+    let output_path = run_tmp_dir.join(format!("{}.last.txt", Uuid::new_v4().simple()));
+    let mut cmd = ProcessCommand::new(&provider.provider.executable);
+    let mut rendered = vec![provider.provider.executable.clone()];
+    match provider.provider.kind {
+        AdvisorProviderKind::Codex => {
+            cmd.arg("exec")
+                .arg("-")
+                .arg("-C")
+                .arg(repo_root)
+                .arg("--ephemeral")
+                .arg("--sandbox")
+                .arg("read-only")
+                .arg("--full-auto")
+                .arg("-o")
+                .arg(&output_path);
+            rendered.extend([
+                "exec".to_string(),
+                "-".to_string(),
+                "-C".to_string(),
+                repo_root.display().to_string(),
+                "--ephemeral".to_string(),
+                "--sandbox".to_string(),
+                "read-only".to_string(),
+                "--full-auto".to_string(),
+                "-o".to_string(),
+                output_path.display().to_string(),
+            ]);
+            if let Some(model) = provider.model.as_deref() {
+                cmd.arg("-m").arg(model);
+                rendered.push("-m".to_string());
+                rendered.push(model.to_string());
+            }
+            if let Some(local_provider) = provider.provider.local_provider.as_deref() {
+                cmd.arg("--oss").arg("--local-provider").arg(local_provider);
+                rendered.push("--oss".to_string());
+                rendered.push("--local-provider".to_string());
+                rendered.push(local_provider.to_string());
+            }
+        }
+        AdvisorProviderKind::Claude => {
+            cmd.arg("-p")
+                .arg("Follow the instructions from stdin and return JSON only.")
+                .arg("--permission-mode")
+                .arg("plan")
+                .arg("--max-turns")
+                .arg("8");
+            rendered.extend([
+                "-p".to_string(),
+                "<stdin>".to_string(),
+                "--permission-mode".to_string(),
+                "plan".to_string(),
+                "--max-turns".to_string(),
+                "8".to_string(),
+            ]);
+            if let Some(model) = provider.model.as_deref() {
+                cmd.arg("--model").arg(model);
+                rendered.push("--model".to_string());
+                rendered.push(model.to_string());
+            }
+        }
+        AdvisorProviderKind::Ollama => {
+            let model = provider
+                .model
+                .as_deref()
+                .ok_or_else(|| anyhow!("ollama advisor provider requires a model"))?;
+            cmd.arg("run").arg(model);
+            rendered.extend(["run".to_string(), model.to_string()]);
+        }
+        AdvisorProviderKind::Command => {
+            let mut saw_prompt_placeholder = false;
+            for arg in &provider.provider.args {
+                let rendered_arg = render_advisor_arg_template(
+                    arg,
+                    provider.model.as_deref(),
+                    repo_root,
+                    options,
+                    prompt,
+                );
+                if arg.contains("{prompt}") {
+                    saw_prompt_placeholder = true;
+                }
+                cmd.arg(&rendered_arg);
+                rendered.push(rendered_arg);
+            }
+            let output = run_advisor_process(
+                cmd,
+                if saw_prompt_placeholder {
+                    None
+                } else {
+                    Some(prompt)
+                },
+            )?;
+            return Ok(AdvisorProviderExecution {
+                raw_output: output,
+                command_rendered: rendered.join(" "),
+            });
+        }
+    }
+    let output = run_advisor_process(cmd, Some(prompt))?;
+    let raw_output = if provider.provider.kind == AdvisorProviderKind::Codex {
+        fs::read_to_string(&output_path)
+            .or_else(|_| -> std::io::Result<String> { Ok(output.clone()) })
+            .with_context(|| format!("failed reading {}", output_path.display()))?
+    } else {
+        output
+    };
+    Ok(AdvisorProviderExecution {
+        raw_output,
+        command_rendered: rendered.join(" "),
+    })
+}
+
+fn render_advisor_arg_template(
+    template: &str,
+    model: Option<&str>,
+    repo_root: &Path,
+    options: &AdvisorRunOptions,
+    prompt: &str,
+) -> String {
+    template
+        .replace("{model}", model.unwrap_or_default())
+        .replace("{repo_root}", &repo_root.display().to_string())
+        .replace("{role}", advisor_role_label(options.role))
+        .replace("{goal}", options.goal.as_deref().unwrap_or_default())
+        .replace("{trigger}", &options.trigger)
+        .replace("{prompt}", prompt)
+}
+
+fn run_advisor_process(mut cmd: ProcessCommand, stdin_text: Option<&str>) -> Result<String> {
+    if stdin_text.is_some() {
+        cmd.stdin(Stdio::piped());
+    } else {
+        cmd.stdin(Stdio::null());
+    }
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .with_context(|| "failed spawning advisor provider")?;
+    if let Some(stdin_text) = stdin_text
+        && let Some(mut stdin) = child.stdin.take()
+    {
+        stdin
+            .write_all(stdin_text.as_bytes())
+            .with_context(|| "failed writing advisor prompt to provider stdin")?;
+    }
+    let output = child
+        .wait_with_output()
+        .with_context(|| "failed waiting for advisor provider")?;
+    if !output.status.success() {
+        bail!(
+            "advisor provider failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn parse_advisor_model_output(raw: &str) -> Result<AdvisorModelOutput> {
+    let candidate = extract_json_payload(raw)?;
+    serde_json::from_value(candidate)
+        .with_context(|| "advisor output did not match expected JSON shape")
+}
+
+fn sanitize_advisor_model_output(output: &mut AdvisorModelOutput) -> Result<()> {
+    output.summary = normalize_required_text(output.summary.clone(), "advisor summary")?;
+    output.notes = normalize_string_list(output.notes.clone());
+    for finding in &mut output.findings {
+        finding.title = normalize_required_text(finding.title.clone(), "advisor finding title")?;
+        finding.severity = match finding.severity.trim().to_ascii_lowercase().as_str() {
+            "high" => "high".to_string(),
+            "medium" => "medium".to_string(),
+            _ => "low".to_string(),
+        };
+        finding.detail = normalize_required_text(finding.detail.clone(), "advisor finding detail")?;
+        finding.evidence_paths = normalize_string_list(finding.evidence_paths.clone());
+    }
+    output.tasks = normalize_advisor_generated_tasks(output.tasks.clone())?;
+    Ok(())
+}
+
+fn normalize_advisor_generated_tasks(
+    tasks: Vec<AdvisorGeneratedTask>,
+) -> Result<Vec<AdvisorGeneratedTask>> {
+    let mut out = Vec::<AdvisorGeneratedTask>::new();
+    let mut seen_keys = BTreeSet::<String>::new();
+    for (index, mut task) in tasks.into_iter().enumerate() {
+        task.title = normalize_required_text(task.title, "advisor task title")?;
+        task.detail = normalize_optional_text(task.detail, "advisor task detail")?;
+        task.tags = dedupe_keep_order(
+            normalize_string_list(task.tags)
+                .into_iter()
+                .chain(std::iter::once("advisor".to_string()))
+                .collect(),
+        );
+        task.depends_on_keys = dedupe_keep_order(normalize_string_list(task.depends_on_keys));
+        task.priority = Some(task.priority.unwrap_or(30).clamp(-100, 100));
+        let fallback_key = format!("advisor_{}", index + 1);
+        let key = task
+            .key
+            .clone()
+            .map(|value| normalize_markdown_import_key(&value))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| {
+                let slug = normalize_markdown_import_key(&task.title);
+                if slug.is_empty() {
+                    fallback_key.clone()
+                } else {
+                    slug
+                }
+            });
+        let key = if seen_keys.insert(key.clone()) {
+            key
+        } else {
+            format!("{}_{}", key, index + 1)
+        };
+        task.key = Some(key);
+        out.push(task);
+    }
+    Ok(out)
+}
+
+fn extract_json_payload(raw: &str) -> Result<serde_json::Value> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+        return Ok(value);
+    }
+    if let Some(start) = raw.find("```json")
+        && let Some(end) = raw[start + 7..].find("```")
+    {
+        let candidate = raw[start + 7..start + 7 + end].trim();
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(candidate) {
+            return Ok(value);
+        }
+    }
+    let Some(start) = raw.find('{') else {
+        bail!("advisor provider output did not include JSON");
+    };
+    let Some(end) = raw.rfind('}') else {
+        bail!("advisor provider output did not include a complete JSON object");
+    };
+    serde_json::from_str::<serde_json::Value>(&raw[start..=end])
+        .with_context(|| "failed extracting JSON object from advisor provider output")
+}
+
+fn sync_advisor_generated_tasks(
+    repo_root: &Path,
+    advisor_state: &AdvisorState,
+    options: &AdvisorRunOptions,
+    tasks: &[AdvisorGeneratedTask],
+    run_id: &str,
+) -> Result<AdvisorTaskSyncPayload> {
+    let plan_path = resolve_advisor_plan_path(repo_root, options, run_id)?;
+    if let Some(parent) = plan_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed creating {}", parent.display()))?;
+    }
+    write_advisor_plan_file(&plan_path, tasks)?;
+    let rows = parse_task_import_rows(&plan_path, TaskImportFormatArg::Tsv)?;
+    let plan_source = normalize_task_plan_source(repo_root, &plan_path);
+    let agent_id = advisor_role_agent_id(options.role);
+
+    let mut next_state = load_task_state(repo_root)?;
+    let mut report =
+        sync_plan_into_task_state(&mut next_state, rows, &plan_source, &agent_id, 30, false)?;
+    report.generated_at_utc = now_utc();
+    report.plan = plan_source.clone();
+    report.format = "tsv".to_string();
+    report.dry_run = false;
+
+    let require_confirmation = options
+        .require_confirmation_override
+        .unwrap_or(advisor_state.policy.require_confirmation);
+    let confirmation_synced = sync_advisor_plan_confirmation(
+        &mut next_state,
+        &plan_source,
+        require_confirmation,
+        &agent_id,
+    );
+
+    next_state.updated_at_utc = now_utc();
+    write_pretty_json(&timeline_tasks_path(repo_root), &next_state)?;
+    for task in &report.created {
+        if let Some(full_task) = next_state
+            .tasks
+            .iter()
+            .find(|row| row.task_id == task.task_id)
+        {
+            append_task_timeline_event(repo_root, full_task, &agent_id, "add", None)?;
+        }
+    }
+    for task in &report.reopened {
+        if let Some(full_task) = next_state
+            .tasks
+            .iter()
+            .find(|row| row.task_id == task.task_id)
+        {
+            append_task_timeline_event(repo_root, full_task, &agent_id, "reopen", None)?;
+        }
+    }
+    for task in &report.updated {
+        if let Some(full_task) = next_state
+            .tasks
+            .iter()
+            .find(|row| row.task_id == task.task_id)
+        {
+            append_task_timeline_event(repo_root, full_task, &agent_id, "edit", None)?;
+        }
+    }
+    for task in &report.removed {
+        append_task_timeline_event(
+            repo_root,
+            &FugitTask {
+                task_id: task.task_id.clone(),
+                title: task.title.clone(),
+                detail: None,
+                priority: 0,
+                tags: Vec::new(),
+                depends_on: Vec::new(),
+                status: TaskStatus::Open,
+                created_at_utc: now_utc(),
+                updated_at_utc: now_utc(),
+                created_by_agent_id: agent_id.clone(),
+                claimed_by_agent_id: None,
+                claim_started_at_utc: None,
+                claim_expires_at_utc: None,
+                completed_at_utc: None,
+                completed_by_agent_id: None,
+                completed_summary: None,
+                completion_notes: Vec::new(),
+                completion_artifacts: Vec::new(),
+                completion_commands: Vec::new(),
+                source_key: task.source_key.clone(),
+                source_plan: Some(plan_source.clone()),
+                awaiting_confirmation: false,
+                approved_at_utc: None,
+                approved_by_agent_id: None,
+            },
+            &agent_id,
+            "remove",
+            None,
+        )?;
+    }
+    for task_id in &confirmation_synced {
+        if let Some(full_task) = next_state.tasks.iter().find(|row| row.task_id == *task_id) {
+            append_task_timeline_event(repo_root, full_task, &agent_id, "edit", None)?;
+        }
+    }
+
+    Ok(AdvisorTaskSyncPayload {
+        plan_path: Some(plan_path.display().to_string()),
+        synced_task_count: report.created.len() + report.updated.len() + report.reopened.len(),
+        created_count: report.created.len(),
+        updated_count: report.updated.len(),
+        reopened_count: report.reopened.len(),
+        removed_count: report.removed.len(),
+        confirmation_synced_count: confirmation_synced.len(),
+    })
+}
+
+fn resolve_advisor_plan_path(
+    repo_root: &Path,
+    options: &AdvisorRunOptions,
+    _run_id: &str,
+) -> Result<PathBuf> {
+    Ok(match options.plan_mode {
+        AdvisorPlanModeArg::AutoBacklog => repo_root.join(ADVISOR_AUTO_PLAN_FILE),
+        AdvisorPlanModeArg::GoalScoped => {
+            let scope = options
+                .goal
+                .as_deref()
+                .map(normalize_markdown_import_key)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| match options.role {
+                    AdvisorRoleArg::Reviewer => "review".to_string(),
+                    AdvisorRoleArg::TaskManager => "research".to_string(),
+                });
+            repo_root
+                .join(".fugit")
+                .join("advisor")
+                .join("plans")
+                .join(format!("{}.tsv", scope))
+        }
+    })
+}
+
+fn write_advisor_plan_file(path: &Path, tasks: &[AdvisorGeneratedTask]) -> Result<()> {
+    let mut lines = vec!["key\tpriority\ttags\tdepends_on_keys\ttitle\tdetail\tagent".to_string()];
+    for task in tasks {
+        lines.push(format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            task.key
+                .clone()
+                .unwrap_or_else(|| "advisor_task".to_string()),
+            task.priority.unwrap_or(30),
+            task.tags.join(","),
+            task.depends_on_keys.join(","),
+            task.title.replace('\t', " "),
+            task.detail.clone().unwrap_or_default().replace('\t', " "),
+            SYSTEM_AGENT_ID
+        ));
+    }
+    fs::write(path, lines.join("\n") + "\n")
+        .with_context(|| format!("failed writing {}", path.display()))
+}
+
+fn sync_advisor_plan_confirmation(
+    state: &mut TaskState,
+    plan_source: &str,
+    require_confirmation: bool,
+    agent_id: &str,
+) -> Vec<String> {
+    let mut changed_task_ids = Vec::<String>::new();
+    for task in &mut state.tasks {
+        if task.source_plan.as_deref() != Some(plan_source) || task.status == TaskStatus::Done {
+            continue;
+        }
+        let before = (
+            task.awaiting_confirmation,
+            task.approved_at_utc.clone(),
+            task.approved_by_agent_id.clone(),
+        );
+        if require_confirmation {
+            task.awaiting_confirmation = true;
+            task.approved_at_utc = None;
+            task.approved_by_agent_id = None;
+        } else {
+            task.awaiting_confirmation = false;
+            if task.approved_at_utc.is_none() {
+                task.approved_at_utc = Some(now_utc());
+            }
+            if task.approved_by_agent_id.is_none() {
+                task.approved_by_agent_id = Some(agent_id.to_string());
+            }
+        }
+        let after = (
+            task.awaiting_confirmation,
+            task.approved_at_utc.clone(),
+            task.approved_by_agent_id.clone(),
+        );
+        if after != before {
+            task.updated_at_utc = now_utc();
+            changed_task_ids.push(task.task_id.clone());
+        }
+    }
+    changed_task_ids
+}
+
+fn append_advisor_timeline_event(repo_root: &Path, run: &AdvisorRunRecord) -> Result<()> {
+    if !timeline_is_initialized(repo_root) {
+        return Ok(());
+    }
+    let (_config, mut branches) = load_initialized_state(repo_root)?;
+    let active_branch = branches.active_branch.clone();
+    let event_id = format!("evt_{}", Uuid::new_v4().simple());
+    let parent_event_id = branches
+        .branches
+        .get(&active_branch)
+        .and_then(|pointer| pointer.head_event_id.clone());
+    let event = TimelineEvent {
+        schema_version: SCHEMA_EVENT.to_string(),
+        event_id: event_id.clone(),
+        created_at_utc: now_utc(),
+        branch: active_branch.clone(),
+        parent_event_id,
+        agent_id: advisor_role_agent_id(run.role),
+        summary: format!("advisor {}: {}", advisor_role_label(run.role), run.summary),
+        tags: vec![
+            "advisor".to_string(),
+            format!("advisor_role:{}", advisor_role_label(run.role)),
+            format!("advisor_provider:{}", run.provider_id),
+            format!("advisor_run_id:{}", run.run_id),
+        ],
+        metrics: EventMetrics {
+            tracked_file_count: 0,
+            changed_file_count: 0,
+            added_count: 0,
+            modified_count: 0,
+            deleted_count: 0,
+            changed_bytes_total: 0,
+        },
+        changes: Vec::new(),
+    };
+    append_jsonl(
+        &timeline_branch_events_path(repo_root, &active_branch),
+        &event,
+    )?;
+    if let Some(pointer) = branches.branches.get_mut(&active_branch) {
+        pointer.head_event_id = Some(event_id);
+    }
+    write_pretty_json(&timeline_branches_path(repo_root), &branches)?;
+    Ok(())
+}
+
+fn count_standard_active_tasks(state: &TaskState) -> usize {
+    state
+        .tasks
+        .iter()
+        .filter(|task| task.status != TaskStatus::Done && !task_is_auto_replenish(task))
+        .count()
+}
+
+fn maybe_queue_auto_advisor_runs(repo_root: &Path, state: &TaskState) -> Result<serde_json::Value> {
+    let advisor_state = ensure_advisor_state(repo_root)?;
+    if !advisor_state.policy.enabled {
+        return Ok(json!({
+            "enabled": false,
+            "triggered": false
+        }));
+    }
+    let active_standard_tasks = count_standard_active_tasks(state);
+    if active_standard_tasks > advisor_state.policy.low_task_threshold {
+        return Ok(json!({
+            "enabled": true,
+            "triggered": false,
+            "active_standard_tasks": active_standard_tasks,
+            "low_task_threshold": advisor_state.policy.low_task_threshold
+        }));
+    }
+
+    let mut queued = Vec::<serde_json::Value>::new();
+    if advisor_state.policy.auto_task_generation {
+        let worker =
+            load_advisor_worker_state(repo_root, AdvisorRoleArg::TaskManager, &advisor_state)?;
+        let probe = AdvisorRunOptions {
+            role: AdvisorRoleArg::TaskManager,
+            goal: None,
+            provider_id_override: None,
+            model_override: None,
+            allow_online_research: advisor_state.policy.allow_online_research,
+            require_confirmation_override: Some(advisor_state.policy.require_confirmation),
+            sync_suggested_tasks: true,
+            trigger: "low_task_threshold".to_string(),
+            plan_mode: AdvisorPlanModeArg::AutoBacklog,
+        };
+        if resolve_advisor_provider(&advisor_state, &probe).is_ok()
+            && !advisor_worker_recently_requested(
+                &worker,
+                advisor_state.policy.auto_trigger_cooldown_minutes,
+            )
+        {
+            let payload = queue_advisor_background(
+                repo_root,
+                &AdvisorRunOptions {
+                    goal: Some(
+                        "Refresh the managed backlog before the queue runs dry.".to_string(),
+                    ),
+                    ..probe.clone()
+                },
+            )?;
+            queued.push(payload);
+        }
+    }
+    if advisor_state.policy.auto_review {
+        let worker =
+            load_advisor_worker_state(repo_root, AdvisorRoleArg::Reviewer, &advisor_state)?;
+        let probe = AdvisorRunOptions {
+            role: AdvisorRoleArg::Reviewer,
+            goal: None,
+            provider_id_override: None,
+            model_override: None,
+            allow_online_research: advisor_state.policy.allow_online_research,
+            require_confirmation_override: None,
+            sync_suggested_tasks: false,
+            trigger: "low_task_threshold".to_string(),
+            plan_mode: AdvisorPlanModeArg::AutoBacklog,
+        };
+        if resolve_advisor_provider(&advisor_state, &probe).is_ok()
+            && !advisor_worker_recently_requested(
+                &worker,
+                advisor_state.policy.auto_trigger_cooldown_minutes,
+            )
+        {
+            let payload = queue_advisor_background(
+                repo_root,
+                &AdvisorRunOptions {
+                    goal: Some("Review the project and identify the highest-leverage issues before the queue runs dry.".to_string()),
+                    ..probe.clone()
+                },
+            )?;
+            queued.push(payload);
+        }
+    }
+
+    Ok(json!({
+        "enabled": true,
+        "triggered": !queued.is_empty(),
+        "active_standard_tasks": active_standard_tasks,
+        "low_task_threshold": advisor_state.policy.low_task_threshold,
+        "queued": queued
+    }))
 }
 
 fn ensure_git_repo(repo_root: &Path) -> Result<()> {
@@ -10118,6 +13496,11 @@ fn normalize_optional_text(value: Option<String>, field_name: &str) -> Result<Op
     }
 }
 
+fn normalize_required_text(value: String, field_name: &str) -> Result<String> {
+    normalize_optional_text(Some(value), field_name)?
+        .ok_or_else(|| anyhow!("{} cannot be empty", field_name))
+}
+
 fn normalize_string_list(values: Vec<String>) -> Vec<String> {
     dedupe_keep_order(values)
 }
@@ -10513,6 +13896,7 @@ fn check_policy_payload(state: &CheckState, config: &TimelineConfig) -> serde_js
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_quality_checks(
     repo_root: &Path,
     state: &mut CheckState,
@@ -10662,11 +14046,9 @@ fn update_task_policy_config(
         config.auto_replenish_require_confirmation = require_confirmation;
         changed = true;
     }
-    if clear_replenish_agents {
-        if !config.auto_replenish_agents.is_empty() {
-            config.auto_replenish_agents.clear();
-            changed = true;
-        }
+    if clear_replenish_agents && !config.auto_replenish_agents.is_empty() {
+        config.auto_replenish_agents.clear();
+        changed = true;
     }
     let normalized_agents = dedupe_keep_order(
         replenish_agents
@@ -11128,8 +14510,6 @@ fn parse_task_import_markdown_line(trimmed: &str, line_no: usize) -> Result<Opti
         rest
     } else if let Some(rest) = trimmed.strip_prefix("* [ ] ") {
         rest
-    } else if looks_like_markdown_checked_task_line(trimmed) {
-        return Ok(None);
     } else {
         return Ok(None);
     };
@@ -11150,7 +14530,7 @@ fn parse_task_import_markdown_line(trimmed: &str, line_no: usize) -> Result<Opti
             source_key = Some(key.clone());
             let remainder = after_open_tick[end_tick_idx + 1..].trim();
             if !remainder.is_empty() {
-                body = remainder.trim_start_matches(|ch| matches!(ch, ':' | '-' | ' '));
+                body = remainder.trim_start_matches([':', '-', ' ']);
             }
         }
     }
@@ -11901,18 +15281,18 @@ fn detect_project_last_activity(repo_root: &Path) -> Option<String> {
     for path in candidate_paths {
         latest = newer_optional_timestamp(latest, file_modified_at_utc(&path));
     }
-    if let Ok(branches) = load_json_optional::<BranchesState>(&timeline_branches_path(repo_root)) {
-        if let Some(branches) = branches {
-            for branch in branches.branches.keys() {
-                latest = newer_optional_timestamp(
-                    latest,
-                    file_modified_at_utc(&timeline_branch_events_path(repo_root, branch)),
-                );
-                latest = newer_optional_timestamp(
-                    latest,
-                    file_modified_at_utc(&timeline_branch_index_path(repo_root, branch)),
-                );
-            }
+    if let Ok(branches) = load_json_optional::<BranchesState>(&timeline_branches_path(repo_root))
+        && let Some(branches) = branches
+    {
+        for branch in branches.branches.keys() {
+            latest = newer_optional_timestamp(
+                latest,
+                file_modified_at_utc(&timeline_branch_events_path(repo_root, branch)),
+            );
+            latest = newer_optional_timestamp(
+                latest,
+                file_modified_at_utc(&timeline_branch_index_path(repo_root, branch)),
+            );
         }
     }
     latest
@@ -12296,6 +15676,7 @@ fn select_task_for_agent(
     .next()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn select_task_candidates_for_agent(
     state: &TaskState,
     agent_id: &str,
@@ -12935,6 +16316,14 @@ fn format_utc(value: DateTime<Utc>) -> String {
     value.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_false() -> bool {
+    false
+}
+
 fn default_backend_mode() -> String {
     BACKEND_MODE_GIT_BRIDGE.to_string()
 }
@@ -12973,6 +16362,14 @@ fn default_quality_checks_require_on_task_done() -> bool {
 
 fn default_quality_checks_run_before_sync() -> bool {
     true
+}
+
+fn default_advisor_low_task_threshold() -> usize {
+    2
+}
+
+fn default_advisor_auto_trigger_cooldown_minutes() -> i64 {
+    20
 }
 
 fn timeline_is_initialized(repo_root: &Path) -> bool {
@@ -13041,6 +16438,37 @@ fn timeline_bridge_auto_sync_state_path(repo_root: &Path) -> PathBuf {
 
 fn timeline_bridge_auto_sync_lock_path(repo_root: &Path) -> PathBuf {
     timeline_root(repo_root).join("bridge_auto_sync.lock.json")
+}
+
+fn timeline_advisor_state_path(repo_root: &Path) -> PathBuf {
+    timeline_root(repo_root).join("advisor.json")
+}
+
+fn timeline_advisor_runs_path(repo_root: &Path) -> PathBuf {
+    timeline_root(repo_root).join("advisor_runs.jsonl")
+}
+
+fn timeline_advisor_temp_dir(repo_root: &Path) -> PathBuf {
+    timeline_root(repo_root).join("advisor").join("tmp")
+}
+
+fn timeline_advisor_run_dir(repo_root: &Path, run_id: &str) -> PathBuf {
+    timeline_root(repo_root)
+        .join("advisor")
+        .join("runs")
+        .join(run_id)
+}
+
+fn timeline_advisor_worker_state_path(repo_root: &Path, role: AdvisorRoleArg) -> PathBuf {
+    timeline_root(repo_root)
+        .join("advisor")
+        .join(format!("{}.worker.json", advisor_role_label(role)))
+}
+
+fn timeline_advisor_worker_lock_path(repo_root: &Path, role: AdvisorRoleArg) -> PathBuf {
+    timeline_root(repo_root)
+        .join("advisor")
+        .join(format!("{}.worker.lock.json", advisor_role_label(role)))
 }
 
 fn timeline_branch_root(repo_root: &Path, branch: &str) -> PathBuf {

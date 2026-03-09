@@ -148,6 +148,43 @@ By default, `task request` also auto-seeds one queue-scout task per known agent 
 
 By default, `task done` requires at least one regression or benchmark check (`--regression ...` / `--benchmark ...`) unless the task already has an active registered check. Those checks are then executed automatically before `bridge sync-github`, including background auto-sync after task completion. Use `fugit check deprecate --check-id ...` when a test is obsolete instead of silently deleting the record.
 
+By default, low-task requests can also queue advisor runs in the background. The advisor can use different providers/models for the reviewer and smart task-manager roles, then sync generated backlog through managed plan files instead of mutating the queue ad hoc.
+
+## Advisor Automation
+
+Provider setup:
+
+```bash
+fugit --repo-root . advisor provider discover --json
+fugit --repo-root . advisor provider add-codex --assign-role task-manager
+fugit --repo-root . advisor provider add-claude --assign-role reviewer
+fugit --repo-root . advisor provider add-ollama --model qwen3.5-coder:latest
+fugit --repo-root . advisor provider assign --role task-manager --provider <provider_id> --model qwen3.5-coder:latest
+fugit --repo-root . advisor provider assign --role reviewer --provider <provider_id> --model sonnet
+```
+
+Manual runs:
+
+```bash
+fugit --repo-root . advisor show --json
+fugit --repo-root . advisor policy set --low-task-threshold 2 --require-confirmation true
+fugit --repo-root . advisor review --goal "find the highest-leverage issues" --json
+fugit --repo-root . advisor research --goal "generate the next backlog slice" --allow-online-research --json
+fugit --repo-root . advisor runs --json
+```
+
+Notes:
+- `advisor research` imports generated tasks through managed TSV plans under `.fugit/advisor/` so dedupe and promotion stay deterministic.
+- `task request` will queue background advisor review/research automatically when standard work falls below the configured threshold.
+- The task GUI now includes advisor controls for provider selection, policy, and manual review/research triggers.
+- Custom provider wrappers are supported through `advisor provider add-command`; command args can use placeholders such as `{role}`, `{model}`, `{goal}`, `{repo_root}`, and `{prompt}`.
+
+## Privacy
+
+- Fugit keeps advisor runtime state, provider outputs, generated plans, and worker status under `.fugit/`, which is ignored by Git by default.
+- Fugit does not write API keys or provider credentials into tracked project files.
+- Bridge auth uses Git credential helpers; prefer secure helpers over plaintext storage for long-term use.
+
 ## Bulk Task Import
 
 Use this when migrating large plan backlogs into fugit without fragile shell glue.
@@ -200,6 +237,7 @@ GUI features:
 - Project switcher with most-recent project selection by default
 - Optional agent-id field for task mutations
 - Task board with create, edit, remove, and approval controls for confirmation-gated scout tasks
+- Advisor panel for provider/model selection, low-task policy, and manual review/research triggers
 - Timeline explorer (branch selector + paged `load older`)
 - Scrollable history to correlate task completion with timeline events
 - `project discover` scans common roots for `.fugit/config.json` repos so the launcher can populate the board automatically
@@ -225,6 +263,10 @@ fugit --repo-root . check add --kind regression --task-id <task_id> --command "c
 fugit --repo-root . check run --json
 fugit --repo-root . check deprecate --check-id <check_id> --reason "obsolete"
 fugit --repo-root . check policy show --json
+fugit --repo-root . advisor show --json
+fugit --repo-root . advisor policy show --json
+fugit --repo-root . advisor review --background
+fugit --repo-root . advisor research --background
 fugit --repo-root . bridge auto-sync show --json
 fugit --repo-root . bridge auto-sync set --enabled true --on-task-done true --event-count 12
 fugit --repo-root . bridge sync-github --background --note "manual backup sweep"
