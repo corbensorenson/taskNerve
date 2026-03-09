@@ -2,7 +2,7 @@
 
 `fugit-alpha` is the package name. The installed CLI is `fugit`.
 
-`fugit` is an agent-first, timeline-first versioning system. It tracks progress continuously, coordinates multi-agent work with a persistent task queue, and uses Git/GitHub as a bridge for publishing.
+`fugit` is an agent-first, timeline-first versioning system. It tracks progress continuously, coordinates multi-agent work with a persistent task queue, includes a live Task + Timeline GUI, and uses Git/GitHub as a bridge for publishing.
 
 This started as an internal tool and was made public after Git became a production bottleneck in multi-agent workflows.
 
@@ -19,6 +19,7 @@ Set up fugit-alpha on this machine from this repo end-to-end.
 - Install/update the fugit Codex skill
 - Register my current project in fugit
 - Initialize timeline and create a baseline checkpoint
+- Launch the fugit task/timeline GUI
 - Show me the exact commands you ran
 ```
 
@@ -31,6 +32,7 @@ Set up fugit-alpha from this repo end-to-end.
 - Configure fugit MCP server for this project
 - Load/apply the bundled fugit skill guidance
 - Register project, initialize timeline, create baseline checkpoint
+- Launch the fugit task/timeline GUI
 - Report exact commands and final status
 ```
 
