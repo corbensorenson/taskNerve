@@ -56,7 +56,23 @@ Use when humans or lead agents need continuous visual awareness of queue state.
 Characteristics:
 - project switcher plus branch-aware timeline explorer,
 - direct create/edit/remove/approve task controls in the browser,
+- advisor workflow visibility plus per-run detail/rerun controls in the browser,
 - useful when humans need to fix queue drift without dropping to shell.
+
+## Repo-Owned Advisor Workflow
+
+Use when advisor behavior should be versioned with the repository instead of living only in local runtime state.
+
+- `fugit --repo-root . advisor workflow init`
+- `fugit --repo-root . advisor workflow show --json`
+- `fugit --repo-root . advisor workflow sync-policy --json`
+- `fugit --repo-root . advisor run show --run-id <run_id> --json`
+- `fugit --repo-root . advisor run rerun --run-id <run_id> --background --json`
+
+Characteristics:
+- stores reviewer/task-manager goals and guidance in `FUGIT_WORKFLOW.md`,
+- keeps advisor prompting repo-owned and auditable,
+- makes prior advisor runs easy to inspect and replay.
 
 ## Multi-Project Coordination
 

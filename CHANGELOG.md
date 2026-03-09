@@ -24,6 +24,7 @@
 - Added targeted task pickup with `task request --task-id <task_id>`, including MCP support, so agents can request a specific queue item after inspecting the backlog.
 - Added project discovery with recent-activity ordering, `task gui --background --port 0`, and an installed `fugit-gui` desktop launcher (`~/Applications/Fugit GUI.app` on macOS, `.desktop` entry on Linux).
 - Added advisor automation with provider discovery/assignment, distinct reviewer vs task-manager model selection, safe command-wrapper support for Codex/Claude/local runners, low-task background queueing from `task request`, GUI controls, and MCP tools.
+- Added a repo-owned advisor workflow contract (`FUGIT_WORKFLOW.md`), `advisor workflow init|show|validate|sync-policy`, advisor run report inspection/rerun, workflow-aware GUI advisor detail panes, and MCP tools for workflow/run operations.
 - Improved the Unix installer to print the installed version and warn when `PATH` still resolves to a different `fugit` binary.
 - Added multi-project registry (`project add|list|use|remove`) and GUI project switching to keep task streams isolated across repos.
 - Hardened release validation script to run dependency advisory checks with `cargo-audit` when available.

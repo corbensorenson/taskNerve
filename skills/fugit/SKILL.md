@@ -98,14 +98,20 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . check run --json`
 - Inspect or run advisor automation:
 - `fugit --repo-root . advisor show --json`
+- `fugit --repo-root . advisor workflow show --json`
+- `fugit --repo-root . advisor workflow sync-policy --json`
 - `fugit --repo-root . advisor policy show --json`
 - `fugit --repo-root . advisor review --background`
 - `fugit --repo-root . advisor research --background`
+- `fugit --repo-root . advisor run show --run-id <run_id> --json`
+- `fugit --repo-root . advisor run rerun --run-id <run_id> --background --json`
 - Assign distinct models/providers per role:
 - `fugit --repo-root . advisor provider assign --role reviewer --provider <provider_id> --model <model>`
 - `fugit --repo-root . advisor provider assign --role task-manager --provider <provider_id> --model <model>`
 - Add a custom wrapper when using a local runner or another terminal agent:
 - `fugit --repo-root . advisor provider add-command --name <name> --executable <cmd> --arg "{role}" --arg "{model}"`
+- Version repo-specific advisor instructions in `FUGIT_WORKFLOW.md` and validate them with:
+- `fugit --repo-root . advisor workflow validate --json`
 
 9. Coordinate ownership when multiple agents touch overlapping files:
 - `fugit --repo-root . lock add --pattern "src/**" --agent <agent_id> --ttl-minutes 30`
@@ -139,7 +145,7 @@ Recoverability repair:
 - Desktop-friendly launcher after install: `fugit-gui`
 - Built-in board supports create/edit/remove directly from the browser.
 - Confirmation-gated scout tasks can also be approved directly from the browser.
-- The board also exposes advisor provider/model selection, low-task policy toggles, and manual review/research triggers.
+- The board also exposes advisor provider/model selection, low-task policy toggles, workflow visibility, manual review/research triggers, run-detail inspection, and rerun controls.
 - Timeline explorer: use the branch selector and `load older` in the GUI to scroll project history.
 - MCP launch tool: `fugit_task_gui_launch`
 

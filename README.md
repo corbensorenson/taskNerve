@@ -167,21 +167,51 @@ Manual runs:
 
 ```bash
 fugit --repo-root . advisor show --json
+fugit --repo-root . advisor workflow show --json
+fugit --repo-root . advisor workflow sync-policy --json
 fugit --repo-root . advisor policy set --low-task-threshold 2 --require-confirmation true
 fugit --repo-root . advisor review --goal "find the highest-leverage issues" --json
 fugit --repo-root . advisor research --goal "generate the next backlog slice" --allow-online-research --json
 fugit --repo-root . advisor runs --json
+fugit --repo-root . advisor run show --run-id <run_id> --json
+fugit --repo-root . advisor run rerun --run-id <run_id> --background --json
 ```
 
 Notes:
 - `advisor research` imports generated tasks through managed TSV plans under `.fugit/advisor/` so dedupe and promotion stay deterministic.
 - `task request` will queue background advisor review/research automatically when standard work falls below the configured threshold.
-- The task GUI now includes advisor controls for provider selection, policy, and manual review/research triggers.
+- The task GUI now includes advisor controls for provider selection, policy, manual review/research triggers, workflow visibility, run detail inspection, and rerun controls.
 - Custom provider wrappers are supported through `advisor provider add-command`; command args can use placeholders such as `{role}`, `{model}`, `{goal}`, `{repo_root}`, and `{prompt}`.
+
+## Repo-Owned Advisor Workflow
+
+Fugit now supports a repo-owned advisor contract at `FUGIT_WORKFLOW.md`.
+
+Bootstrap it:
+
+```bash
+fugit --repo-root . advisor workflow init
+fugit --repo-root . advisor workflow validate --json
+```
+
+Use it to version:
+- reviewer/task-manager default goals
+- role-specific guidance
+- result-size caps (`max_findings`, `max_tasks`)
+- advisor policy defaults that can be synced into runtime state
+
+Sync the policy defaults from the file into the live advisor state:
+
+```bash
+fugit --repo-root . advisor workflow sync-policy --json
+```
+
+The same workflow metadata is exposed in `advisor show --json`, advisor run reports, and the browser GUI so operators can see whether advisor automation is running from repo defaults or fallback prompts.
 
 ## Privacy
 
 - Fugit keeps advisor runtime state, provider outputs, generated plans, and worker status under `.fugit/`, which is ignored by Git by default.
+- The repo-owned `FUGIT_WORKFLOW.md` is intended for prompts and policy defaults only; do not store credentials or raw tokens in it.
 - Fugit does not write API keys or provider credentials into tracked project files.
 - Bridge auth uses Git credential helpers; prefer secure helpers over plaintext storage for long-term use.
 
@@ -237,7 +267,7 @@ GUI features:
 - Project switcher with most-recent project selection by default
 - Optional agent-id field for task mutations
 - Task board with create, edit, remove, and approval controls for confirmation-gated scout tasks
-- Advisor panel for provider/model selection, low-task policy, and manual review/research triggers
+- Advisor panel for provider/model selection, low-task policy, workflow visibility, manual review/research triggers, per-run detail inspection, and rerun controls
 - Timeline explorer (branch selector + paged `load older`)
 - Scrollable history to correlate task completion with timeline events
 - `project discover` scans common roots for `.fugit/config.json` repos so the launcher can populate the board automatically

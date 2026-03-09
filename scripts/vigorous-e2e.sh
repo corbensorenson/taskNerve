@@ -253,6 +253,7 @@ json_assert "$TMP_ROOT/auto-request-real.json" 'payload.get("assigned") is True 
 
 echo "[vigorous-e2e] advisor providers + low-task automation"
 "$BIN" --repo-root "$REPO_C" init --branch trunk >/dev/null
+mkdir -p "$TMP_ROOT/advisor-prompts"
 cat >"$TMP_ROOT/fake-advisor.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -273,7 +274,12 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
-cat >/dev/null
+if [[ -n "${ADVISOR_PROMPT_DIR:-}" ]]; then
+  mkdir -p "$ADVISOR_PROMPT_DIR"
+  cat >"$ADVISOR_PROMPT_DIR/${ROLE:-unknown}.txt"
+else
+  cat >/dev/null
+fi
 if [[ "$ROLE" == "reviewer" ]]; then
   cat <<JSON
 {"summary":"Reviewer pass queued a docs follow-up","notes":["model=${MODEL}"],"findings":[{"title":"README needs advisor workflow coverage","severity":"low","detail":"The public docs do not explain the advisor flow yet.","evidence_paths":["README.md"]}],"tasks":[{"key":"review_docs","title":"Document advisor workflow","detail":"Add CLI and GUI advisor usage to the README.","priority":36,"tags":["advisor","docs"],"depends_on_keys":[]}]}
@@ -285,6 +291,33 @@ JSON
 fi
 EOF
 chmod +x "$TMP_ROOT/fake-advisor.sh"
+"$BIN" --repo-root "$REPO_C" advisor workflow init --json >"$TMP_ROOT/advisor-workflow-init.json"
+cat >"$REPO_C/FUGIT_WORKFLOW.md" <<'EOF'
+---
+advisor:
+  auto_task_generation: true
+  auto_review: true
+  low_task_threshold: 1
+  require_confirmation: true
+reviewer:
+  goal: "Review the repo-owned advisor workflow path"
+  guidance:
+    - "Prefer findings about missing docs or operator ergonomics."
+task_manager:
+  goal: "Generate the next workflow-driven backlog slice"
+  guidance:
+    - "Prefer deterministic docs and test tasks."
+  max_tasks: 4
+---
+Use repo-owned workflow instructions.
+
+- Keep findings brief.
+- Keep generated tasks concrete.
+EOF
+"$BIN" --repo-root "$REPO_C" advisor workflow show --json >"$TMP_ROOT/advisor-workflow-show.json"
+json_assert "$TMP_ROOT/advisor-workflow-show.json" 'payload.get("exists") is True and payload.get("valid") is True and payload.get("reviewer", {}).get("goal") == "Review the repo-owned advisor workflow path"' "advisor workflow show should load repo-owned workflow guidance"
+"$BIN" --repo-root "$REPO_C" advisor workflow sync-policy --json >"$TMP_ROOT/advisor-workflow-sync.json"
+json_assert "$TMP_ROOT/advisor-workflow-sync.json" 'payload.get("policy", {}).get("low_task_threshold") == 1 and payload.get("policy", {}).get("require_confirmation") is True' "advisor workflow sync should apply policy defaults"
 "$BIN" --repo-root "$REPO_C" advisor provider add-command --name fake-advisor --executable "$TMP_ROOT/fake-advisor.sh" --arg "--role" --arg "{role}" --arg "--model" --arg "{model}" --json >"$TMP_ROOT/advisor-provider.json"
 ADVISOR_PROVIDER_ID="$(python3 - "$TMP_ROOT/advisor-provider.json" <<'PY'
 import json,sys
@@ -293,14 +326,20 @@ PY
 )"
 "$BIN" --repo-root "$REPO_C" advisor provider assign --role reviewer --provider "$ADVISOR_PROVIDER_ID" --model claude-pro --json >"$TMP_ROOT/advisor-assign-reviewer.json"
 "$BIN" --repo-root "$REPO_C" advisor provider assign --role task-manager --provider "$ADVISOR_PROVIDER_ID" --model qwen-lite --json >"$TMP_ROOT/advisor-assign-manager.json"
-"$BIN" --repo-root "$REPO_C" advisor policy set --enabled true --auto-task-generation true --auto-review true --low-task-threshold 1 --require-confirmation true --json >"$TMP_ROOT/advisor-policy.json"
-json_assert "$TMP_ROOT/advisor-policy.json" 'payload.get("enabled") is True and payload.get("require_confirmation") is True and payload.get("low_task_threshold") == 1' "advisor policy should persist low-task defaults"
-"$BIN" --repo-root "$REPO_C" task request --agent agent.lowwater --no-claim --json >"$TMP_ROOT/advisor-lowwater-request.json"
+"$BIN" --repo-root "$REPO_C" advisor policy show --json >"$TMP_ROOT/advisor-policy.json"
+json_assert "$TMP_ROOT/advisor-policy.json" 'payload.get("require_confirmation") is True and payload.get("low_task_threshold") == 1' "advisor workflow sync should configure the advisor policy"
+ADVISOR_PROMPT_DIR="$TMP_ROOT/advisor-prompts" "$BIN" --repo-root "$REPO_C" task request --agent agent.lowwater --no-claim --json >"$TMP_ROOT/advisor-lowwater-request.json"
 json_assert "$TMP_ROOT/advisor-lowwater-request.json" 'payload.get("advisor", {}).get("triggered") is True' "low-task request should queue advisor automation"
 wait_for_advisor_worker "$REPO_C" reviewer
 wait_for_advisor_worker "$REPO_C" task_manager
 "$BIN" --repo-root "$REPO_C" advisor show --json >"$TMP_ROOT/advisor-show.json"
-json_assert "$TMP_ROOT/advisor-show.json" 'payload.get("assignments", {}).get("reviewer", {}).get("provider_id") == "'"$ADVISOR_PROVIDER_ID"'" and payload.get("workers", {}).get("task_manager", {}).get("status") == "success"' "advisor show should expose assignments and worker status"
+json_assert "$TMP_ROOT/advisor-show.json" 'payload.get("assignments", {}).get("reviewer", {}).get("provider_id") == "'"$ADVISOR_PROVIDER_ID"'" and payload.get("workers", {}).get("task_manager", {}).get("status") == "success" and payload.get("workflow", {}).get("exists") is True' "advisor show should expose assignments, worker status, and workflow state"
+python3 - "$TMP_ROOT/advisor-prompts/reviewer.txt" <<'PY'
+import sys
+text = open(sys.argv[1], "r", encoding="utf-8").read()
+if "Use repo-owned workflow instructions." not in text:
+    raise SystemExit("workflow instructions missing from reviewer prompt")
+PY
 "$BIN" --repo-root "$REPO_C" task list --json >"$TMP_ROOT/advisor-task-list.json"
 json_assert "$TMP_ROOT/advisor-task-list.json" 'any(row.get("title") == "Define advisor run contract" and row.get("awaiting_confirmation") is True for row in payload)' "advisor research should sync confirmation-gated tasks into the queue"
 ADVISOR_TASK_ID="$(python3 - "$TMP_ROOT/advisor-task-list.json" <<'PY'
@@ -315,10 +354,19 @@ else:
 PY
 )"
 "$BIN" --repo-root "$REPO_C" task approve --task-id "$ADVISOR_TASK_ID" --agent agent.review >/dev/null
-"$BIN" --repo-root "$REPO_C" advisor review --goal "manual docs review" --sync-suggested-tasks --json >"$TMP_ROOT/advisor-review.json"
+ADVISOR_PROMPT_DIR="$TMP_ROOT/advisor-prompts" "$BIN" --repo-root "$REPO_C" advisor review --goal "manual docs review" --sync-suggested-tasks --json >"$TMP_ROOT/advisor-review.json"
 json_assert "$TMP_ROOT/advisor-review.json" 'payload.get("findings_count") >= 1 and payload.get("generated_task_count") >= 1 and payload.get("synced_task_count") >= 1' "manual advisor review should record findings and sync suggested tasks when requested"
+MANUAL_ADVISOR_RUN_ID="$(python3 - "$TMP_ROOT/advisor-review.json" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1]))["run_id"])
+PY
+)"
+"$BIN" --repo-root "$REPO_C" advisor run show --run-id "$MANUAL_ADVISOR_RUN_ID" --json >"$TMP_ROOT/advisor-run-show.json"
+json_assert "$TMP_ROOT/advisor-run-show.json" 'payload.get("run_id") == "'"$MANUAL_ADVISOR_RUN_ID"'" and payload.get("workflow", {}).get("path", "").endswith("FUGIT_WORKFLOW.md")' "advisor run show should expose stored report workflow metadata"
+"$BIN" --repo-root "$REPO_C" advisor run rerun --run-id "$MANUAL_ADVISOR_RUN_ID" --json >"$TMP_ROOT/advisor-rerun.json"
+json_assert "$TMP_ROOT/advisor-rerun.json" 'payload.get("run_id") != "'"$MANUAL_ADVISOR_RUN_ID"'" and payload.get("generated_task_count", 0) >= 1' "advisor run rerun should execute a fresh pass"
 "$BIN" --repo-root "$REPO_C" advisor runs --json >"$TMP_ROOT/advisor-runs.json"
-json_assert "$TMP_ROOT/advisor-runs.json" 'len(payload) >= 2' "advisor runs should record both low-water and manual executions"
+json_assert "$TMP_ROOT/advisor-runs.json" 'len(payload) >= 3' "advisor runs should record low-water, manual, and rerun executions"
 
 echo "[vigorous-e2e] task sync + reopen"
 cat >"$REPO_A/the_final_plan.md" <<'EOF'
@@ -365,10 +413,11 @@ json_assert "$TMP_ROOT/check-run.json" 'payload.get("ok") is True and payload.ge
 echo "[vigorous-e2e] project registry"
 "$BIN" project add --name proj-a --repo-root "$REPO_A" --set-default --json >"$TMP_ROOT/project-add-a.json"
 "$BIN" project add --name proj-b --repo-root "$REPO_B" --json >"$TMP_ROOT/project-add-b.json"
+"$BIN" project add --name proj-c --repo-root "$REPO_C" --json >"$TMP_ROOT/project-add-c.json"
 "$BIN" project discover --root "$TMP_ROOT" --json >"$TMP_ROOT/project-discover.json"
 json_assert "$TMP_ROOT/project-discover.json" 'payload.get("selected_project", {}).get("repo_root") is not None and len(payload.get("created", [])) + len(payload.get("updated", [])) >= 2' "project discover should find initialized fugit repos under the requested root"
 "$BIN" project list --json >"$TMP_ROOT/project-list.json"
-json_assert "$TMP_ROOT/project-list.json" 'isinstance(payload, list) and len(payload) >= 2 and any("is_most_recent" in row for row in payload)' "project list should include registry rows with recent-project metadata"
+json_assert "$TMP_ROOT/project-list.json" 'isinstance(payload, list) and len(payload) >= 3 and any("is_most_recent" in row for row in payload)' "project list should include registry rows with recent-project metadata"
 "$BIN" project use --name proj-b --json >"$TMP_ROOT/project-use.json"
 "$BIN" project remove --name proj-b --json >"$TMP_ROOT/project-remove.json"
 
@@ -401,6 +450,31 @@ json_assert "$TMP_ROOT/gui-remove.json" 'payload.get("ok") is True and payload.g
 GUI_PID="$(lsof -ti tcp:$GUI_PORT || true)"
 if [[ -n "$GUI_PID" ]]; then
   kill "$GUI_PID" || true
+fi
+
+echo "[vigorous-e2e] advisor GUI API"
+ADVISOR_GUI_PORT="$("$BIN" --repo-root "$REPO_C" task gui --background --host 127.0.0.1 --port 0 --project proj-c --no-open --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["port"])')"
+sleep 0.7
+curl -s "http://127.0.0.1:$ADVISOR_GUI_PORT/api/advisor?project=proj-c" >"$TMP_ROOT/gui-advisor.json"
+GUI_ADVISOR_RUN_ID="$(python3 - "$TMP_ROOT/gui-advisor.json" <<'PY'
+import json,sys
+payload=json.load(open(sys.argv[1]))
+runs=payload.get("runs") or []
+if not runs:
+    raise SystemExit("advisor gui has no runs")
+print(runs[0]["run_id"])
+PY
+)"
+curl -s "http://127.0.0.1:$ADVISOR_GUI_PORT/api/advisor/run-detail?project=proj-c&run_id=$GUI_ADVISOR_RUN_ID" >"$TMP_ROOT/gui-advisor-detail.json"
+curl -s -X POST "http://127.0.0.1:$ADVISOR_GUI_PORT/api/advisor/rerun?project=proj-c" \
+  -H "Content-Type: application/json" \
+  -d "{\"run_id\":\"$GUI_ADVISOR_RUN_ID\",\"background\":false}" >"$TMP_ROOT/gui-advisor-rerun.json"
+json_assert "$TMP_ROOT/gui-advisor.json" 'payload.get("workflow", {}).get("exists") is True and len(payload.get("runs", [])) >= 1' "advisor GUI payload should expose workflow state and recent runs"
+json_assert "$TMP_ROOT/gui-advisor-detail.json" 'payload.get("report", {}).get("run_id") == "'"$GUI_ADVISOR_RUN_ID"'"' "advisor GUI detail endpoint should return the selected run report"
+json_assert "$TMP_ROOT/gui-advisor-rerun.json" 'payload.get("ok") is True and payload.get("result", {}).get("run_id") is not None' "advisor GUI rerun endpoint should execute the selected run"
+ADVISOR_GUI_PID="$(lsof -ti tcp:$ADVISOR_GUI_PORT || true)"
+if [[ -n "$ADVISOR_GUI_PID" ]]; then
+  kill "$ADVISOR_GUI_PID" || true
 fi
 
 echo "[vigorous-e2e] gui launcher wrapper"

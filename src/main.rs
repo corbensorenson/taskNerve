@@ -36,12 +36,14 @@ const SCHEMA_BRIDGE_AUTO_SYNC: &str = "timeline.bridge_auto_sync.v1";
 const SCHEMA_BRIDGE_AUTO_SYNC_LOCK: &str = "timeline.bridge_auto_sync_lock.v1";
 const SCHEMA_ADVISOR_STATE: &str = "fugit.advisor.v1";
 const SCHEMA_ADVISOR_RUN: &str = "fugit.advisor_run.v1";
+const SCHEMA_ADVISOR_WORKFLOW: &str = "fugit.advisor_workflow.v1";
 const SCHEMA_ADVISOR_WORKER_STATE: &str = "fugit.advisor_worker_state.v1";
 const SCHEMA_ADVISOR_WORKER_LOCK: &str = "fugit.advisor_worker_lock.v1";
 const BACKEND_MODE_GIT_BRIDGE: &str = "git_bridge";
 const BACKEND_MODE_FUGIT_CLOUD: &str = "fugit_cloud";
 const AUTO_REPLENISH_SOURCE_PLAN: &str = ".fugit:auto_replenish";
 const ADVISOR_AUTO_PLAN_FILE: &str = ".fugit/advisor/auto_backlog.tsv";
+const ADVISOR_WORKFLOW_FILE: &str = "FUGIT_WORKFLOW.md";
 const SYSTEM_AGENT_ID: &str = "fugit.system";
 const AUTO_BRIDGE_SYNC_STALE_MINUTES: i64 = 30;
 const ADVISOR_WORKER_STALE_MINUTES: i64 = 45;
@@ -53,6 +55,7 @@ const FUGIT_SKILL_REF_WORKFLOW_PROFILES: &str =
     include_str!("../skills/fugit/references/workflow-profiles.md");
 const FUGIT_SKILL_REF_RECOVERY_PLAYBOOKS: &str =
     include_str!("../skills/fugit/references/recovery-playbooks.md");
+const DEFAULT_ADVISOR_WORKFLOW_TEMPLATE: &str = include_str!("../templates/FUGIT_WORKFLOW.md");
 
 const IGNORE_ROOT_ENTRIES: &[&str] = &[
     ".git",
@@ -508,6 +511,62 @@ enum AdvisorAction {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    Workflow {
+        #[command(subcommand)]
+        action: AdvisorWorkflowAction,
+    },
+    Run {
+        #[command(subcommand)]
+        action: AdvisorRunAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AdvisorWorkflowAction {
+    Init {
+        #[arg(long)]
+        path: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        force: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Show {
+        #[arg(long)]
+        path: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Validate {
+        #[arg(long)]
+        path: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    SyncPolicy {
+        #[arg(long)]
+        path: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AdvisorRunAction {
+    Show {
+        #[arg(long)]
+        run_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Rerun {
+        #[arg(long)]
+        run_id: String,
+        #[arg(long, default_value_t = false)]
+        background: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -920,6 +979,68 @@ struct AdvisorState {
     task_manager: AdvisorRoleSelection,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct AdvisorWorkflowFrontMatter {
+    #[serde(default)]
+    advisor: AdvisorWorkflowPolicyDefaults,
+    #[serde(default)]
+    reviewer: AdvisorWorkflowRoleConfig,
+    #[serde(default, alias = "task-manager")]
+    task_manager: AdvisorWorkflowRoleConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct AdvisorWorkflowPolicyDefaults {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    auto_task_generation: Option<bool>,
+    #[serde(default)]
+    auto_review: Option<bool>,
+    #[serde(default)]
+    low_task_threshold: Option<usize>,
+    #[serde(default)]
+    require_confirmation: Option<bool>,
+    #[serde(default)]
+    allow_online_research: Option<bool>,
+    #[serde(default)]
+    auto_trigger_cooldown_minutes: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct AdvisorWorkflowRoleConfig {
+    #[serde(default)]
+    goal: Option<String>,
+    #[serde(default)]
+    guidance: Vec<String>,
+    #[serde(default)]
+    max_findings: Option<usize>,
+    #[serde(default)]
+    max_tasks: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct AdvisorWorkflowDefinition {
+    path: PathBuf,
+    config: AdvisorWorkflowFrontMatter,
+    instructions_markdown: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AdvisorWorkflowInspection {
+    schema_version: String,
+    path: String,
+    exists: bool,
+    valid: bool,
+    using_defaults: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    policy_defaults: AdvisorWorkflowPolicyDefaults,
+    reviewer: AdvisorWorkflowRoleConfig,
+    task_manager: AdvisorWorkflowRoleConfig,
+    instructions_markdown: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AdvisorFinding {
     title: String,
@@ -977,6 +1098,10 @@ struct AdvisorRunRecord {
     report_path: String,
     #[serde(default)]
     plan_path: Option<String>,
+    #[serde(default)]
+    workflow_path: Option<String>,
+    #[serde(default)]
+    workflow_found: bool,
     #[serde(default)]
     error: Option<String>,
 }
@@ -1232,6 +1357,12 @@ struct TaskGuiAdvisorRunRequest {
     role: String,
     goal: Option<String>,
     allow_online_research: Option<bool>,
+    background: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskGuiAdvisorRerunRequest {
+    run_id: String,
     background: Option<bool>,
 }
 
@@ -2139,6 +2270,10 @@ fn fugit_skill_bundle(include_skill_body: bool, include_openai_yaml: bool) -> se
                 "fugit_check_policy_set",
                 "fugit_advisor_show",
                 "fugit_advisor_runs",
+                "fugit_advisor_workflow_show",
+                "fugit_advisor_workflow_sync_policy",
+                "fugit_advisor_run_show",
+                "fugit_advisor_run_rerun",
                 "fugit_advisor_provider_list",
                 "fugit_advisor_provider_assign",
                 "fugit_advisor_policy_show",
@@ -5585,6 +5720,126 @@ fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
                 }
             }
         }
+        AdvisorAction::Workflow { action } => match action {
+            AdvisorWorkflowAction::Init { path, force, json } => {
+                let workflow_path = resolve_advisor_workflow_path(repo_root, path.as_deref());
+                if workflow_path.exists() && !force {
+                    bail!(
+                        "advisor workflow already exists at {} (use --force to overwrite)",
+                        workflow_path.display()
+                    );
+                }
+                if let Some(parent) = workflow_path.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("failed creating {}", parent.display()))?;
+                }
+                fs::write(&workflow_path, DEFAULT_ADVISOR_WORKFLOW_TEMPLATE)
+                    .with_context(|| format!("failed writing {}", workflow_path.display()))?;
+                let payload = inspect_advisor_workflow(repo_root, path.as_deref());
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    println!("[fugit-advisor-workflow] wrote {}", workflow_path.display());
+                }
+            }
+            AdvisorWorkflowAction::Show { path, json } => {
+                let payload = inspect_advisor_workflow(repo_root, path.as_deref());
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else if payload.valid {
+                    println!(
+                        "[fugit-advisor-workflow] path={} exists={} defaults={} reviewer_goal={} task_manager_goal={}",
+                        payload.path,
+                        payload.exists,
+                        payload.using_defaults,
+                        payload.reviewer.goal.as_deref().unwrap_or("default"),
+                        payload.task_manager.goal.as_deref().unwrap_or("default")
+                    );
+                } else {
+                    println!(
+                        "[fugit-advisor-workflow] invalid path={} error={}",
+                        payload.path,
+                        payload.error.as_deref().unwrap_or("unknown")
+                    );
+                }
+            }
+            AdvisorWorkflowAction::Validate { path, json } => {
+                let payload = inspect_advisor_workflow(repo_root, path.as_deref());
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else if payload.valid {
+                    println!(
+                        "[fugit-advisor-workflow] valid path={} exists={} instructions={}chars",
+                        payload.path,
+                        payload.exists,
+                        payload.instructions_markdown.len()
+                    );
+                } else {
+                    bail!(
+                        "advisor workflow invalid at {}: {}",
+                        payload.path,
+                        payload.error.as_deref().unwrap_or("unknown error")
+                    );
+                }
+            }
+            AdvisorWorkflowAction::SyncPolicy { path, json } => {
+                let payload = sync_policy_from_advisor_workflow(repo_root, path.as_deref())?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    println!(
+                        "[fugit-advisor-workflow] synced_policy changed={} path={}",
+                        payload["changed"].as_bool().unwrap_or(false),
+                        payload["workflow"]["path"].as_str().unwrap_or("unknown")
+                    );
+                }
+            }
+        },
+        AdvisorAction::Run { action } => match action {
+            AdvisorRunAction::Show { run_id, json } => {
+                let payload = load_advisor_run_report(repo_root, &run_id)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    println!(
+                        "[fugit-advisor-run] run_id={} role={} summary={}",
+                        run_id,
+                        payload["role"].as_str().unwrap_or("unknown"),
+                        payload["output"]["summary"]
+                            .as_str()
+                            .unwrap_or("(no summary)")
+                    );
+                }
+            }
+            AdvisorRunAction::Rerun {
+                run_id,
+                background,
+                json,
+            } => {
+                let report = load_advisor_run_report(repo_root, &run_id)?;
+                let options = build_rerun_options_from_report(repo_root, &report, &run_id)?;
+                if background {
+                    let payload = queue_advisor_background(repo_root, &options)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&payload)?);
+                    } else {
+                        println!(
+                            "[fugit-advisor-run] queued_rerun run_id={} role={} status={}",
+                            run_id,
+                            advisor_role_label(options.role),
+                            payload["status"].as_str().unwrap_or("queued")
+                        );
+                    }
+                } else {
+                    let run = execute_advisor_run(repo_root, &options)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&run)?);
+                    } else {
+                        println!("[fugit-advisor-run] reran {} -> {}", run_id, run.run_id);
+                    }
+                }
+            }
+        },
         AdvisorAction::Provider { action } => {
             let mut state = ensure_advisor_state(repo_root)?;
             match action {
@@ -6414,6 +6669,55 @@ fn handle_task_gui_connection(
         };
     }
 
+    if path == "/api/advisor/run-detail" {
+        if method != "GET" {
+            return write_http_json_error(
+                stream,
+                "405 Method Not Allowed",
+                "GET required for /api/advisor/run-detail",
+            );
+        }
+        let Some(run_id) = query
+            .get("run_id")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return write_http_json_error(
+                stream,
+                "400 Bad Request",
+                "run_id query parameter is required for /api/advisor/run-detail",
+            );
+        };
+        let selected_project = query.get("project").map(String::as_str).or(default_project);
+        return match task_gui_advisor_run_detail(repo_root, selected_project, run_id) {
+            Ok(payload) => write_http_json(stream, "200 OK", &payload),
+            Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
+        };
+    }
+
+    if path == "/api/advisor/rerun" {
+        if method != "POST" {
+            return write_http_json_error(
+                stream,
+                "405 Method Not Allowed",
+                "POST required for /api/advisor/rerun",
+            );
+        }
+        if !request_content_type_is_json(&request) {
+            return write_http_json_error(
+                stream,
+                "415 Unsupported Media Type",
+                "application/json body required for /api/advisor/rerun",
+            );
+        }
+        let selected_project = query.get("project").map(String::as_str).or(default_project);
+        return match task_gui_rerun_advisor(repo_root, selected_project, &request.body) {
+            Ok(payload) => write_http_json(stream, "200 OK", &payload),
+            Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
+        };
+    }
+
     if path == "/api/tasks/add" {
         if method != "POST" {
             return write_http_json_error(
@@ -7082,6 +7386,57 @@ fn task_gui_run_advisor(
     }))
 }
 
+fn task_gui_advisor_run_detail(
+    repo_root: &Path,
+    project_selector: Option<&str>,
+    run_id: &str,
+) -> Result<serde_json::Value> {
+    let (_projects, selected, selected_repo) =
+        resolve_task_gui_project_selection(repo_root, project_selector)?;
+    let report = load_advisor_run_report(&selected_repo, run_id)?;
+    Ok(json!({
+        "ok": true,
+        "action": "advisor_run_detail",
+        "selected_project": {
+            "key": selected.key,
+            "name": selected.name,
+            "repo_root": selected.repo_root
+        },
+        "run_id": run_id,
+        "report": report
+    }))
+}
+
+fn task_gui_rerun_advisor(
+    repo_root: &Path,
+    project_selector: Option<&str>,
+    body: &[u8],
+) -> Result<serde_json::Value> {
+    let request: TaskGuiAdvisorRerunRequest =
+        serde_json::from_slice(body).with_context(|| "invalid advisor rerun payload")?;
+    let (_projects, selected, selected_repo) =
+        resolve_task_gui_project_selection(repo_root, project_selector)?;
+    let report = load_advisor_run_report(&selected_repo, &request.run_id)?;
+    let options = build_rerun_options_from_report(&selected_repo, &report, &request.run_id)?;
+    let payload = if request.background.unwrap_or(true) {
+        queue_advisor_background(&selected_repo, &options)?
+    } else {
+        serde_json::to_value(execute_advisor_run(&selected_repo, &options)?)?
+    };
+    Ok(json!({
+        "ok": true,
+        "action": "advisor_rerun",
+        "selected_project": {
+            "key": selected.key,
+            "name": selected.name,
+            "repo_root": selected.repo_root
+        },
+        "source_run_id": request.run_id,
+        "role": advisor_role_label(options.role),
+        "result": payload
+    }))
+}
+
 fn task_gui_payload(repo_root: &Path, project_selector: Option<&str>) -> Result<serde_json::Value> {
     let (projects, selected, selected_repo) =
         resolve_task_gui_project_selection(repo_root, project_selector)?;
@@ -7587,6 +7942,28 @@ fn task_gui_html() -> &'static str {
       border-radius: 10px;
       padding: 9px 10px;
       font-size: 12px;
+      cursor: pointer;
+    }
+    .run-row.selected {
+      border-color: #93c5fd;
+      box-shadow: inset 0 0 0 1px #93c5fd;
+    }
+    .advisor-workflow,
+    .advisor-run-detail {
+      margin-top: 10px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px;
+      background: #fff;
+      font-size: 12px;
+    }
+    .advisor-run-detail pre,
+    .advisor-workflow pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      margin: 8px 0 0;
+      font: inherit;
+      color: #334155;
     }
     .empty {
       margin-top: 20px;
@@ -7706,8 +8083,15 @@ fn task_gui_html() -> &'static str {
           <div class="advisor-actions">
             <button id="runAdvisorReview" type="button">run review</button>
             <button id="runAdvisorResearch" type="button">run research</button>
+            <button id="rerunAdvisorRun" type="button">rerun selected</button>
+          </div>
+          <div class="advisor-workflow" id="advisorWorkflow">
+            <div class="meta" id="advisorWorkflowMeta">loading workflow...</div>
           </div>
           <div class="run-list" id="advisorRuns"></div>
+          <div class="advisor-run-detail" id="advisorRunDetail">
+            <div class="meta">Select an advisor run to inspect its findings, tasks, and execution settings.</div>
+          </div>
           <div class="empty" id="advisorEmpty" style="display:none;">No advisor runs yet. Trigger review or research here, or let low-task mode queue it automatically.</div>
         </section>
         <div class="timeline-controls">
@@ -7727,6 +8111,7 @@ fn task_gui_html() -> &'static str {
     const params = new URLSearchParams(window.location.search);
     let selectedProject = params.get("project") || "";
     let selectedBranch = params.get("branch") || "";
+    let advisorSelectedRunId = "";
     let timelineOffset = 0;
     let timelineHasMore = false;
     let timelineRows = [];
@@ -7865,10 +8250,102 @@ fn task_gui_html() -> &'static str {
       };
     };
 
+    const renderAdvisorWorkflow = (workflow) => {
+      const container = byId("advisorWorkflow");
+      if (!workflow) {
+        container.innerHTML = `<div class="meta">workflow unavailable</div>`;
+        return;
+      }
+      const reviewerGoal = workflow.reviewer?.goal || "default reviewer goal";
+      const taskManagerGoal = workflow.task_manager?.goal || "default task-manager goal";
+      const policyBits = [
+        workflow.policy_defaults?.low_task_threshold != null ? `low_task_threshold=${workflow.policy_defaults.low_task_threshold}` : null,
+        workflow.policy_defaults?.require_confirmation != null ? `confirm=${workflow.policy_defaults.require_confirmation ? "on" : "off"}` : null,
+        workflow.policy_defaults?.allow_online_research != null ? `online=${workflow.policy_defaults.allow_online_research ? "on" : "off"}` : null
+      ].filter(Boolean).join(" • ");
+      const instructions = workflow.instructions_markdown
+        ? `<pre>${escapeHtml(workflow.instructions_markdown)}</pre>`
+        : `<div class="meta">No shared markdown instructions in the workflow file.</div>`;
+      const statusText = workflow.valid
+        ? (workflow.exists ? "loaded" : "defaults only")
+        : "invalid";
+      const errorBlock = workflow.error
+        ? `<div class="meta message-error">${escapeHtml(workflow.error)}</div>`
+        : "";
+      container.innerHTML = `
+        <div class="meta" id="advisorWorkflowMeta">workflow=${escapeHtml(statusText)} • path=${escapeHtml(workflow.path || "")}${policyBits ? ` • ${escapeHtml(policyBits)}` : ""}</div>
+        ${errorBlock}
+        <div class="meta-row">reviewer goal: ${escapeHtml(reviewerGoal)}</div>
+        <div class="meta-row">task-manager goal: ${escapeHtml(taskManagerGoal)}</div>
+        ${instructions}
+      `;
+    };
+
+    const renderAdvisorRunDetail = (report) => {
+      const container = byId("advisorRunDetail");
+      if (!report) {
+        container.innerHTML = `<div class="meta">Select an advisor run to inspect its findings, tasks, and execution settings.</div>`;
+        return;
+      }
+      const output = report.output || {};
+      const notes = output.notes || [];
+      const findings = output.findings || [];
+      const tasks = output.tasks || [];
+      const execution = report.execution || {};
+      const workflow = report.workflow || {};
+      const findingsHtml = findings.length === 0
+        ? `<div class="meta">No findings recorded.</div>`
+        : findings.map((finding) => `
+            <div class="meta-row"><strong>${escapeHtml(finding.title || "finding")}</strong> • ${escapeHtml(finding.severity || "low")}</div>
+            <div class="meta-row">${escapeHtml(finding.detail || "")}</div>
+          `).join("");
+      const tasksHtml = tasks.length === 0
+        ? `<div class="meta">No generated tasks recorded.</div>`
+        : tasks.map((task) => `
+            <div class="meta-row"><strong>${escapeHtml(task.title || "task")}</strong> • priority=${escapeHtml(task.priority ?? 0)}</div>
+            <div class="meta-row">${escapeHtml(task.detail || "")}</div>
+          `).join("");
+      const notesHtml = notes.length === 0
+        ? `<div class="meta">No extra notes.</div>`
+        : `<div class="meta-row">${escapeHtml(notes.join(" • "))}</div>`;
+      container.innerHTML = `
+        <div><strong>${escapeHtml(report.role || "advisor")}</strong> • ${escapeHtml(output.summary || "(no summary)")}</div>
+        <div class="meta-row">run=${escapeHtml(report.run_id || "")} • trigger=${escapeHtml(report.trigger || "manual")} • provider=${escapeHtml(report.provider?.name || report.provider?.provider_id || "unknown")} • model=${escapeHtml(report.model || "default")}</div>
+        <div class="meta-row">sync_suggested_tasks=${escapeHtml(execution.sync_suggested_tasks ? "true" : "false")} • plan_mode=${escapeHtml(execution.plan_mode || "goal_scoped")} • workflow=${escapeHtml(workflow.path || "defaults")}</div>
+        <div class="meta-row">notes</div>
+        ${notesHtml}
+        <div class="meta-row">findings</div>
+        ${findingsHtml}
+        <div class="meta-row">tasks</div>
+        ${tasksHtml}
+      `;
+    };
+
+    async function refreshAdvisorRunDetail() {
+      if (!advisorSelectedRunId) {
+        renderAdvisorRunDetail(null);
+        byId("rerunAdvisorRun").disabled = true;
+        return;
+      }
+      try {
+        const query = new URLSearchParams();
+        if (selectedProject) query.set("project", selectedProject);
+        query.set("run_id", advisorSelectedRunId);
+        const response = await fetch(`/api/advisor/run-detail?${query.toString()}`, { cache: "no-store" });
+        const payload = await readJsonResponse(response);
+        renderAdvisorRunDetail(payload.report || null);
+        byId("rerunAdvisorRun").disabled = false;
+      } catch (error) {
+        byId("advisorRunDetail").innerHTML = `<div class="meta message-error">failed to load advisor run detail: ${escapeHtml(error)}</div>`;
+        byId("rerunAdvisorRun").disabled = true;
+      }
+    }
+
     const renderAdvisor = (payload) => {
       const providers = payload.providers || [];
       const assignments = payload.assignments || {};
       const policy = payload.policy || {};
+      const workflow = payload.workflow || null;
       const workers = payload.workers || {};
       const runs = payload.runs || [];
       const reviewer = assignments.reviewer || {};
@@ -7895,15 +8372,27 @@ fn task_gui_html() -> &'static str {
 
       const reviewerState = workers.reviewer || {};
       const taskManagerState = workers.task_manager || {};
-      byId("advisorMeta").textContent = `reviewer=${reviewerState.status || "idle"} • task_manager=${taskManagerState.status || "idle"} • providers=${providers.length}`;
+      byId("advisorMeta").textContent = `reviewer=${reviewerState.status || "idle"} • task_manager=${taskManagerState.status || "idle"} • providers=${providers.length} • workflow=${workflow?.valid === false ? "invalid" : (workflow?.exists ? "loaded" : "defaults")}`;
+      renderAdvisorWorkflow(workflow);
+
+      if (!runs.some((run) => run.run_id === advisorSelectedRunId)) {
+        advisorSelectedRunId = runs[0]?.run_id || "";
+      }
 
       byId("advisorEmpty").style.display = runs.length === 0 ? "block" : "none";
       byId("advisorRuns").innerHTML = runs.map((run) => `
-        <article class="run-row">
+        <article class="run-row${run.run_id === advisorSelectedRunId ? " selected" : ""}" data-run-id="${escapeHtml(run.run_id || "")}">
           <div><strong>${escapeHtml(run.role || "advisor")}</strong> • ${escapeHtml(run.provider_name || "unknown")} • ${escapeHtml(run.summary || "(no summary)")}</div>
-          <div class="meta-row">trigger=${escapeHtml(run.trigger || "manual")} • tasks=${escapeHtml(run.generated_task_count || 0)} • findings=${escapeHtml(run.findings_count || 0)}</div>
+          <div class="meta-row">trigger=${escapeHtml(run.trigger || "manual")} • tasks=${escapeHtml(run.generated_task_count || 0)} • findings=${escapeHtml(run.findings_count || 0)} • workflow=${escapeHtml(run.workflow_found ? "repo" : "defaults")}</div>
         </article>
       `).join("");
+      byId("advisorRuns").querySelectorAll(".run-row").forEach((node) => {
+        node.onclick = async () => {
+          advisorSelectedRunId = node.dataset.runId || "";
+          renderAdvisor(payload);
+          await refreshAdvisorRunDetail();
+        };
+      });
     };
 
     async function refreshAdvisor() {
@@ -7911,6 +8400,7 @@ fn task_gui_html() -> &'static str {
         const response = await fetch(`/api/advisor${projectQuery()}`, { cache: "no-store" });
         const payload = await readJsonResponse(response);
         renderAdvisor(payload);
+        await refreshAdvisorRunDetail();
       } catch (error) {
         byId("advisorMeta").textContent = `failed to load advisor: ${error}`;
       }
@@ -8243,6 +8733,25 @@ fn task_gui_html() -> &'static str {
         await refreshAdvisor();
       } catch (error) {
         setActionMessage(`advisor research failed: ${error}`, "error");
+      }
+    };
+    byId("rerunAdvisorRun").onclick = async () => {
+      if (!advisorSelectedRunId) {
+        setActionMessage("select an advisor run first", "error");
+        return;
+      }
+      try {
+        const response = await fetch(`/api/advisor/rerun${projectQuery()}`, {
+          method: "POST",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ run_id: advisorSelectedRunId, background: true })
+        });
+        const result = await readJsonResponse(response);
+        setActionMessage(`queued advisor rerun (${result.result?.status || "ok"})`);
+        await refreshAdvisor();
+      } catch (error) {
+        setActionMessage(`advisor rerun failed: ${error}`, "error");
       }
     };
     byId("newTaskButton").onclick = () => {
@@ -8764,6 +9273,39 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                 "type": "object",
                 "properties": {
                     "limit": { "type": "integer", "minimum": 1 }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_advisor_workflow_show",
+            "description": "Inspect the repo-owned FUGIT_WORKFLOW.md advisor contract and effective defaults.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "fugit_advisor_workflow_sync_policy",
+            "description": "Apply advisor policy defaults from FUGIT_WORKFLOW.md into the live advisor state.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "fugit_advisor_run_show",
+            "description": "Load the full report for one advisor run.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["run_id"],
+                "properties": {
+                    "run_id": { "type": "string" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_advisor_run_rerun",
+            "description": "Rerun a previous advisor run with the same role/provider/model/goal settings.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["run_id"],
+                "properties": {
+                    "run_id": { "type": "string" },
+                    "background": { "type": "boolean" }
                 }
             }
         }),
@@ -9892,6 +10434,63 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
+        "fugit_advisor_workflow_show" => run_self_cli_json(
+            repo_root,
+            &[
+                "advisor".to_string(),
+                "workflow".to_string(),
+                "show".to_string(),
+                "--json".to_string(),
+            ],
+        )?,
+        "fugit_advisor_workflow_sync_policy" => run_self_cli_json(
+            repo_root,
+            &[
+                "advisor".to_string(),
+                "workflow".to_string(),
+                "sync-policy".to_string(),
+                "--json".to_string(),
+            ],
+        )?,
+        "fugit_advisor_run_show" => {
+            let run_id = args
+                .get("run_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_advisor_run_show requires run_id"))?;
+            run_self_cli_json(
+                repo_root,
+                &[
+                    "advisor".to_string(),
+                    "run".to_string(),
+                    "show".to_string(),
+                    "--run-id".to_string(),
+                    run_id.to_string(),
+                    "--json".to_string(),
+                ],
+            )?
+        }
+        "fugit_advisor_run_rerun" => {
+            let run_id = args
+                .get("run_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_advisor_run_rerun requires run_id"))?;
+            let mut cli_args = vec![
+                "advisor".to_string(),
+                "run".to_string(),
+                "rerun".to_string(),
+                "--run-id".to_string(),
+                run_id.to_string(),
+                "--json".to_string(),
+            ];
+            if args
+                .get("background")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--background".to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
         "fugit_advisor_provider_list" => run_self_cli_json(
             repo_root,
             &[
@@ -10895,6 +11494,181 @@ fn advisor_policy_payload(state: &AdvisorState) -> serde_json::Value {
     })
 }
 
+fn default_advisor_workflow_path(repo_root: &Path) -> PathBuf {
+    repo_root.join(ADVISOR_WORKFLOW_FILE)
+}
+
+fn resolve_advisor_workflow_path(repo_root: &Path, override_path: Option<&Path>) -> PathBuf {
+    override_path
+        .map(|path| {
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                repo_root.join(path)
+            }
+        })
+        .unwrap_or_else(|| default_advisor_workflow_path(repo_root))
+}
+
+fn parse_advisor_workflow_document(raw: &str) -> Result<(AdvisorWorkflowFrontMatter, String)> {
+    let normalized = raw.replace("\r\n", "\n");
+    if let Some(rest) = normalized.strip_prefix("---\n") {
+        if let Some(end) = rest.find("\n---\n") {
+            let front_matter = &rest[..end];
+            let body = &rest[end + 5..];
+            let parsed = serde_yaml::from_str::<AdvisorWorkflowFrontMatter>(front_matter)
+                .with_context(|| "failed parsing advisor workflow YAML front matter")?;
+            return Ok((parsed, body.trim().to_string()));
+        }
+        bail!("advisor workflow front matter is missing a closing '---' delimiter");
+    }
+    Ok((
+        AdvisorWorkflowFrontMatter::default(),
+        normalized.trim().to_string(),
+    ))
+}
+
+fn load_advisor_workflow_definition(
+    repo_root: &Path,
+    override_path: Option<&Path>,
+) -> Result<Option<AdvisorWorkflowDefinition>> {
+    let path = resolve_advisor_workflow_path(repo_root, override_path);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw =
+        fs::read_to_string(&path).with_context(|| format!("failed reading {}", path.display()))?;
+    let (config, instructions_markdown) = parse_advisor_workflow_document(&raw)?;
+    Ok(Some(AdvisorWorkflowDefinition {
+        path,
+        config,
+        instructions_markdown,
+    }))
+}
+
+fn inspect_advisor_workflow(
+    repo_root: &Path,
+    override_path: Option<&Path>,
+) -> AdvisorWorkflowInspection {
+    let path = resolve_advisor_workflow_path(repo_root, override_path);
+    match load_advisor_workflow_definition(repo_root, override_path) {
+        Ok(Some(definition)) => AdvisorWorkflowInspection {
+            schema_version: SCHEMA_ADVISOR_WORKFLOW.to_string(),
+            path: definition.path.display().to_string(),
+            exists: true,
+            valid: true,
+            using_defaults: false,
+            error: None,
+            policy_defaults: definition.config.advisor.clone(),
+            reviewer: definition.config.reviewer.clone(),
+            task_manager: definition.config.task_manager.clone(),
+            instructions_markdown: definition.instructions_markdown.clone(),
+        },
+        Ok(None) => AdvisorWorkflowInspection {
+            schema_version: SCHEMA_ADVISOR_WORKFLOW.to_string(),
+            path: path.display().to_string(),
+            exists: false,
+            valid: true,
+            using_defaults: true,
+            error: None,
+            policy_defaults: AdvisorWorkflowPolicyDefaults::default(),
+            reviewer: AdvisorWorkflowRoleConfig::default(),
+            task_manager: AdvisorWorkflowRoleConfig::default(),
+            instructions_markdown: String::new(),
+        },
+        Err(err) => AdvisorWorkflowInspection {
+            schema_version: SCHEMA_ADVISOR_WORKFLOW.to_string(),
+            path: path.display().to_string(),
+            exists: path.exists(),
+            valid: false,
+            using_defaults: false,
+            error: Some(err.to_string()),
+            policy_defaults: AdvisorWorkflowPolicyDefaults::default(),
+            reviewer: AdvisorWorkflowRoleConfig::default(),
+            task_manager: AdvisorWorkflowRoleConfig::default(),
+            instructions_markdown: String::new(),
+        },
+    }
+}
+
+fn advisor_workflow_role_config(
+    workflow: Option<&AdvisorWorkflowDefinition>,
+    role: AdvisorRoleArg,
+) -> &AdvisorWorkflowRoleConfig {
+    static DEFAULT_ROLE_CONFIG: AdvisorWorkflowRoleConfig = AdvisorWorkflowRoleConfig {
+        goal: None,
+        guidance: Vec::new(),
+        max_findings: None,
+        max_tasks: None,
+    };
+    match workflow {
+        Some(definition) => match role {
+            AdvisorRoleArg::Reviewer => &definition.config.reviewer,
+            AdvisorRoleArg::TaskManager => &definition.config.task_manager,
+        },
+        None => &DEFAULT_ROLE_CONFIG,
+    }
+}
+
+fn default_advisor_goal(role: AdvisorRoleArg) -> &'static str {
+    match role {
+        AdvisorRoleArg::Reviewer => {
+            "Review the project for the highest-leverage issues and architectural risks."
+        }
+        AdvisorRoleArg::TaskManager => {
+            "Generate the next highest-leverage backlog for this project."
+        }
+    }
+}
+
+fn effective_advisor_goal(
+    workflow: Option<&AdvisorWorkflowDefinition>,
+    options: &AdvisorRunOptions,
+) -> String {
+    options
+        .goal
+        .clone()
+        .or_else(|| {
+            advisor_workflow_role_config(workflow, options.role)
+                .goal
+                .clone()
+        })
+        .unwrap_or_else(|| default_advisor_goal(options.role).to_string())
+}
+
+fn sync_policy_from_advisor_workflow(
+    repo_root: &Path,
+    override_path: Option<&Path>,
+) -> Result<serde_json::Value> {
+    let Some(workflow) = load_advisor_workflow_definition(repo_root, override_path)? else {
+        bail!(
+            "advisor workflow file not found at {}",
+            resolve_advisor_workflow_path(repo_root, override_path).display()
+        );
+    };
+    let defaults = workflow.config.advisor.clone();
+    let mut state = ensure_advisor_state(repo_root)?;
+    let changed = update_advisor_policy(
+        &mut state,
+        defaults.enabled,
+        defaults.auto_task_generation,
+        defaults.auto_review,
+        defaults.low_task_threshold,
+        defaults.require_confirmation,
+        defaults.allow_online_research,
+        defaults.auto_trigger_cooldown_minutes,
+    );
+    if changed {
+        write_advisor_state(repo_root, &state)?;
+    }
+    Ok(json!({
+        "schema_version": "fugit.advisor.workflow.sync_policy.v1",
+        "workflow": inspect_advisor_workflow(repo_root, override_path),
+        "changed": changed,
+        "policy": advisor_policy_payload(&state)
+    }))
+}
+
 fn emit_advisor_provider_payload(provider: &AdvisorProvider, json: bool) -> Result<()> {
     let payload = advisor_provider_payload(provider);
     if json {
@@ -11309,6 +12083,7 @@ fn advisor_snapshot_payload(repo_root: &Path, limit: usize) -> Result<serde_json
         "policy": advisor_policy_payload(&state),
         "providers": advisor_provider_list_payload(&state),
         "assignments": advisor_assignment_payload(&state),
+        "workflow": inspect_advisor_workflow(repo_root, None),
         "workers": {
             "reviewer": reviewer_worker,
             "task_manager": task_manager_worker
@@ -11341,6 +12116,98 @@ fn load_advisor_runs(repo_root: &Path, limit: usize) -> Result<Vec<AdvisorRunRec
     }
     rows.reverse();
     Ok(rows)
+}
+
+fn load_advisor_run_report(repo_root: &Path, run_id: &str) -> Result<serde_json::Value> {
+    let path = timeline_advisor_run_dir(repo_root, run_id).join("report.json");
+    if !path.exists() {
+        bail!("advisor run report not found: {}", run_id);
+    }
+    let bytes = fs::read(&path).with_context(|| format!("failed reading {}", path.display()))?;
+    let mut payload = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .with_context(|| format!("invalid json {}", path.display()))?;
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("report_path".to_string(), json!(path.display().to_string()));
+    }
+    Ok(payload)
+}
+
+fn build_rerun_options_from_report(
+    repo_root: &Path,
+    report: &serde_json::Value,
+    run_id: &str,
+) -> Result<AdvisorRunOptions> {
+    let role = match report
+        .get("role")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+    {
+        "reviewer" => AdvisorRoleArg::Reviewer,
+        "task_manager" => AdvisorRoleArg::TaskManager,
+        other => bail!("advisor run report has unknown role '{}'", other),
+    };
+    let provider_id_override = report
+        .get("provider")
+        .and_then(|value| value.get("provider_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string);
+    let model_override = report
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string);
+    let execution = report
+        .get("execution")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let plan_mode = match execution
+        .get("plan_mode")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("goal_scoped")
+    {
+        "auto_backlog" => AdvisorPlanModeArg::AutoBacklog,
+        _ => AdvisorPlanModeArg::GoalScoped,
+    };
+    let sync_suggested_tasks = execution
+        .get("sync_suggested_tasks")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(matches!(role, AdvisorRoleArg::TaskManager));
+    let require_confirmation_override = execution
+        .get("require_confirmation_override")
+        .and_then(serde_json::Value::as_bool);
+    let goal = report
+        .get("goal")
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string);
+    let allow_online_research = report
+        .get("allow_online_research")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    if provider_id_override.is_none() {
+        let state = ensure_advisor_state(repo_root)?;
+        let selection = match role {
+            AdvisorRoleArg::Reviewer => &state.reviewer,
+            AdvisorRoleArg::TaskManager => &state.task_manager,
+        };
+        if selection.provider_id.is_none() {
+            bail!(
+                "advisor rerun requires a provider assignment or a stored provider in run {}",
+                run_id
+            );
+        }
+    }
+
+    Ok(AdvisorRunOptions {
+        role,
+        goal,
+        provider_id_override,
+        model_override,
+        allow_online_research,
+        require_confirmation_override,
+        sync_suggested_tasks,
+        trigger: format!("manual_rerun:{}", run_id),
+        plan_mode,
+    })
 }
 
 fn default_advisor_worker_state(role: AdvisorRoleArg, state: &AdvisorState) -> AdvisorWorkerState {
@@ -11645,7 +12512,8 @@ fn execute_advisor_run(repo_root: &Path, options: &AdvisorRunOptions) -> Result<
         bail!("advisor policy is disabled");
     }
     let resolved = resolve_advisor_provider(&advisor_state, options)?;
-    let prompt = build_advisor_prompt(repo_root, &advisor_state, options)?;
+    let (prompt, workflow) = build_advisor_prompt(repo_root, &advisor_state, options)?;
+    let effective_goal = effective_advisor_goal(workflow.as_ref(), options);
     let execution = execute_advisor_provider(repo_root, &resolved, options, &prompt)?;
     let mut parsed = parse_advisor_model_output(&execution.raw_output)?;
     sanitize_advisor_model_output(&mut parsed)?;
@@ -11686,12 +12554,16 @@ fn execute_advisor_run(repo_root: &Path, options: &AdvisorRunOptions) -> Result<
         "run_id": run_id,
         "role": advisor_role_label(options.role),
         "trigger": options.trigger,
-        "goal": options.goal,
+        "goal": effective_goal,
         "provider": advisor_provider_payload(&resolved.provider),
         "model": resolved.model,
         "allow_online_research": options.allow_online_research,
+        "workflow": inspect_advisor_workflow(repo_root, workflow.as_ref().map(|row| row.path.as_path())),
         "execution": {
-            "command": execution.command_rendered
+            "command": execution.command_rendered,
+            "sync_suggested_tasks": options.sync_suggested_tasks,
+            "require_confirmation_override": options.require_confirmation_override,
+            "plan_mode": options.plan_mode
         },
         "output": parsed,
         "task_sync": task_sync
@@ -11708,7 +12580,7 @@ fn execute_advisor_run(repo_root: &Path, options: &AdvisorRunOptions) -> Result<
         provider_name: resolved.provider.name.clone(),
         provider_kind: resolved.provider.kind,
         model: resolved.model.clone(),
-        goal: options.goal.clone(),
+        goal: Some(effective_goal),
         trigger: options.trigger.clone(),
         allow_online_research: options.allow_online_research,
         summary: parsed.summary.clone(),
@@ -11718,6 +12590,8 @@ fn execute_advisor_run(repo_root: &Path, options: &AdvisorRunOptions) -> Result<
         raw_output_path: raw_output_path.display().to_string(),
         report_path: report_path.display().to_string(),
         plan_path,
+        workflow_path: workflow.as_ref().map(|row| row.path.display().to_string()),
+        workflow_found: workflow.is_some(),
         error: None,
     };
     append_jsonl(&timeline_advisor_runs_path(repo_root), &record)?;
@@ -11785,17 +12659,37 @@ fn build_advisor_prompt(
     repo_root: &Path,
     advisor_state: &AdvisorState,
     options: &AdvisorRunOptions,
-) -> Result<String> {
+) -> Result<(String, Option<AdvisorWorkflowDefinition>)> {
     let digest = build_advisor_repo_digest(repo_root)?;
+    let workflow = load_advisor_workflow_definition(repo_root, None)?;
+    let role_config = advisor_workflow_role_config(workflow.as_ref(), options.role);
     let role = advisor_role_label(options.role);
-    let goal = options.goal.as_deref().unwrap_or(match options.role {
-        AdvisorRoleArg::Reviewer => {
-            "Review the project for the highest-leverage issues and architectural risks."
-        }
-        AdvisorRoleArg::TaskManager => {
-            "Generate the next highest-leverage backlog for this project."
-        }
+    let goal = effective_advisor_goal(workflow.as_ref(), options);
+    let max_findings = role_config.max_findings.unwrap_or(match options.role {
+        AdvisorRoleArg::Reviewer => 8,
+        AdvisorRoleArg::TaskManager => 4,
     });
+    let max_tasks = role_config.max_tasks.unwrap_or(match options.role {
+        AdvisorRoleArg::Reviewer => 6,
+        AdvisorRoleArg::TaskManager => 10,
+    });
+    let role_guidance = if role_config.guidance.is_empty() {
+        "No role-specific workflow guidance was configured.".to_string()
+    } else {
+        role_config
+            .guidance
+            .iter()
+            .map(|line| format!("- {}", line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let workflow_guidance = workflow
+        .as_ref()
+        .map(|definition| definition.instructions_markdown.trim().to_string())
+        .filter(|body| !body.is_empty())
+        .unwrap_or_else(|| {
+            "No repository-specific workflow instructions were configured.".to_string()
+        });
     let online_policy = if options.allow_online_research
         || advisor_state.policy.allow_online_research
     {
@@ -11811,8 +12705,9 @@ fn build_advisor_prompt(
             "The tasks you output will be imported into the fugit backlog, so avoid duplicates and keep them concrete."
         }
     };
-    Ok(format!(
-        r#"You are fugit's {role}.
+    Ok((
+        format!(
+            r#"You are fugit's {role}.
 
 Goal:
 {goal}
@@ -11827,6 +12722,14 @@ Operating rules:
 - {task_import_policy}
 - Prefer deterministic reasoning from the repository state and recent task/timeline context.
 - If you are unsure, prefer fewer better tasks instead of speculative filler.
+- Return at most {max_findings} findings.
+- Return at most {max_tasks} tasks.
+
+Repository workflow guidance:
+{workflow_guidance}
+
+Role-specific guidance:
+{role_guidance}
 
 Return JSON only with this shape:
 {{
@@ -11860,10 +12763,14 @@ Allow online research: {allow_online}
 Deterministic repository digest:
 {digest}
 "#,
-        repo_root = repo_root.display(),
-        trigger = options.trigger,
-        allow_online = options.allow_online_research || advisor_state.policy.allow_online_research,
-        digest = digest
+            goal = goal,
+            repo_root = repo_root.display(),
+            trigger = options.trigger,
+            allow_online =
+                options.allow_online_research || advisor_state.policy.allow_online_research,
+            digest = digest
+        ),
+        workflow,
     ))
 }
 
@@ -17086,6 +17993,80 @@ mod tests {
                 .tasks
                 .iter()
                 .all(|task| task.source_plan.as_deref() == Some(AUTO_REPLENISH_SOURCE_PLAN))
+        );
+    }
+
+    #[test]
+    fn parse_advisor_workflow_document_reads_front_matter_and_body() {
+        let raw = r#"---
+advisor:
+  low_task_threshold: 3
+  require_confirmation: true
+reviewer:
+  goal: "Review CLI ergonomics"
+  guidance:
+    - "Prefer high-leverage bugs"
+task_manager:
+  goal: "Refresh the next backlog slice"
+  max_tasks: 5
+---
+Keep changes deterministic.
+Prefer evidence-backed tasks.
+"#;
+
+        let (workflow, body) =
+            parse_advisor_workflow_document(raw).expect("parse workflow document");
+        assert_eq!(workflow.advisor.low_task_threshold, Some(3));
+        assert_eq!(workflow.advisor.require_confirmation, Some(true));
+        assert_eq!(
+            workflow.reviewer.goal.as_deref(),
+            Some("Review CLI ergonomics")
+        );
+        assert_eq!(workflow.task_manager.max_tasks, Some(5));
+        assert!(body.contains("Keep changes deterministic."));
+    }
+
+    #[test]
+    fn inspect_advisor_workflow_reports_defaults_when_missing() {
+        let repo = TestRepo::new("advisor-workflow-missing");
+        let inspection = inspect_advisor_workflow(repo.path(), None);
+        assert!(!inspection.exists);
+        assert!(inspection.valid);
+        assert!(inspection.using_defaults);
+        assert!(inspection.instructions_markdown.is_empty());
+    }
+
+    #[test]
+    fn effective_advisor_goal_prefers_workflow_goal_when_cli_goal_missing() {
+        let definition = AdvisorWorkflowDefinition {
+            path: PathBuf::from("/tmp/FUGIT_WORKFLOW.md"),
+            config: AdvisorWorkflowFrontMatter {
+                advisor: AdvisorWorkflowPolicyDefaults::default(),
+                reviewer: AdvisorWorkflowRoleConfig {
+                    goal: Some("Review the repo contract".to_string()),
+                    guidance: Vec::new(),
+                    max_findings: None,
+                    max_tasks: None,
+                },
+                task_manager: AdvisorWorkflowRoleConfig::default(),
+            },
+            instructions_markdown: String::new(),
+        };
+        let options = AdvisorRunOptions {
+            role: AdvisorRoleArg::Reviewer,
+            goal: None,
+            provider_id_override: None,
+            model_override: None,
+            allow_online_research: false,
+            require_confirmation_override: None,
+            sync_suggested_tasks: false,
+            trigger: "manual_review".to_string(),
+            plan_mode: AdvisorPlanModeArg::GoalScoped,
+        };
+
+        assert_eq!(
+            effective_advisor_goal(Some(&definition), &options),
+            "Review the repo contract"
         );
     }
 
