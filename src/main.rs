@@ -20597,7 +20597,10 @@ fn find_task_view<'a>(state: &'a TaskViewState, name: &str) -> Option<&'a TaskVi
     state.views.iter().find(|view| view.name == name)
 }
 
-fn merge_task_query_filter(base: &TaskQueryFilter, override_filter: &TaskQueryFilter) -> TaskQueryFilter {
+fn merge_task_query_filter(
+    base: &TaskQueryFilter,
+    override_filter: &TaskQueryFilter,
+) -> TaskQueryFilter {
     let mut tags = base.required_tags.clone();
     tags.extend(override_filter.required_tags.clone());
     TaskQueryFilter {
@@ -20615,7 +20618,10 @@ fn merge_task_query_filter(base: &TaskQueryFilter, override_filter: &TaskQueryFi
     }
 }
 
-fn load_named_task_view(repo_root: &Path, name: Option<String>) -> Result<Option<TaskViewDefinition>> {
+fn load_named_task_view(
+    repo_root: &Path,
+    name: Option<String>,
+) -> Result<Option<TaskViewDefinition>> {
     let Some(name) = name else {
         return Ok(None);
     };
@@ -22343,7 +22349,8 @@ fn comment_syntax_for_path(rel_path: &str) -> Option<CommentSyntax> {
 fn normalize_comment_segment_text(value: &str) -> String {
     let mut trimmed = value.trim();
     loop {
-        let next = trimmed.trim_start_matches(|ch: char| matches!(ch, '*' | '-' | ':' | ' ' | '\t'));
+        let next =
+            trimmed.trim_start_matches(|ch: char| matches!(ch, '*' | '-' | ':' | ' ' | '\t'));
         if next == trimmed {
             break;
         }
@@ -22520,7 +22527,9 @@ fn build_comment_task_rows(
         let mut active_block_end = None;
         let mut duplicate_counts = BTreeMap::<(String, String), usize>::new();
         for (line_idx, line) in content.lines().enumerate() {
-            for segment in extract_comment_segments_from_line(line, &syntax, &mut active_block_end) {
+            for segment in
+                extract_comment_segments_from_line(line, &syntax, &mut active_block_end)
+            {
                 let cleaned = normalize_comment_segment_text(segment);
                 if cleaned.is_empty() {
                     continue;
