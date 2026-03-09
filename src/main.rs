@@ -398,6 +398,17 @@ struct TaskState {
     tasks: Vec<FugitTask>,
 }
 
+#[derive(Debug, Clone)]
+struct TaskImportRow {
+    key: String,
+    title: String,
+    detail: Option<String>,
+    priority: Option<i32>,
+    tags: Vec<String>,
+    depends_on_keys: Vec<String>,
+    agent: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RegisteredProject {
     name: String,
@@ -482,6 +493,18 @@ enum TaskAction {
         tags: Vec<String>,
         #[arg(long = "depends-on")]
         depends_on: Vec<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Import {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        default_priority: i32,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -2720,6 +2743,151 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     task.task_id,
                     task.priority,
                     task.tags.join(",")
+                );
+            }
+        }
+        TaskAction::Import {
+            file,
+            agent,
+            default_priority,
+            dry_run,
+            json,
+        } => {
+            let rows = parse_task_import_rows(&file)?;
+            if rows.is_empty() {
+                bail!("task import file contains no task rows: {}", file.display());
+            }
+
+            let mut known_keys = BTreeSet::<String>::new();
+            for row in &rows {
+                if !known_keys.insert(row.key.clone()) {
+                    bail!(
+                        "duplicate task import key '{}' in {}",
+                        row.key,
+                        file.display()
+                    );
+                }
+            }
+
+            for row in &rows {
+                for dependency in &row.depends_on_keys {
+                    if dependency == &row.key {
+                        bail!("task import key '{}' cannot depend on itself", row.key);
+                    }
+                    if !known_keys.contains(dependency) {
+                        bail!(
+                            "task import key '{}' depends on unknown key '{}'",
+                            row.key,
+                            dependency
+                        );
+                    }
+                }
+            }
+
+            let fallback_agent = agent.unwrap_or_else(default_agent_id);
+            let mut pending = rows;
+            let mut imported_records = Vec::<serde_json::Value>::new();
+            let mut imported_tasks = Vec::<FugitTask>::new();
+            let mut key_to_task_id = BTreeMap::<String, String>::new();
+
+            while !pending.is_empty() {
+                let mut progress = false;
+                let mut unresolved = Vec::<TaskImportRow>::new();
+                for row in pending {
+                    if row
+                        .depends_on_keys
+                        .iter()
+                        .all(|key| key_to_task_id.contains_key(key))
+                    {
+                        progress = true;
+                        let depends_on: Vec<String> = row
+                            .depends_on_keys
+                            .iter()
+                            .map(|key| key_to_task_id[key].clone())
+                            .collect();
+                        let created_by_agent_id =
+                            row.agent.clone().unwrap_or_else(|| fallback_agent.clone());
+                        let now = now_utc();
+                        let task = FugitTask {
+                            task_id: format!("task_{}", Uuid::new_v4().simple()),
+                            title: row.title.clone(),
+                            detail: row.detail.clone(),
+                            priority: row.priority.unwrap_or(default_priority),
+                            tags: dedupe_keep_order(row.tags.clone()),
+                            depends_on: dedupe_keep_order(depends_on),
+                            status: TaskStatus::Open,
+                            created_at_utc: now.clone(),
+                            updated_at_utc: now,
+                            created_by_agent_id,
+                            claimed_by_agent_id: None,
+                            claim_started_at_utc: None,
+                            claim_expires_at_utc: None,
+                            completed_at_utc: None,
+                            completed_by_agent_id: None,
+                        };
+                        key_to_task_id.insert(row.key.clone(), task.task_id.clone());
+                        imported_records.push(json!({
+                            "key": row.key,
+                            "task_id": task.task_id.clone(),
+                            "title": task.title.clone(),
+                            "priority": task.priority,
+                            "tags": task.tags.clone(),
+                            "depends_on": task.depends_on.clone()
+                        }));
+                        if !dry_run {
+                            imported_tasks.push(task);
+                        }
+                    } else {
+                        unresolved.push(row);
+                    }
+                }
+                if !progress {
+                    let unresolved_keys = unresolved
+                        .iter()
+                        .map(|row| row.key.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    bail!(
+                        "task import has unresolved or cyclic dependencies: {}",
+                        unresolved_keys
+                    );
+                }
+                pending = unresolved;
+            }
+
+            if !dry_run {
+                for task in &imported_tasks {
+                    state.tasks.push(task.clone());
+                }
+                state.updated_at_utc = now_utc();
+                write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+                for task in &imported_tasks {
+                    append_task_timeline_event(
+                        repo_root,
+                        task,
+                        &task.created_by_agent_id,
+                        "add",
+                        None,
+                    )?;
+                }
+            }
+
+            let payload = json!({
+                "schema_version": "fugit.task.import.v1",
+                "generated_at_utc": now_utc(),
+                "file": file.display().to_string(),
+                "dry_run": dry_run,
+                "imported_count": imported_records.len(),
+                "tasks": imported_records
+            });
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!(
+                    "[fugit-task] imported {} tasks from {} (dry_run={})",
+                    payload["imported_count"].as_u64().unwrap_or(0),
+                    payload["file"].as_str().unwrap_or("unknown"),
+                    dry_run
                 );
             }
         }
@@ -5424,6 +5592,109 @@ fn load_task_state(repo_root: &Path) -> Result<TaskState> {
     Ok(state)
 }
 
+fn parse_task_import_rows(file: &Path) -> Result<Vec<TaskImportRow>> {
+    let reader = BufReader::new(
+        fs::File::open(file)
+            .with_context(|| format!("failed opening task import file {}", file.display()))?,
+    );
+    let mut rows = Vec::<TaskImportRow>::new();
+    for (index, line_result) in reader.lines().enumerate() {
+        let line_no = index + 1;
+        let line = line_result.with_context(|| {
+            format!(
+                "failed reading task import file {} line {}",
+                file.display(),
+                line_no
+            )
+        })?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if line_no == 1 {
+            let maybe_header = trimmed.to_ascii_lowercase();
+            if maybe_header.starts_with("key\t") {
+                continue;
+            }
+        }
+        let row = parse_task_import_tsv_line(trimmed).with_context(|| {
+            format!("invalid task import row {} in {}", line_no, file.display())
+        })?;
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+fn parse_task_import_tsv_line(line: &str) -> Result<TaskImportRow> {
+    let cols: Vec<&str> = line.split('\t').collect();
+    if cols.len() < 5 || cols.len() > 7 {
+        bail!(
+            "expected 5 to 7 tab-separated columns: key,priority,tags,depends_on_keys,title[,detail[,agent]]"
+        );
+    }
+
+    let key = cols[0].trim().to_string();
+    if key.is_empty() {
+        bail!("task import key cannot be empty");
+    }
+
+    let priority = if cols[1].trim().is_empty() {
+        None
+    } else {
+        Some(
+            cols[1]
+                .trim()
+                .parse::<i32>()
+                .with_context(|| format!("invalid priority '{}'", cols[1].trim()))?,
+        )
+    };
+
+    let tags = parse_task_import_csv_tokens(cols[2]);
+    let depends_on_keys = parse_task_import_csv_tokens(cols[3]);
+
+    let title = cols[4].trim().to_string();
+    if title.is_empty() {
+        bail!("task import title cannot be empty");
+    }
+
+    let detail = cols.get(5).and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+
+    let agent = cols.get(6).and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+
+    Ok(TaskImportRow {
+        key,
+        title,
+        detail,
+        priority,
+        tags,
+        depends_on_keys,
+        agent,
+    })
+}
+
+fn parse_task_import_csv_tokens(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
 fn resolve_fugit_home() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("FUGIT_HOME")
         && !path.trim().is_empty()
@@ -6487,5 +6758,44 @@ mod tests {
         assert!(tags.iter().any(|tag| tag == "task_id:task_abc"));
         assert!(tags.iter().any(|tag| tag == "task_dispatch:open"));
         assert!(tags.iter().any(|tag| tag == "task_tag:parser"));
+    }
+
+    #[test]
+    fn parse_task_import_tsv_line_parses_expected_fields() {
+        let row = parse_task_import_tsv_line(
+            "A01\t95\tsemantic,compiler\tA00\tDefine semantic contract\tLock canonical schema\tagent.a",
+        )
+        .expect("expected valid row");
+        assert_eq!(row.key, "A01");
+        assert_eq!(row.priority, Some(95));
+        assert_eq!(
+            row.tags,
+            vec!["semantic".to_string(), "compiler".to_string()]
+        );
+        assert_eq!(row.depends_on_keys, vec!["A00".to_string()]);
+        assert_eq!(row.title, "Define semantic contract");
+        assert_eq!(row.detail.as_deref(), Some("Lock canonical schema"));
+        assert_eq!(row.agent.as_deref(), Some("agent.a"));
+    }
+
+    #[test]
+    fn parse_task_import_tsv_line_supports_empty_optional_fields() {
+        let row = parse_task_import_tsv_line("A02\t\t\t\tDraft follow-up task")
+            .expect("expected valid row");
+        assert_eq!(row.key, "A02");
+        assert_eq!(row.priority, None);
+        assert!(row.tags.is_empty());
+        assert!(row.depends_on_keys.is_empty());
+        assert_eq!(row.title, "Draft follow-up task");
+        assert!(row.detail.is_none());
+        assert!(row.agent.is_none());
+    }
+
+    #[test]
+    fn parse_task_import_tsv_line_rejects_non_numeric_priority() {
+        let err = parse_task_import_tsv_line("A03\thigh\tsemantic\t\tBad priority row")
+            .expect_err("expected invalid priority");
+        let message = format!("{err:#}");
+        assert!(message.contains("invalid priority"));
     }
 }

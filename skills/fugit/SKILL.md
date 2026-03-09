@@ -31,6 +31,8 @@ Use this skill when any of the following are true:
 4. Add shared tasks to the persistent queue:
 - `fugit --repo-root . task add --title "Implement X" --priority 10 --tag compiler`
 - `fugit --repo-root . task list --ready-only`
+- For bulk backlog migration, import TSV once:
+- `fugit --repo-root . task import --file /path/to/tasks.tsv`
 
 5. Request next task (work-stealing by default on stale claims):
 - `fugit --repo-root . task request --agent <agent_id> --claim-ttl-minutes 30 --steal-after-minutes 90`
@@ -112,6 +114,9 @@ Use this contract to keep task execution deterministic across agents.
 
 3. Use dependencies for ordering rather than comments:
 - `fugit --repo-root . task add --title "<child>" --depends-on <task_id>`
+- For large imports, define key-based dependencies in TSV and let fugit resolve task IDs:
+- `fugit --repo-root . task import --file /path/to/tasks.tsv`
+- TSV columns: `key<TAB>priority<TAB>tags_csv<TAB>depends_on_keys_csv<TAB>title<TAB>detail<TAB>agent`
 
 4. Keep ownership explicit:
 - claim specific work when needed: `fugit --repo-root . task claim --task-id <task_id> --agent <agent_id>`

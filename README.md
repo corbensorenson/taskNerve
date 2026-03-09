@@ -128,6 +128,30 @@ fugit --repo-root . log --limit 20
 
 Task lifecycle operations (`add`, `claim`, `done`, `release`) are mirrored into timeline events.
 
+## Bulk Task Import
+
+Use this when migrating large plan backlogs into fugit without fragile shell glue.
+
+```bash
+fugit --repo-root . task import --file /path/to/tasks.tsv
+```
+
+TSV format (tab-separated):
+
+`key<TAB>priority<TAB>tags_csv<TAB>depends_on_keys_csv<TAB>title<TAB>detail<TAB>agent`
+
+Example:
+
+```text
+ROOT	90	planning,seed		Define root contracts	foundation contract pass	agent.root
+CHILD	70	impl	ROOT	Implement dependent work	depends on root	agent.child
+```
+
+Notes:
+- `depends_on_keys_csv` links by task keys and is resolved to real task IDs automatically.
+- Cycles and unknown dependency keys fail closed.
+- `detail` and `agent` columns are optional.
+
 ## Task + Timeline GUI
 
 ```bash
@@ -151,7 +175,7 @@ GUI features:
 - `fugit checkout --event <event_id> --force`
 - `fugit branch list|create|switch`
 - `fugit lock add|list|remove`
-- `fugit task add|list|request|claim|done|release|gui`
+- `fugit task add|import|list|request|claim|done|release|gui`
 - `fugit project add|list|use|remove`
 - `fugit backend show|set`
 - `fugit bridge summary|auth|sync-github|pull-github`
