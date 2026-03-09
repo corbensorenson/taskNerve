@@ -7767,9 +7767,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             }
             TaskViewAction::List { json } => {
                 let mut state = load_task_view_state(repo_root)?;
-                state
-                    .views
-                    .sort_by(|left, right| left.name.cmp(&right.name));
+                state.views.sort_by_key(|view| view.name.clone());
                 if json {
                     println!("{}", serde_json::to_string_pretty(&state)?);
                 } else {
@@ -7786,13 +7784,12 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     }
                 }
             }
-            TaskViewAction::Show { name, json } => {
+            TaskViewAction::Show { name, json: _ } => {
                 let normalized_name = normalize_task_view_name(name)?;
                 let state = load_task_view_state(repo_root)?;
                 let Some(view) = find_task_view(&state, &normalized_name) else {
                     bail!("task view not found: {}", normalized_name);
                 };
-                let _ = json;
                 println!("{}", serde_json::to_string_pretty(view)?);
             }
             TaskViewAction::Remove { name, json } => {
@@ -20592,7 +20589,7 @@ fn normalize_task_view_name(name: String) -> Result<String> {
     Ok(normalized)
 }
 
-fn find_task_view<'a>(state: &'a TaskViewState, name: &str) -> Option<&'a TaskViewDefinition> {
+fn find_task_view(state: &TaskViewState, name: &str) -> Option<&TaskViewDefinition> {
     state.views.iter().find(|view| view.name == name)
 }
 
@@ -20718,9 +20715,7 @@ fn save_task_view(
         updated_at_utc: now.clone(),
     };
     state.views.push(view.clone());
-    state
-        .views
-        .sort_by(|left, right| left.name.cmp(&right.name));
+    state.views.sort_by_key(|view| view.name.clone());
     state.updated_at_utc = now;
     write_pretty_json(&timeline_task_views_path(repo_root), &state)?;
     Ok(view)
@@ -22353,8 +22348,7 @@ fn comment_syntax_for_path(rel_path: &str) -> Option<CommentSyntax> {
 fn normalize_comment_segment_text(value: &str) -> String {
     let mut trimmed = value.trim();
     loop {
-        let next =
-            trimmed.trim_start_matches(|ch: char| matches!(ch, '*' | '-' | ':' | ' ' | '\t'));
+        let next = trimmed.trim_start_matches(['*', '-', ':', ' ', '\t']);
         if next == trimmed {
             break;
         }
@@ -22389,7 +22383,7 @@ fn find_comment_marker(text: &str, markers: &[String]) -> Option<(String, String
     }
     let (marker_start, marker) = best?;
     let remainder = text[marker_start + marker.len()..]
-        .trim_start_matches(|ch: char| matches!(ch, ':' | '-' | ' ' | '\t'))
+        .trim_start_matches([':', '-', ' ', '\t'])
         .trim();
     let summary = if remainder.is_empty() {
         marker.clone()
@@ -22441,10 +22435,8 @@ fn extract_comment_segments_from_line<'a>(
             .min_by_key(|(idx, _, _)| *idx);
 
         match (next_line_prefix, next_block) {
-            (Some((line_idx, prefix)), Some((block_idx, start, end))) if line_idx <= block_idx => {
+            (Some((line_idx, prefix)), Some((block_idx, _, _))) if line_idx <= block_idx => {
                 segments.push(&line[line_idx + prefix.len()..]);
-                let _ = start;
-                let _ = end;
                 break;
             }
             (Some((line_idx, prefix)), None) => {
