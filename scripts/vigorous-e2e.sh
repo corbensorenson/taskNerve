@@ -120,11 +120,14 @@ REPO_B="$TMP_ROOT/repo-b"
 REPO_C="$TMP_ROOT/repo-c"
 REMOTE_BARE="$TMP_ROOT/remote.git"
 CLONE_B="$TMP_ROOT/clone-b"
+UPDATE_SRC="$TMP_ROOT/update-src"
+UPDATE_REMOTE="$TMP_ROOT/update-remote.git"
 
 create_git_repo "$REPO_A"
 create_git_repo "$REPO_B"
 create_git_repo "$REPO_C"
 git init --bare "$REMOTE_BARE" >/dev/null
+git init --bare "$UPDATE_REMOTE" >/dev/null
 
 echo "alpha" >"$REPO_A/README.txt"
 git -C "$REPO_A" add README.txt
@@ -139,6 +142,17 @@ git -C "$REPO_B" commit -m "seed repo-b" >/dev/null
 echo "gamma" >"$REPO_C/README.txt"
 git -C "$REPO_C" add README.txt
 git -C "$REPO_C" commit -m "seed repo-c" >/dev/null
+
+mkdir -p "$UPDATE_SRC"
+git -C "$UPDATE_SRC" init >/dev/null
+git -C "$UPDATE_SRC" config user.name "fugit-e2e"
+git -C "$UPDATE_SRC" config user.email "fugit-e2e@example.local"
+git -C "$UPDATE_SRC" checkout -b main >/dev/null 2>&1 || true
+echo "updater" >"$UPDATE_SRC/README.txt"
+git -C "$UPDATE_SRC" add README.txt
+git -C "$UPDATE_SRC" commit -m "seed updater repo" >/dev/null
+git -C "$UPDATE_SRC" remote add origin "$UPDATE_REMOTE"
+git -C "$UPDATE_SRC" push -u origin main >/dev/null
 
 echo "[vigorous-e2e] init/status/backend"
 "$BIN" --version >"$TMP_ROOT/version.txt"
@@ -166,6 +180,12 @@ json_assert "$TMP_ROOT/issue-monitor-show.json" 'payload.get("enabled") is True 
 json_assert "$TMP_ROOT/issue-monitor-set.json" 'payload.get("low_task_threshold") == 1 and payload.get("cooldown_minutes") == 5 and payload.get("max_issues") == 10' "issue monitor policy update should persist"
 "$BIN" --repo-root "$REPO_A" bridge sync-github-issues --json >"$TMP_ROOT/issue-monitor-sync.json"
 json_assert "$TMP_ROOT/issue-monitor-sync.json" 'payload.get("status") == "non_github_remote"' "issue monitor should report non-GitHub remotes cleanly"
+FUGIT_HOME="$TMP_ROOT/update-home" FUGIT_UPDATE_REPO_URL="$UPDATE_REMOTE" FUGIT_UPDATE_BRANCH=main FUGIT_DISABLE_AUTO_UPDATE=1 "$BIN" update show --json >"$TMP_ROOT/update-show.json"
+json_assert "$TMP_ROOT/update-show.json" 'payload.get("status") == "idle" and payload.get("policy", {}).get("auto_check_enabled") is True' "update show should expose the default updater policy"
+FUGIT_HOME="$TMP_ROOT/update-home" FUGIT_UPDATE_REPO_URL="$UPDATE_REMOTE" FUGIT_UPDATE_BRANCH=main FUGIT_DISABLE_AUTO_UPDATE=1 "$BIN" update policy set --auto-check-enabled true --auto-apply-enabled false --check-interval-hours 12 --json >"$TMP_ROOT/update-policy-set.json"
+json_assert "$TMP_ROOT/update-policy-set.json" 'payload.get("policy", {}).get("auto_check_enabled") is True and payload.get("policy", {}).get("auto_apply_enabled") is False and payload.get("policy", {}).get("check_interval_hours") == 12' "update policy set should persist updater settings"
+FUGIT_HOME="$TMP_ROOT/update-home" FUGIT_UPDATE_REPO_URL="$UPDATE_REMOTE" FUGIT_UPDATE_BRANCH=main FUGIT_DISABLE_AUTO_UPDATE=1 "$BIN" update check --json >"$TMP_ROOT/update-check.json"
+json_assert "$TMP_ROOT/update-check.json" 'payload.get("last_check_status") == "success" and payload.get("update_available") is True and payload.get("latest_remote_sha")' "update check should compare against the configured canonical repo"
 
 echo "[vigorous-e2e] checkpoint/log/branch/checkout"
 mkdir -p "$REPO_A/src"

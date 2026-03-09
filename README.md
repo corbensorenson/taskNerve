@@ -93,6 +93,37 @@ fugit skill doctor --json
 
 `fugit skill doctor --json` now reports whether the installed Codex skill matches the running CLI, whether the skill references command paths this binary does not support, and whether `PATH` resolves a different `fugit` binary than the current executable. If `unsupported_command_paths` is non-empty, `current_executable_shadowed` is `true`, or the installed skill does not match the embedded bundle, reinstall from this repo, run `fugit skill install-codex --overwrite`, then `hash -r` or open a new shell if the old binary is still cached.
 
+## Update Workflow
+
+Fugit now has a built-in updater with a managed checkout under `FUGIT_HOME`.
+
+Check status:
+
+```bash
+fugit update show --json
+fugit update check --json
+```
+
+Apply an approved update:
+
+```bash
+fugit update apply --json
+```
+
+Tune automatic upkeep:
+
+```bash
+fugit update policy show --json
+fugit update policy set --auto-check-enabled true --auto-apply-enabled false --check-interval-hours 24
+```
+
+Defaults:
+- auto-check is on
+- auto-apply is off
+- check cadence is 24 hours
+
+That means agents can notice that fugit is stale without silently changing the machine. If you want fully unattended upkeep, turn on `--auto-apply-enabled true`.
+
 ### 4. Agent Skill Setup
 
 Codex local install:
@@ -177,6 +208,8 @@ By default, fugit uses GitHub CI verification when the repo's `origin` points at
 By default, low-task requests also run a deterministic GitHub issue monitor on GitHub-backed repos. It fetches open issues, filters out obvious spam/non-actionable/harmful requests, syncs safe issues into the backlog under `.fugit:github_issues`, and queues a reviewer pass when a reviewer provider is configured.
 
 By default, low-task requests can also queue advisor runs in the background. The advisor can use different providers/models for the reviewer and smart task-manager roles, then sync generated backlog through managed plan files instead of mutating the queue ad hoc.
+
+For agent install hygiene, check `fugit update check --json` before spending time debugging CLI drift, and only run `fugit update apply` after user approval unless the machine policy already enables auto-apply.
 
 ## Advisor Automation
 

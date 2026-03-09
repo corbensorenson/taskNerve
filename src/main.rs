@@ -42,6 +42,7 @@ const SCHEMA_ADVISOR_WORKFLOW: &str = "fugit.advisor_workflow.v1";
 const SCHEMA_ADVISOR_WORKER_STATE: &str = "fugit.advisor_worker_state.v1";
 const SCHEMA_ADVISOR_WORKER_LOCK: &str = "fugit.advisor_worker_lock.v1";
 const SCHEMA_GITHUB_ISSUE_MONITOR: &str = "fugit.github_issue_monitor.v1";
+const SCHEMA_UPDATE_STATE: &str = "fugit.update_state.v1";
 const BACKEND_MODE_GIT_BRIDGE: &str = "git_bridge";
 const BACKEND_MODE_FUGIT_CLOUD: &str = "fugit_cloud";
 const QUALITY_CHECK_BACKEND_LOCAL: &str = "local";
@@ -63,6 +64,8 @@ const FUGIT_SKILL_REF_WORKFLOW_PROFILES: &str =
 const FUGIT_SKILL_REF_RECOVERY_PLAYBOOKS: &str =
     include_str!("../skills/fugit/references/recovery-playbooks.md");
 const DEFAULT_ADVISOR_WORKFLOW_TEMPLATE: &str = include_str!("../templates/FUGIT_WORKFLOW.md");
+const DEFAULT_UPDATE_REPO_URL: &str = "https://github.com/corbensorenson/fugit-alpha.git";
+const DEFAULT_UPDATE_BRANCH: &str = "main";
 
 const IGNORE_ROOT_ENTRIES: &[&str] = &[
     ".git",
@@ -96,6 +99,7 @@ enum Command {
     Quickstart(QuickstartArgs),
     Doctor(DoctorArgs),
     Skill(SkillArgs),
+    Update(UpdateArgs),
     Version(VersionArgs),
     Status(StatusArgs),
     Checkpoint(CheckpointArgs),
@@ -173,6 +177,54 @@ struct DoctorArgs {
 struct VersionArgs {
     #[arg(long, default_value_t = false)]
     json: bool,
+}
+
+#[derive(Debug, Parser)]
+struct UpdateArgs {
+    #[command(subcommand)]
+    action: UpdateAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum UpdateAction {
+    Show {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Check {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        #[arg(long, default_value_t = false)]
+        refresh: bool,
+    },
+    Apply {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+    Policy {
+        #[command(subcommand)]
+        action: UpdatePolicyAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum UpdatePolicyAction {
+    Show {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Set {
+        #[arg(long)]
+        auto_check_enabled: Option<bool>,
+        #[arg(long)]
+        auto_apply_enabled: Option<bool>,
+        #[arg(long)]
+        check_interval_hours: Option<u64>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Parser)]
@@ -2276,6 +2328,39 @@ struct BridgeAutoSyncLock {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct UpdatePolicyState {
+    #[serde(default = "default_update_auto_check_enabled")]
+    auto_check_enabled: bool,
+    #[serde(default = "default_update_auto_apply_enabled")]
+    auto_apply_enabled: bool,
+    #[serde(default = "default_update_check_interval_hours")]
+    check_interval_hours: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UpdateState {
+    schema_version: String,
+    updated_at_utc: String,
+    repo_url: String,
+    branch: String,
+    policy: UpdatePolicyState,
+    status: String,
+    installed_version: String,
+    installed_git_sha: String,
+    executable: Option<String>,
+    first_path_match: Option<String>,
+    last_checked_at_utc: Option<String>,
+    last_check_status: Option<String>,
+    last_check_error: Option<String>,
+    latest_remote_sha: Option<String>,
+    update_available: bool,
+    last_applied_at_utc: Option<String>,
+    last_apply_status: Option<String>,
+    last_apply_error: Option<String>,
+    last_applied_sha: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct GithubIssueMonitorState {
     schema_version: String,
     updated_at_utc: String,
@@ -2414,6 +2499,9 @@ fn main() -> ExitCode {
 
 fn try_main() -> Result<()> {
     let cli = Cli::parse();
+    if !matches!(cli.command, Command::Update(_)) {
+        maybe_run_auto_update_maintenance();
+    }
     let repo_root = resolve_repo_root(&cli.repo_root)?;
 
     match cli.command {
@@ -2421,6 +2509,7 @@ fn try_main() -> Result<()> {
         Command::Quickstart(args) => cmd_quickstart(&repo_root, args),
         Command::Doctor(args) => cmd_doctor(&repo_root, args),
         Command::Skill(args) => cmd_skill(args),
+        Command::Update(args) => cmd_update(args),
         Command::Version(args) => cmd_version(args),
         Command::Status(args) => cmd_status(&repo_root, args),
         Command::Checkpoint(args) => cmd_checkpoint(&repo_root, args),
@@ -2772,6 +2861,16 @@ fn cmd_skill(args: SkillArgs) -> Result<()> {
                 {
                     println!("- recommended_fix: {}", recommended_fix);
                 }
+                if let Some(update) = report.get("update") {
+                    println!(
+                        "- update_status: {}",
+                        update["status"].as_str().unwrap_or("unknown")
+                    );
+                    println!(
+                        "- update_available: {}",
+                        update["update_available"].as_bool().unwrap_or(false)
+                    );
+                }
             }
         }
     }
@@ -2779,11 +2878,180 @@ fn cmd_skill(args: SkillArgs) -> Result<()> {
 }
 
 fn cmd_version(args: VersionArgs) -> Result<()> {
-    let payload = fugit_version_report();
+    let mut payload = fugit_version_report();
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "update".to_string(),
+            load_update_state()
+                .map(|state| update_state_payload(&state))
+                .unwrap_or_else(|_| json!(null)),
+        );
+    }
     if args.json {
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else {
         println!("{}", payload["version"].as_str().unwrap_or("fugit"));
+    }
+    Ok(())
+}
+
+fn cmd_update(args: UpdateArgs) -> Result<()> {
+    match args.action {
+        UpdateAction::Show { json } => {
+            let state = load_update_state()?;
+            let payload = update_state_payload(&state);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!(
+                    "[fugit-update] status={} update_available={} installed_sha={} latest_sha={}",
+                    payload["status"].as_str().unwrap_or("unknown"),
+                    payload["update_available"].as_bool().unwrap_or(false),
+                    payload["installed_git_sha"].as_str().unwrap_or(""),
+                    payload["latest_remote_sha"].as_str().unwrap_or("unknown"),
+                );
+            }
+        }
+        UpdateAction::Check { json, refresh: _ } => {
+            let mut state = load_update_state()?;
+            match refresh_update_state(&mut state) {
+                Ok(()) => {
+                    write_update_state(&state)?;
+                    let payload = update_state_payload(&state);
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&payload)?);
+                    } else {
+                        println!(
+                            "[fugit-update] checked status={} update_available={} latest_sha={}",
+                            payload["status"].as_str().unwrap_or("unknown"),
+                            payload["update_available"].as_bool().unwrap_or(false),
+                            payload["latest_remote_sha"].as_str().unwrap_or("unknown"),
+                        );
+                    }
+                }
+                Err(err) => {
+                    write_update_state(&state)?;
+                    if json {
+                        return Err(JsonCommandError::new(json!({
+                            "schema_version": "fugit.update.check.error.v1",
+                            "generated_at_utc": now_utc(),
+                            "error": err.to_string(),
+                            "update": update_state_payload(&state)
+                        }))
+                        .into());
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        UpdateAction::Apply { json, force } => {
+            let mut state = load_update_state()?;
+            let result = apply_update(&mut state, force);
+            let payload = update_state_payload(&state);
+            match result {
+                Ok(()) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&payload)?);
+                    } else {
+                        println!(
+                            "[fugit-update] apply status={} installed_sha={} latest_sha={}",
+                            payload["status"].as_str().unwrap_or("unknown"),
+                            payload["installed_git_sha"].as_str().unwrap_or(""),
+                            payload["latest_remote_sha"].as_str().unwrap_or("unknown"),
+                        );
+                    }
+                }
+                Err(err) => {
+                    if json {
+                        return Err(JsonCommandError::new(json!({
+                            "schema_version": "fugit.update.apply.error.v1",
+                            "generated_at_utc": now_utc(),
+                            "error": err.to_string(),
+                            "update": payload
+                        }))
+                        .into());
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        UpdateAction::Policy { action } => match action {
+            UpdatePolicyAction::Show { json } => {
+                let state = load_update_state()?;
+                let payload = json!({
+                    "schema_version": "fugit.update.policy.v1",
+                    "generated_at_utc": now_utc(),
+                    "policy": {
+                        "auto_check_enabled": state.policy.auto_check_enabled,
+                        "auto_apply_enabled": state.policy.auto_apply_enabled,
+                        "check_interval_hours": state.policy.check_interval_hours
+                    }
+                });
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    println!(
+                        "[fugit-update-policy] auto_check_enabled={} auto_apply_enabled={} check_interval_hours={}",
+                        payload["policy"]["auto_check_enabled"]
+                            .as_bool()
+                            .unwrap_or(false),
+                        payload["policy"]["auto_apply_enabled"]
+                            .as_bool()
+                            .unwrap_or(false),
+                        payload["policy"]["check_interval_hours"]
+                            .as_u64()
+                            .unwrap_or(0)
+                    );
+                }
+            }
+            UpdatePolicyAction::Set {
+                auto_check_enabled,
+                auto_apply_enabled,
+                check_interval_hours,
+                json,
+            } => {
+                let mut state = load_update_state()?;
+                if let Some(value) = auto_check_enabled {
+                    state.policy.auto_check_enabled = value;
+                }
+                if let Some(value) = auto_apply_enabled {
+                    state.policy.auto_apply_enabled = value;
+                }
+                if let Some(value) = check_interval_hours {
+                    if value == 0 {
+                        bail!("check_interval_hours must be >= 1");
+                    }
+                    state.policy.check_interval_hours = value;
+                }
+                state.updated_at_utc = now_utc();
+                write_update_state(&state)?;
+                let payload = json!({
+                    "schema_version": "fugit.update.policy.v1",
+                    "generated_at_utc": now_utc(),
+                    "policy": {
+                        "auto_check_enabled": state.policy.auto_check_enabled,
+                        "auto_apply_enabled": state.policy.auto_apply_enabled,
+                        "check_interval_hours": state.policy.check_interval_hours
+                    }
+                });
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    println!(
+                        "[fugit-update-policy] auto_check_enabled={} auto_apply_enabled={} check_interval_hours={}",
+                        payload["policy"]["auto_check_enabled"]
+                            .as_bool()
+                            .unwrap_or(false),
+                        payload["policy"]["auto_apply_enabled"]
+                            .as_bool()
+                            .unwrap_or(false),
+                        payload["policy"]["check_interval_hours"]
+                            .as_u64()
+                            .unwrap_or(0)
+                    );
+                }
+            }
+        },
     }
     Ok(())
 }
@@ -2852,6 +3120,11 @@ fn fugit_skill_bundle(include_skill_body: bool, include_openai_yaml: bool) -> se
                 "fugit_skill_bundle",
                 "fugit_skill_doctor",
                 "fugit_skill_install_codex",
+                "fugit_update_show",
+                "fugit_update_check",
+                "fugit_update_apply",
+                "fugit_update_policy_show",
+                "fugit_update_policy_set",
                 "fugit_task_gui_launch",
                 "fugit_project_list",
                 "fugit_project_add",
@@ -2932,6 +3205,13 @@ fn supported_nested_command_names() -> BTreeMap<&'static str, BTreeSet<&'static 
             .collect(),
     );
     map.insert(
+        "update",
+        ["show", "check", "apply", "policy"]
+            .iter()
+            .copied()
+            .collect(),
+    );
+    map.insert(
         "branch",
         ["list", "create", "switch"].iter().copied().collect(),
     );
@@ -2984,6 +3264,7 @@ fn supported_cli_command_paths() -> BTreeSet<String> {
         "quickstart",
         "doctor",
         "skill",
+        "update",
         "version",
         "status",
         "checkpoint",
@@ -3028,6 +3309,7 @@ fn extract_skill_command_paths(skill_body: &str) -> BTreeSet<String> {
         "quickstart",
         "doctor",
         "skill",
+        "update",
         "version",
         "status",
         "checkpoint",
@@ -3171,8 +3453,436 @@ fn fugit_version_report() -> serde_json::Value {
     })
 }
 
+fn configured_update_repo_url() -> String {
+    std::env::var("FUGIT_UPDATE_REPO_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_UPDATE_REPO_URL.to_string())
+}
+
+fn configured_update_branch() -> String {
+    std::env::var("FUGIT_UPDATE_BRANCH")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_UPDATE_BRANCH.to_string())
+}
+
+fn default_update_state() -> UpdateState {
+    let version_report = fugit_version_report();
+    UpdateState {
+        schema_version: SCHEMA_UPDATE_STATE.to_string(),
+        updated_at_utc: now_utc(),
+        repo_url: configured_update_repo_url(),
+        branch: configured_update_branch(),
+        policy: UpdatePolicyState {
+            auto_check_enabled: default_update_auto_check_enabled(),
+            auto_apply_enabled: default_update_auto_apply_enabled(),
+            check_interval_hours: default_update_check_interval_hours(),
+        },
+        status: "idle".to_string(),
+        installed_version: version_report["version"]
+            .as_str()
+            .unwrap_or("fugit")
+            .to_string(),
+        installed_git_sha: version_report["git_sha"].as_str().unwrap_or("").to_string(),
+        executable: version_report["executable"]
+            .as_str()
+            .map(ToString::to_string),
+        first_path_match: version_report["path_resolution"]["first_path_match"]
+            .as_str()
+            .map(ToString::to_string),
+        last_checked_at_utc: None,
+        last_check_status: None,
+        last_check_error: None,
+        latest_remote_sha: None,
+        update_available: false,
+        last_applied_at_utc: None,
+        last_apply_status: None,
+        last_apply_error: None,
+        last_applied_sha: None,
+    }
+}
+
+fn load_update_state() -> Result<UpdateState> {
+    let path = fugit_update_state_path()?;
+    let mut state = load_json_optional::<UpdateState>(&path)?.unwrap_or_else(default_update_state);
+    if state.schema_version.trim().is_empty() {
+        state.schema_version = SCHEMA_UPDATE_STATE.to_string();
+    }
+    state.repo_url = configured_update_repo_url();
+    state.branch = configured_update_branch();
+    let version_report = fugit_version_report();
+    state.installed_version = version_report["version"]
+        .as_str()
+        .unwrap_or("fugit")
+        .to_string();
+    state.installed_git_sha = version_report["git_sha"].as_str().unwrap_or("").to_string();
+    state.executable = version_report["executable"]
+        .as_str()
+        .map(ToString::to_string);
+    state.first_path_match = version_report["path_resolution"]["first_path_match"]
+        .as_str()
+        .map(ToString::to_string);
+    Ok(state)
+}
+
+fn write_update_state(state: &UpdateState) -> Result<()> {
+    write_pretty_json(&fugit_update_state_path()?, state)
+}
+
+fn update_check_due(state: &UpdateState, now: DateTime<Utc>) -> bool {
+    if !state.policy.auto_check_enabled {
+        return false;
+    }
+    let Some(last_checked_at) = state.last_checked_at_utc.as_deref() else {
+        return true;
+    };
+    let Ok(last_checked) = DateTime::parse_from_rfc3339(last_checked_at) else {
+        return true;
+    };
+    now.signed_duration_since(last_checked.with_timezone(&Utc))
+        >= Duration::hours(state.policy.check_interval_hours as i64)
+}
+
+fn fetch_update_remote_sha(repo_url: &str, branch: &str) -> Result<String> {
+    let ref_name = format!("refs/heads/{}", branch);
+    let output = ProcessCommand::new("git")
+        .args(["ls-remote", repo_url, &ref_name])
+        .output()
+        .with_context(|| "failed running git ls-remote for fugit update check")?;
+    if !output.status.success() {
+        bail!(
+            "git ls-remote failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let sha = stdout
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| anyhow!("update check returned no SHA for {}", ref_name))?;
+    Ok(sha.to_string())
+}
+
+fn refresh_update_state(state: &mut UpdateState) -> Result<()> {
+    state.updated_at_utc = now_utc();
+    state.status = "checking".to_string();
+    state.last_check_error = None;
+    match fetch_update_remote_sha(&state.repo_url, &state.branch) {
+        Ok(remote_sha) => {
+            state.last_checked_at_utc = Some(now_utc());
+            state.last_check_status = Some("success".to_string());
+            state.latest_remote_sha = Some(remote_sha.clone());
+            state.update_available = remote_sha.trim() != state.installed_git_sha.trim()
+                && !remote_sha.trim().is_empty();
+            state.status = if state.update_available {
+                "update_available".to_string()
+            } else {
+                "up_to_date".to_string()
+            };
+            Ok(())
+        }
+        Err(err) => {
+            state.last_checked_at_utc = Some(now_utc());
+            state.last_check_status = Some("error".to_string());
+            state.last_check_error = Some(err.to_string());
+            state.status = "check_failed".to_string();
+            Err(err)
+        }
+    }
+}
+
+fn preferred_update_install_dir() -> Option<PathBuf> {
+    let candidates = detect_fugit_path_candidates();
+    candidates
+        .iter()
+        .find(|candidate| candidate.is_first_path_match)
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|candidate| candidate.is_current_executable)
+        })
+        .cloned()
+        .and_then(|candidate| {
+            PathBuf::from(candidate.path)
+                .parent()
+                .map(Path::to_path_buf)
+        })
+}
+
+fn preferred_update_install_binary_path() -> Option<PathBuf> {
+    let install_dir = preferred_update_install_dir()?;
+    if cfg!(windows) {
+        Some(install_dir.join("fugit.exe"))
+    } else {
+        Some(install_dir.join("fugit"))
+    }
+}
+
+fn refresh_installed_identity_from_binary(state: &mut UpdateState) {
+    let Some(binary_path) = preferred_update_install_binary_path() else {
+        return;
+    };
+    if !binary_path.exists() {
+        return;
+    }
+    if let Ok(output) = ProcessCommand::new(&binary_path).arg("--version").output()
+        && output.status.success()
+    {
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !value.is_empty() {
+            state.installed_version = value;
+        }
+    }
+    if let Ok(output) = ProcessCommand::new(&binary_path)
+        .args(["version", "--json"])
+        .output()
+        && output.status.success()
+        && let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+    {
+        state.installed_git_sha = payload["git_sha"].as_str().unwrap_or("").to_string();
+        state.executable = payload["executable"].as_str().map(ToString::to_string);
+        state.first_path_match = payload["path_resolution"]["first_path_match"]
+            .as_str()
+            .map(ToString::to_string);
+    }
+}
+
+fn ensure_update_checkout(state: &UpdateState) -> Result<PathBuf> {
+    let checkout_root = fugit_update_checkout_root()?;
+    if !checkout_root.join(".git").exists() {
+        if let Some(parent) = checkout_root.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed creating {}", parent.display()))?;
+        }
+        let checkout_root_string = checkout_root.display().to_string();
+        let status = ProcessCommand::new("git")
+            .args([
+                "clone",
+                "--branch",
+                state.branch.as_str(),
+                "--single-branch",
+                state.repo_url.as_str(),
+                checkout_root_string.as_str(),
+            ])
+            .status()
+            .with_context(|| "failed cloning fugit updater checkout")?;
+        if !status.success() {
+            bail!("failed cloning managed updater checkout");
+        }
+        return Ok(checkout_root);
+    }
+    let remote_url_status = ProcessCommand::new("git")
+        .current_dir(&checkout_root)
+        .args(["remote", "set-url", "origin", state.repo_url.as_str()])
+        .status()
+        .with_context(|| "failed updating managed checkout remote")?;
+    if !remote_url_status.success() {
+        bail!("failed updating managed checkout remote");
+    }
+    let fetch_status = ProcessCommand::new("git")
+        .current_dir(&checkout_root)
+        .args(["fetch", "origin", state.branch.as_str()])
+        .status()
+        .with_context(|| "failed fetching managed updater checkout")?;
+    if !fetch_status.success() {
+        bail!("failed fetching managed updater checkout");
+    }
+    let checkout_status = ProcessCommand::new("git")
+        .current_dir(&checkout_root)
+        .args(["checkout", state.branch.as_str()])
+        .status()
+        .with_context(|| "failed checking out managed updater branch")?;
+    if !checkout_status.success() {
+        bail!("failed checking out managed updater branch");
+    }
+    let pull_status = ProcessCommand::new("git")
+        .current_dir(&checkout_root)
+        .args(["pull", "--ff-only", "origin", state.branch.as_str()])
+        .status()
+        .with_context(|| "failed fast-forwarding managed updater checkout")?;
+    if !pull_status.success() {
+        bail!("failed fast-forwarding managed updater checkout");
+    }
+    Ok(checkout_root)
+}
+
+fn run_update_install_script(checkout_root: &Path) -> Result<()> {
+    let timeout_seconds = std::env::var("FUGIT_UPDATE_INSTALL_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(300);
+    let install_dir = preferred_update_install_dir();
+    let install_script = if cfg!(windows) {
+        checkout_root.join("install-windows.ps1")
+    } else {
+        checkout_root.join("install.sh")
+    };
+    let runner = if cfg!(windows) { "powershell" } else { "bash" };
+    let install_path = install_script.display().to_string();
+    let install_dir_arg = install_dir
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let python = if cfg!(windows) { "py" } else { "python3" };
+    let output = ProcessCommand::new(python)
+        .arg("-c")
+        .arg(
+            r#"import subprocess, sys
+runner = sys.argv[1]
+install_path = sys.argv[2]
+timeout = int(sys.argv[3])
+install_dir = sys.argv[4]
+cmd = [runner]
+if install_path.endswith(".ps1"):
+    cmd += ["-ExecutionPolicy", "Bypass", "-File", install_path]
+else:
+    cmd += [install_path]
+if install_dir:
+    cmd += ["--install-dir", install_dir]
+cmd += ["--no-path-update", "--with-skill", "--overwrite-skill"]
+try:
+    result = subprocess.run(cmd, timeout=timeout)
+except subprocess.TimeoutExpired:
+    print(f"fugit update install timed out after {timeout}s", file=sys.stderr)
+    sys.exit(124)
+sys.exit(result.returncode)
+"#,
+        )
+        .arg(runner)
+        .arg(install_path)
+        .arg(timeout_seconds.to_string())
+        .arg(install_dir_arg)
+        .current_dir(checkout_root)
+        .status()
+        .with_context(|| "failed running updater install command")?;
+    if !output.success() {
+        bail!("fugit update install command failed");
+    }
+    Ok(())
+}
+
+fn apply_update(state: &mut UpdateState, force: bool) -> Result<()> {
+    if !force && !state.update_available {
+        if state.latest_remote_sha.is_none() {
+            refresh_update_state(state)?;
+        }
+        if !state.update_available {
+            state.last_apply_status = Some("noop_up_to_date".to_string());
+            state.last_apply_error = None;
+            state.updated_at_utc = now_utc();
+            write_update_state(state)?;
+            return Ok(());
+        }
+    }
+    state.status = "applying".to_string();
+    state.last_apply_error = None;
+    state.updated_at_utc = now_utc();
+    write_update_state(state)?;
+    let checkout_root = match ensure_update_checkout(state) {
+        Ok(path) => path,
+        Err(err) => {
+            state.last_apply_status = Some("error".to_string());
+            state.last_apply_error = Some(err.to_string());
+            state.status = "apply_failed".to_string();
+            state.updated_at_utc = now_utc();
+            write_update_state(state)?;
+            return Err(err);
+        }
+    };
+    if let Err(err) = run_update_install_script(&checkout_root) {
+        state.last_apply_status = Some("error".to_string());
+        state.last_apply_error = Some(err.to_string());
+        state.status = "apply_failed".to_string();
+        state.updated_at_utc = now_utc();
+        write_update_state(state)?;
+        return Err(err);
+    }
+    refresh_installed_identity_from_binary(state);
+    state.last_applied_at_utc = Some(now_utc());
+    state.last_apply_status = Some("success".to_string());
+    state.last_apply_error = None;
+    state.last_applied_sha = state.latest_remote_sha.clone();
+    if let Some(latest) = state.latest_remote_sha.as_deref() {
+        state.update_available = latest.trim() != state.installed_git_sha.trim();
+    } else {
+        state.update_available = false;
+    }
+    state.status = if state.update_available {
+        "update_available".to_string()
+    } else {
+        "up_to_date".to_string()
+    };
+    state.updated_at_utc = now_utc();
+    write_update_state(state)?;
+    Ok(())
+}
+
+fn update_state_payload(state: &UpdateState) -> serde_json::Value {
+    json!({
+        "schema_version": "fugit.update.payload.v1",
+        "generated_at_utc": now_utc(),
+        "repo_url": state.repo_url,
+        "branch": state.branch,
+        "status": state.status,
+        "installed_version": state.installed_version,
+        "installed_git_sha": state.installed_git_sha,
+        "executable": state.executable,
+        "first_path_match": state.first_path_match,
+        "latest_remote_sha": state.latest_remote_sha,
+        "update_available": state.update_available,
+        "last_checked_at_utc": state.last_checked_at_utc,
+        "last_check_status": state.last_check_status,
+        "last_check_error": state.last_check_error,
+        "last_applied_at_utc": state.last_applied_at_utc,
+        "last_apply_status": state.last_apply_status,
+        "last_apply_error": state.last_apply_error,
+        "last_applied_sha": state.last_applied_sha,
+        "policy": {
+            "auto_check_enabled": state.policy.auto_check_enabled,
+            "auto_apply_enabled": state.policy.auto_apply_enabled,
+            "check_interval_hours": state.policy.check_interval_hours
+        }
+    })
+}
+
+fn auto_update_is_disabled() -> bool {
+    std::env::var("FUGIT_DISABLE_AUTO_UPDATE")
+        .ok()
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+        || std::env::var("CI").is_ok()
+}
+
+fn maybe_run_auto_update_maintenance() {
+    if auto_update_is_disabled() {
+        return;
+    }
+    let Ok(mut state) = load_update_state() else {
+        return;
+    };
+    if !update_check_due(&state, Utc::now()) {
+        return;
+    }
+    if refresh_update_state(&mut state).is_err() {
+        let _ = write_update_state(&state);
+        return;
+    }
+    let _ = write_update_state(&state);
+    if state.update_available && state.policy.auto_apply_enabled {
+        if let Err(err) = apply_update(&mut state, false) {
+            state.last_apply_status = Some("error".to_string());
+            state.last_apply_error = Some(err.to_string());
+            state.status = "apply_failed".to_string();
+            state.updated_at_utc = now_utc();
+            let _ = write_update_state(&state);
+        }
+    }
+}
+
 fn fugit_skill_doctor_report() -> serde_json::Value {
     let version_report = fugit_version_report();
+    let update_state = load_update_state().ok();
     let codex_home = resolve_codex_home().ok();
     let skill_root = codex_home
         .as_ref()
@@ -3315,6 +4025,15 @@ fn fugit_skill_doctor_report() -> serde_json::Value {
             "Run `fugit skill install-codex --overwrite` to realign the installed skill bundle with this fugit binary."
                 .to_string(),
         )
+    } else if update_state
+        .as_ref()
+        .map(|state| state.update_available)
+        .unwrap_or(false)
+    {
+        Some(
+            "A newer fugit build is available; review it with `fugit update check --json` and apply it with `fugit update apply` when approved, or enable unattended upkeep with `fugit update policy set --auto-apply-enabled true`."
+                .to_string(),
+        )
     } else {
         None
     };
@@ -3346,7 +4065,8 @@ fn fugit_skill_doctor_report() -> serde_json::Value {
         },
         "summary": {
             "recommended_fix": recommended_fix
-        }
+        },
+        "update": update_state.map(|state| update_state_payload(&state)).unwrap_or_else(|| json!(null))
     })
 }
 
@@ -12211,6 +12931,43 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
+            "name": "fugit_update_show",
+            "description": "Show the current fugit updater state without forcing a remote check.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "fugit_update_check",
+            "description": "Check the canonical fugit repo for a newer main-branch build.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "fugit_update_apply",
+            "description": "Update fugit from the canonical repo checkout and reinstall the CLI plus bundled skill.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "force": { "type": "boolean" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_update_policy_show",
+            "description": "Show the global fugit update auto-check and auto-apply policy.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "fugit_update_policy_set",
+            "description": "Set the global fugit update auto-check and auto-apply policy.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "auto_check_enabled": { "type": "boolean" },
+                    "auto_apply_enabled": { "type": "boolean" },
+                    "check_interval_hours": { "type": "integer", "minimum": 1 }
+                }
+            }
+        }),
+        json!({
             "name": "fugit_task_gui_launch",
             "description": "Launch the live task-board GUI in a separate window via background server.",
             "inputSchema": {
@@ -14070,6 +14827,76 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 .unwrap_or(false)
             {
                 cli_args.push("--background".to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_update_show" => run_self_cli_json(
+            repo_root,
+            &[
+                "update".to_string(),
+                "show".to_string(),
+                "--json".to_string(),
+            ],
+        )?,
+        "fugit_update_check" => run_self_cli_json(
+            repo_root,
+            &[
+                "update".to_string(),
+                "check".to_string(),
+                "--json".to_string(),
+            ],
+        )?,
+        "fugit_update_apply" => {
+            let mut cli_args = vec![
+                "update".to_string(),
+                "apply".to_string(),
+                "--json".to_string(),
+            ];
+            if args
+                .get("force")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--force".to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_update_policy_show" => run_self_cli_json(
+            repo_root,
+            &[
+                "update".to_string(),
+                "policy".to_string(),
+                "show".to_string(),
+                "--json".to_string(),
+            ],
+        )?,
+        "fugit_update_policy_set" => {
+            let mut cli_args = vec![
+                "update".to_string(),
+                "policy".to_string(),
+                "set".to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(enabled) = args
+                .get("auto_check_enabled")
+                .and_then(serde_json::Value::as_bool)
+            {
+                cli_args.push("--auto-check-enabled".to_string());
+                cli_args.push(enabled.to_string());
+            }
+            if let Some(enabled) = args
+                .get("auto_apply_enabled")
+                .and_then(serde_json::Value::as_bool)
+            {
+                cli_args.push("--auto-apply-enabled".to_string());
+                cli_args.push(enabled.to_string());
+            }
+            if let Some(hours) = args
+                .get("check_interval_hours")
+                .and_then(serde_json::Value::as_u64)
+            {
+                cli_args.push("--check-interval-hours".to_string());
+                cli_args.push(hours.to_string());
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
@@ -21291,6 +22118,14 @@ fn fugit_projects_registry_path() -> Result<PathBuf> {
     Ok(resolve_fugit_home()?.join("projects.json"))
 }
 
+fn fugit_update_state_path() -> Result<PathBuf> {
+    Ok(resolve_fugit_home()?.join("update_state.json"))
+}
+
+fn fugit_update_checkout_root() -> Result<PathBuf> {
+    Ok(resolve_fugit_home()?.join("updater").join("fugit-alpha"))
+}
+
 fn load_project_registry() -> Result<ProjectRegistry> {
     let path = fugit_projects_registry_path()?;
     let mut registry = load_json_optional::<ProjectRegistry>(&path)?.unwrap_or(ProjectRegistry {
@@ -22620,6 +23455,18 @@ fn default_advisor_low_task_threshold() -> usize {
 
 fn default_advisor_auto_trigger_cooldown_minutes() -> i64 {
     20
+}
+
+fn default_update_auto_check_enabled() -> bool {
+    true
+}
+
+fn default_update_auto_apply_enabled() -> bool {
+    false
+}
+
+fn default_update_check_interval_hours() -> u64 {
+    24
 }
 
 fn timeline_is_initialized(repo_root: &Path) -> bool {
@@ -24330,6 +25177,22 @@ Prefer evidence-backed tasks.
             "expected branch index object to be reported missing: {:?}",
             missing
         );
+    }
+
+    #[test]
+    fn update_check_due_defaults_true_without_prior_check() {
+        let state = default_update_state();
+        assert!(update_check_due(&state, Utc::now()));
+    }
+
+    #[test]
+    fn update_check_due_respects_interval() {
+        let mut state = default_update_state();
+        state.last_checked_at_utc = Some(format_utc(Utc::now()));
+        state.policy.check_interval_hours = 24;
+        assert!(!update_check_due(&state, Utc::now()));
+        state.last_checked_at_utc = Some(format_utc(Utc::now() - Duration::hours(25)));
+        assert!(update_check_due(&state, Utc::now()));
     }
 
     #[test]

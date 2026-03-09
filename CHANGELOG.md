@@ -33,6 +33,7 @@
 - Added a git-build fingerprint to `fugit --version` and `skill doctor --json` so agents can distinguish different local installs even when the package version is unchanged.
 - Added `fugit version --json`, richer PATH-resolution reporting in `skill doctor --json`, explicit `task list --format ...` render modes, and a dedicated `task advance` close-and-continue command.
 - Added tracked developer auto-refresh hooks plus `scripts/install-dev-hooks.sh` so local `fugit` installs and the bundled skill can stay current automatically as the fugit repo changes.
+- Added a built-in updater: `update show|check|apply|policy`, a managed updater checkout under `FUGIT_HOME`, MCP update tools, default-on daily auto-checks, and optional auto-apply.
 - Added targeted task pickup with `task request --task-id <task_id>`, including MCP support, so agents can request a specific queue item after inspecting the backlog.
 - Added project discovery with recent-activity ordering, `task gui --background --port 0`, and an installed `fugit-gui` desktop launcher (`~/Applications/Fugit GUI.app` on macOS, `.desktop` entry on Linux).
 - Added advisor automation with provider discovery/assignment, distinct reviewer vs task-manager model selection, safe command-wrapper support for Codex/Claude/local runners, low-task background queueing from `task request`, GUI controls, and MCP tools.

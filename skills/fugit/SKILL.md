@@ -22,9 +22,13 @@ Use this skill when any of the following are true:
 - `fugit --version`
 - `fugit version --json`
 - `fugit skill doctor --json`
+- `fugit update check --json`
 - When built from a git checkout, `fugit --version` should include a build fingerprint such as `0.1.0+a5ce333236d7`; that is the fastest way to tell whether two installed binaries are actually the same build.
 - If `current_executable_shadowed` is `true` or `unsupported_command_paths` is non-empty, reinstall fugit from the canonical repo and align the local skill with:
 - `fugit skill install-codex --overwrite`
+- If `update_available` is `true`, tell the user and wait for approval before running:
+- `fugit update apply`
+- Exception: if `fugit update policy show --json` reports `auto_apply_enabled=true`, it is acceptable to let fugit update itself automatically.
 
 1. Ensure timeline exists:
 - `fugit --repo-root . init --branch trunk`

@@ -29,6 +29,8 @@ HOME="$TMP_HOME" \
 "$TMP_BIN/fugit" --help >/dev/null
 "$TMP_BIN/fugit" version --json >/dev/null
 "$TMP_BIN/fugit" skill doctor >/dev/null
+"$TMP_BIN/fugit" update show --json >/dev/null
+"$TMP_BIN/fugit" update policy show --json >/dev/null
 bash -n ./scripts/auto-install-dev.sh
 bash -n ./scripts/install-dev-hooks.sh
 

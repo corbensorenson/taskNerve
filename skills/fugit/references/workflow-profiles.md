@@ -23,6 +23,7 @@ Use when multiple agents should coordinate by pulling from a shared queue.
 - `fugit --repo-root . task list --ready-only`
 - `fugit version --json`
 - `fugit skill doctor --json`
+- `fugit update check --json`
 - `fugit --repo-root . task search --status open --contains compiler --jsonl --fields task_id,title,priority,tags`
 - `fugit --repo-root . task list --format table --limit 10`
 - `fugit --repo-root . task start --agent <agent_id> --claim-ttl-minutes 30 --steal-after-minutes 90`
@@ -61,6 +62,7 @@ Characteristics:
 - dependency-aware ordering via `--depends-on`,
 - one-command CLI/skill drift detection via `skill doctor --json`,
 - machine-readable binary identity and PATH candidate inspection via `version --json`,
+- built-in updater visibility via `update check --json`, with approval-gated `update apply` unless auto-apply is enabled,
 - one-command resume-or-claim flow via `task start`,
 - one-command complete-and-continue flow via `task advance`,
 - lease-based claims with default stale-claim work stealing,
