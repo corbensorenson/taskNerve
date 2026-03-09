@@ -41,18 +41,21 @@ Use this skill when any of the following are true:
 
 5. Request next task (work-stealing by default on stale claims):
 - `fugit --repo-root . task request --agent <agent_id> --claim-ttl-minutes 30 --steal-after-minutes 90`
+- Optional routing hints: `--focus <token>`, `--prefix <token>`, `--contains <token>`, plus `--tag <tag>`
 - optional dry assignment: `fugit --repo-root . task request --agent <agent_id> --no-claim`
 
 6. Capture progress as checkpoints:
 - `fugit --repo-root . checkpoint --summary "<what changed>" --agent <agent_id> --tag <tag>`
 
 7. Mark tasks done or release claim:
-- `fugit --repo-root . task done --task-id <task_id> --agent <agent_id>`
+- `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --summary "<what finished>"`
 - `fugit --repo-root . task release --task-id <task_id> --agent <agent_id>`
 - Note: task lifecycle mutations (`add`, `edit`, `claim`, `done`, `release`, `remove`) are mirrored into timeline events automatically.
 
 8. Review event history:
 - `fugit --repo-root . log --limit 20`
+- Inspect one task directly:
+- `fugit --repo-root . task show --task-id <task_id>`
 
 9. Coordinate ownership when multiple agents touch overlapping files:
 - `fugit --repo-root . lock add --pattern "src/**" --agent <agent_id> --ttl-minutes 30`
@@ -68,6 +71,11 @@ Use this skill when any of the following are true:
 
 12. Serve MCP for multi-agent tool access:
 - `fugit --repo-root . mcp serve`
+
+Recoverability repair:
+- `fugit --repo-root . doctor --fix`
+- `fugit --repo-root . checkpoint --summary "..." --repair auto`
+- `fugit --repo-root . checkpoint --summary "..." --repair lossy`
 
 13. Optional live task board window:
 - CLI foreground: `fugit --repo-root . task gui`
@@ -162,6 +170,7 @@ Expose these tools to agents via MCP:
 - `fugit_lock_add`
 - `fugit_lock_list`
 - `fugit_task_add`
+- `fugit_task_show`
 - `fugit_task_edit`
 - `fugit_task_remove`
 - `fugit_task_import`

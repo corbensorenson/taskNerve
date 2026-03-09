@@ -11,6 +11,8 @@
 - Added burst performance controls for local and push paths.
 - Added persistent multi-agent task queue with dependency-aware ordering, validated dependencies, edit/remove operations, and work stealing (`task add|edit|remove|import|list|request|claim|done|release` + MCP tools).
 - Added live task-board GUI with CLI launch (`task gui`), browser-side create/edit/remove controls, and MCP launch tool (`fugit_task_gui_launch`).
+- Added `task show`, request focus filters, richer completion metadata on `task done`, and `--version` for faster agent-side capability detection.
+- Added explicit recoverability repair UX: `doctor --fix` and `checkpoint --repair auto|strict|lossy`.
 - Added multi-project registry (`project add|list|use|remove`) and GUI project switching to keep task streams isolated across repos.
 - Hardened release validation script to run dependency advisory checks with `cargo-audit` when available.
 - Removed project-specific identifiers from README examples to keep docs fingerprint-neutral.

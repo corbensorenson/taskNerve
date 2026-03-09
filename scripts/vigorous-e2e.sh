@@ -68,6 +68,7 @@ git -C "$REPO_B" add README.txt
 git -C "$REPO_B" commit -m "seed repo-b" >/dev/null
 
 echo "[vigorous-e2e] init/status/backend"
+"$BIN" --version >/dev/null
 "$BIN" --repo-root "$REPO_A" init --branch trunk >/dev/null
 "$BIN" --repo-root "$REPO_A" status --json >"$TMP_ROOT/status.json"
 json_assert "$TMP_ROOT/status.json" 'payload.get("schema_version") == "timeline.status.v1" and payload.get("branch") == "trunk"' "status schema/branch mismatch after init"
@@ -109,6 +110,8 @@ PY
 "$BIN" --repo-root "$REPO_A" task add --title "task-b" --priority 5 --depends-on "$TASK_A" --agent agent.b --json >"$TMP_ROOT/task-b.json"
 "$BIN" --repo-root "$REPO_A" task edit --task-id "$TASK_A" --detail "root task" --tag root --agent agent.a --json >"$TMP_ROOT/task-a-edit.json"
 json_assert "$TMP_ROOT/task-a-edit.json" 'payload.get("detail") == "root task" and "root" in payload.get("tags", [])' "task edit should replace requested fields"
+"$BIN" --repo-root "$REPO_A" task show --task-id "$TASK_A" --json >"$TMP_ROOT/task-a-show.json"
+json_assert "$TMP_ROOT/task-a-show.json" 'payload.get("task_id") is not None and payload.get("detail") == "root task"' "task show should expose edited task state"
 "$BIN" --repo-root "$REPO_A" task add --title "task-c" --priority 1 --agent agent.c --json >"$TMP_ROOT/task-c.json"
 TASK_C="$(python3 - "$TMP_ROOT/task-c.json" <<'PY'
 import json,sys
@@ -116,11 +119,13 @@ print(json.load(open(sys.argv[1]))["task_id"])
 PY
 )"
 "$BIN" --repo-root "$REPO_A" task remove --task-id "$TASK_C" --agent agent.c >/dev/null
-"$BIN" --repo-root "$REPO_A" task request --agent agent.runner --json >"$TMP_ROOT/task-request-1.json"
+"$BIN" --repo-root "$REPO_A" task request --agent agent.runner --focus root --json >"$TMP_ROOT/task-request-1.json"
 json_assert "$TMP_ROOT/task-request-1.json" 'payload.get("assigned") is True and payload.get("task",{}).get("task_id") is not None' "task request should assign a task"
-"$BIN" --repo-root "$REPO_A" task done --task-id "$TASK_A" --agent agent.runner >/dev/null
+"$BIN" --repo-root "$REPO_A" task done --task-id "$TASK_A" --agent agent.runner --summary "root lane complete" --artifact "$TMP_ROOT/task-a-edit.json" --command "cargo test" >/dev/null
 "$BIN" --repo-root "$REPO_A" task request --agent agent.runner --json >"$TMP_ROOT/task-request-2.json"
 json_assert "$TMP_ROOT/task-request-2.json" 'payload.get("assigned") is True' "second task request should assign dependent task after completion"
+"$BIN" --repo-root "$REPO_A" task show --task-id "$TASK_A" --json >"$TMP_ROOT/task-a-done.json"
+json_assert "$TMP_ROOT/task-a-done.json" 'payload.get("completed_summary") == "root lane complete" and "cargo test" in payload.get("completion_commands", [])' "task show should include completion metadata"
 "$BIN" --repo-root "$REPO_A" log --limit 50 --json >"$TMP_ROOT/log-task.json"
 json_assert "$TMP_ROOT/log-task.json" 'any("task done:" in row.get("summary","") for row in payload)' "task actions should be mirrored into timeline events"
 json_assert "$TMP_ROOT/log-task.json" 'any("task edit:" in row.get("summary","") for row in payload) and any("task remove:" in row.get("summary","") for row in payload)' "edit/remove actions should be mirrored into timeline events"
@@ -191,6 +196,17 @@ echo "[vigorous-e2e] gc/doctor/skill"
 "$BIN" skill install-codex --overwrite >/dev/null
 json_assert "$TMP_ROOT/skill-doctor.json" 'payload.get("ok") is True' "skill doctor should pass"
 
+echo "[vigorous-e2e] doctor fix"
+INDEX_HASH="$(python3 - "$REPO_A/.fugit/branches/trunk/index.json" <<'PY'
+import json, sys
+index = json.load(open(sys.argv[1]))
+print(index["README.txt"]["hash"])
+PY
+)"
+rm -f "$REPO_A/.fugit/objects/$INDEX_HASH"
+"$BIN" --repo-root "$REPO_A" doctor --fix --json >"$TMP_ROOT/doctor-fix.json"
+json_assert "$TMP_ROOT/doctor-fix.json" 'payload.get("repair",{}).get("requested") is True and payload.get("repair",{}).get("repaired_count", 0) >= 1 and payload.get("summary",{}).get("pass") is True' "doctor --fix should repair missing timeline objects"
+
 echo "[vigorous-e2e] quickstart flow"
 REPO_Q="$TMP_ROOT/repo-quickstart"
 create_git_repo "$REPO_Q"
@@ -245,6 +261,8 @@ resp = recv()
 tools = resp.get("result", {}).get("tools", [])
 if not any(t.get("name") == "fugit_task_request" for t in tools):
     raise RuntimeError("missing fugit_task_request in MCP tools")
+if not any(t.get("name") == "fugit_task_show" for t in tools):
+    raise RuntimeError("missing fugit_task_show in MCP tools")
 if not any(t.get("name") == "fugit_task_edit" for t in tools):
     raise RuntimeError("missing fugit_task_edit in MCP tools")
 if not any(t.get("name") == "fugit_task_remove" for t in tools):
@@ -288,6 +306,17 @@ if "result" not in resp or edited.get("detail") != "mcp edited":
 send({
     "jsonrpc":"2.0",
     "id":6,
+    "method":"tools/call",
+    "params":{"name":"fugit_task_show","arguments":{"task_id":mcp_task_id}}
+})
+resp = recv()
+shown = resp.get("result", {}).get("structuredContent", {})
+if "result" not in resp or shown.get("task_id") != mcp_task_id:
+    raise RuntimeError(f"fugit_task_show MCP call failed: {resp}")
+
+send({
+    "jsonrpc":"2.0",
+    "id":7,
     "method":"tools/call",
     "params":{"name":"fugit_task_remove","arguments":{"task_id":mcp_task_id}}
 })

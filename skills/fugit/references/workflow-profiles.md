@@ -19,9 +19,10 @@ Use when multiple agents should coordinate by pulling from a shared queue.
 
 - `fugit --repo-root . task import --file /path/to/tasks.tsv`
 - `fugit --repo-root . task list --ready-only`
-- `fugit --repo-root . task request --agent <agent_id> --claim-ttl-minutes 30 --steal-after-minutes 90`
+- `fugit --repo-root . task request --agent <agent_id> --focus compiler --claim-ttl-minutes 30 --steal-after-minutes 90`
 - `fugit --repo-root . task edit --task-id <task_id> --title "Updated X"`
-- `fugit --repo-root . task done --task-id <task_id> --agent <agent_id>`
+- `fugit --repo-root . task show --task-id <task_id>`
+- `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --summary "done summary"`
 
 Characteristics:
 - dependency-aware ordering via `--depends-on`,
@@ -89,3 +90,16 @@ Use when local modifications exist and pull is needed.
 Characteristics:
 - wraps stash/pull/pop flow,
 - preserves local changes unless stash pop conflicts.
+
+## Recoverability Repair
+
+Use when doctor reports missing timeline blobs or checkpoint recoverability is blocked.
+
+- `fugit --repo-root . doctor --fix`
+- `fugit --repo-root . checkpoint --summary "..." --repair auto`
+- `fugit --repo-root . checkpoint --summary "..." --repair lossy`
+
+Characteristics:
+- `doctor --fix` performs safe Git-backed object-store rehydration when possible,
+- `checkpoint --repair auto` heals recoverable blobs inline and still fails closed if anything remains missing,
+- `checkpoint --repair lossy` reseals head state only when historical blobs are irrecoverable.

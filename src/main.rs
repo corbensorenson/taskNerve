@@ -58,6 +58,7 @@ const IGNORE_ROOT_ENTRIES: &[&str] = &[
 
 #[derive(Debug, Parser)]
 #[command(name = "fugit")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Timeline-first versioning with GitHub bridge for multi-agent work")]
 struct Cli {
     #[arg(long, default_value = ".")]
@@ -138,6 +139,8 @@ struct QuickstartArgs {
 struct DoctorArgs {
     #[arg(long, default_value_t = false)]
     json: bool,
+    #[arg(long, default_value_t = false)]
+    fix: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -174,7 +177,9 @@ struct CheckpointArgs {
     object_jobs: Option<usize>,
     #[arg(long, default_value_t = false)]
     burst: bool,
-    #[arg(long, default_value_t = false)]
+    #[arg(long, value_enum, default_value_t = CheckpointRepairModeArg::Auto)]
+    repair: CheckpointRepairModeArg,
+    #[arg(long, hide = true, default_value_t = false)]
     allow_lossy_repair: bool,
 }
 
@@ -392,6 +397,14 @@ struct FugitTask {
     claim_expires_at_utc: Option<String>,
     completed_at_utc: Option<String>,
     completed_by_agent_id: Option<String>,
+    #[serde(default)]
+    completed_summary: Option<String>,
+    #[serde(default)]
+    completion_notes: Vec<String>,
+    #[serde(default)]
+    completion_artifacts: Vec<String>,
+    #[serde(default)]
+    completion_commands: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -432,6 +445,41 @@ struct TaskEditPatch {
     priority: Option<i32>,
     tags: Option<Vec<String>>,
     depends_on: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TaskQueryFilter {
+    required_tags: Vec<String>,
+    focus: Option<String>,
+    prefix: Option<String>,
+    contains: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct MissingTimelineObject {
+    scope: String,
+    branch: String,
+    event_id: Option<String>,
+    edge: Option<String>,
+    path: String,
+    hash: String,
+}
+
+impl MissingTimelineObject {
+    fn render(&self) -> String {
+        match self.scope.as_str() {
+            "index" => format!("index:{}:{} ({})", self.branch, self.path, self.hash),
+            "event" => format!(
+                "event:{}:{}:{}:{} ({})",
+                self.branch,
+                self.event_id.as_deref().unwrap_or("unknown"),
+                self.edge.as_deref().unwrap_or("unknown"),
+                self.path,
+                self.hash
+            ),
+            _ => format!("{}:{} ({})", self.scope, self.path, self.hash),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -532,6 +580,12 @@ enum TaskAction {
         #[arg(long, default_value_t = 200)]
         limit: usize,
     },
+    Show {
+        #[arg(long)]
+        task_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     Add {
         #[arg(long)]
         title: String,
@@ -599,6 +653,12 @@ enum TaskAction {
         agent: Option<String>,
         #[arg(long = "tag")]
         tags: Vec<String>,
+        #[arg(long)]
+        focus: Option<String>,
+        #[arg(long)]
+        prefix: Option<String>,
+        #[arg(long)]
+        contains: Option<String>,
         #[arg(long, default_value_t = 30)]
         claim_ttl_minutes: i64,
         #[arg(long, default_value_t = 90)]
@@ -627,6 +687,14 @@ enum TaskAction {
         task_id: String,
         #[arg(long)]
         agent: Option<String>,
+        #[arg(long)]
+        summary: Option<String>,
+        #[arg(long = "note")]
+        notes: Vec<String>,
+        #[arg(long = "artifact")]
+        artifacts: Vec<String>,
+        #[arg(long = "command")]
+        commands: Vec<String>,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -666,6 +734,13 @@ enum TaskImportFormatArg {
     Auto,
     Tsv,
     Markdown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CheckpointRepairModeArg {
+    Auto,
+    Strict,
+    Lossy,
 }
 
 impl TaskStatusArg {
@@ -968,6 +1043,7 @@ fn cmd_quickstart(repo_root: &Path, args: QuickstartArgs) -> Result<()> {
             hash_jobs: None,
             object_jobs: None,
             burst: false,
+            repair: CheckpointRepairModeArg::Auto,
             allow_lossy_repair: false,
         },
     )?;
@@ -998,12 +1074,27 @@ fn cmd_doctor(repo_root: &Path, args: DoctorArgs) -> Result<()> {
         .and_then(|_| fs::remove_file(&write_test_file))
         .is_ok();
     let _ = fs::remove_dir_all(&write_test_dir);
-    let missing_timeline_objects = if timeline_initialized {
-        collect_missing_timeline_objects(repo_root)?
+    let mut missing_timeline_objects = if timeline_initialized {
+        collect_missing_timeline_objects_detailed(repo_root)?
     } else {
         Vec::new()
     };
+    let repair_attempted = args.fix && timeline_initialized && !missing_timeline_objects.is_empty();
+    let mut repaired_timeline_objects = Vec::<MissingTimelineObject>::new();
+    if repair_attempted {
+        repaired_timeline_objects =
+            repair_missing_timeline_objects_from_git(repo_root, &missing_timeline_objects)?;
+        missing_timeline_objects = collect_missing_timeline_objects_detailed(repo_root)?;
+    }
     let timeline_object_integrity = missing_timeline_objects.is_empty();
+    let missing_rendered = missing_timeline_objects
+        .iter()
+        .map(MissingTimelineObject::render)
+        .collect::<Vec<_>>();
+    let repaired_rendered = repaired_timeline_objects
+        .iter()
+        .map(MissingTimelineObject::render)
+        .collect::<Vec<_>>();
 
     let report = json!({
         "schema_version": "fugit.doctor_report.v1",
@@ -1016,7 +1107,14 @@ fn cmd_doctor(repo_root: &Path, args: DoctorArgs) -> Result<()> {
             "git_work_tree": git_work_tree,
             "timeline_object_integrity": timeline_object_integrity
         },
-        "missing_timeline_objects": missing_timeline_objects,
+        "repair": {
+            "requested": args.fix,
+            "attempted": repair_attempted,
+            "repaired_count": repaired_rendered.len(),
+            "repaired_timeline_objects": repaired_rendered,
+            "remaining_missing_count": missing_rendered.len()
+        },
+        "missing_timeline_objects": missing_rendered,
         "summary": {
             "pass": timeline_initialized && writable && timeline_object_integrity
         }
@@ -1047,6 +1145,20 @@ fn cmd_doctor(repo_root: &Path, args: DoctorArgs) -> Result<()> {
             println!(
                 "[fugit-doctor] hint: run `fugit --repo-root {} init --branch trunk`",
                 repo_root.display()
+            );
+        } else if !timeline_object_integrity {
+            println!(
+                "[fugit-doctor] hint: run `fugit --repo-root {} doctor --fix` to attempt safe Git-backed object rehydration",
+                repo_root.display()
+            );
+        }
+        if args.fix {
+            println!(
+                "[fugit-doctor] repair requested repaired_missing_objects={} remaining_missing_objects={}",
+                report["repair"]["repaired_count"].as_u64().unwrap_or(0),
+                report["repair"]["remaining_missing_count"]
+                    .as_u64()
+                    .unwrap_or(0)
             );
         }
     }
@@ -1129,6 +1241,7 @@ fn fugit_skill_bundle(include_skill_body: bool, include_openai_yaml: bool) -> se
                 "fugit_checkout",
                 "fugit_lock_add",
                 "fugit_lock_list",
+                "fugit_task_show",
                 "fugit_task_add",
                 "fugit_task_edit",
                 "fugit_task_remove",
@@ -1354,6 +1467,7 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
     let hash_jobs = resolve_parallel_jobs(args.hash_jobs, args.burst);
     let object_jobs = resolve_parallel_jobs(args.object_jobs.or(args.hash_jobs), args.burst);
     let new_index = scan_repo(repo_root, Some(&old_index), args.strict_hash, hash_jobs)?;
+    let repair_mode = resolve_checkpoint_repair_mode(args.repair, args.allow_lossy_repair);
 
     let allowed_paths = args
         .files
@@ -1396,7 +1510,11 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
             }
         }
     }
-    let repaired_old_objects = repair_missing_change_objects_from_git(repo_root, &changes, false)?;
+    let repaired_old_objects = if matches!(repair_mode, CheckpointRepairModeArg::Strict) {
+        Vec::new()
+    } else {
+        repair_missing_change_objects_from_git(repo_root, &changes, false)?
+    };
     if !repaired_old_objects.is_empty() {
         missing_old_objects.retain(|row| {
             let (_, hash) = row
@@ -1407,21 +1525,26 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
         });
     }
     if !missing_old_objects.is_empty() {
-        if !args.allow_lossy_repair {
+        if !matches!(repair_mode, CheckpointRepairModeArg::Lossy) {
             bail!(
-                "checkpoint would lose recoverability because old object blobs are missing:\n{}\nRecreate the baseline snapshot first (for new repos, run `fugit init` before edits).\nIf the missing blobs are irrecoverable and you want to reseal the current head anyway, rerun with `--allow-lossy-repair`.",
-                missing_old_objects.join("\n")
+                "checkpoint would lose recoverability because old object blobs are missing:\n{}\nRecreate the baseline snapshot first (for new repos, run `fugit init` before edits).\nTry `fugit doctor --fix` for safe Git-backed repair, rerun with `--repair auto` to auto-heal during checkpoint, or use `--repair lossy` only when those blobs are irrecoverable.",
+                missing_old_objects.join("\n"),
             );
         }
         println!(
-            "[fugit] warning=lossy_repair missing_old_objects={} historical_checkout_before_this_checkpoint_may_fail",
-            missing_old_objects.len()
+            "[fugit] warning=lossy_repair missing_old_objects={} historical_checkout_before_this_checkpoint_may_fail repair_mode=lossy",
+            missing_old_objects.len(),
         );
     }
     if !repaired_old_objects.is_empty() {
         println!(
-            "[fugit] repaired_missing_old_objects={} source=git_history",
-            repaired_old_objects.len()
+            "[fugit] repaired_missing_old_objects={} source=git_history repair_mode={}",
+            repaired_old_objects.len(),
+            match repair_mode {
+                CheckpointRepairModeArg::Auto => "auto",
+                CheckpointRepairModeArg::Strict => "strict",
+                CheckpointRepairModeArg::Lossy => "lossy",
+            }
         );
     }
 
@@ -1468,7 +1591,7 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
         .get(&active_branch)
         .and_then(|row| row.head_event_id.clone());
     let mut event_tags = dedupe_keep_order(args.tags);
-    if args.allow_lossy_repair && !missing_old_objects.is_empty() {
+    if matches!(repair_mode, CheckpointRepairModeArg::Lossy) && !missing_old_objects.is_empty() {
         event_tags.push("lossy_repair".to_string());
         event_tags = dedupe_keep_order(event_tags);
     }
@@ -2796,27 +2919,16 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                         continue;
                     }
                 }
-                let blocked_by = task_blocked_by(task, &status_map);
-                let ready = task.status != TaskStatus::Done && blocked_by.is_empty();
-                if ready_only && !ready {
+                let payload = task_to_json_payload(task, &status_map);
+                if ready_only
+                    && !payload
+                        .get("ready")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                {
                     continue;
                 }
-                rows.push(json!({
-                    "task_id": task.task_id,
-                    "title": task.title,
-                    "detail": task.detail,
-                    "priority": task.priority,
-                    "status": task.status,
-                    "tags": task.tags,
-                    "depends_on": task.depends_on,
-                    "blocked_by": blocked_by,
-                    "ready": ready,
-                    "created_by_agent_id": task.created_by_agent_id,
-                    "claimed_by_agent_id": task.claimed_by_agent_id,
-                    "created_at_utc": task.created_at_utc,
-                    "updated_at_utc": task.updated_at_utc,
-                    "completed_at_utc": task.completed_at_utc
-                }));
+                rows.push(payload);
                 if rows.len() >= limit {
                     break;
                 }
@@ -2856,6 +2968,24 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                         task_id, status, priority, ready, claimed_by, title
                     );
                 }
+            }
+        }
+        TaskAction::Show { task_id, json } => {
+            if state_changed {
+                state.updated_at_utc = now_utc();
+                write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+            }
+            let status_map = task_status_map(&state);
+            let task = state
+                .tasks
+                .iter()
+                .find(|task| task.task_id == task_id)
+                .ok_or_else(|| anyhow!("task not found: {}", task_id))?;
+            let payload = task_to_json_payload(task, &status_map);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
             }
         }
         TaskAction::Add {
@@ -3015,6 +3145,10 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                             claim_expires_at_utc: None,
                             completed_at_utc: None,
                             completed_by_agent_id: None,
+                            completed_summary: None,
+                            completion_notes: Vec::new(),
+                            completion_artifacts: Vec::new(),
+                            completion_commands: Vec::new(),
                         };
                         key_to_task_id.insert(row.key.clone(), task.task_id.clone());
                         imported_records.push(json!({
@@ -3090,6 +3224,9 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
         TaskAction::Request {
             agent,
             tags,
+            focus,
+            prefix,
+            contains,
             claim_ttl_minutes,
             steal_after_minutes,
             no_steal,
@@ -3097,12 +3234,12 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             json,
         } => {
             let agent_id = agent.unwrap_or_else(default_agent_id);
-            let required_tags = dedupe_keep_order(tags);
+            let filters = normalize_task_query_filter(tags, focus, prefix, contains)?;
             let now = Utc::now();
             let selection = select_task_for_agent(
                 &state,
                 &agent_id,
-                &required_tags,
+                &filters,
                 !no_steal,
                 steal_after_minutes,
                 now,
@@ -3118,6 +3255,12 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     "agent_id": agent_id,
                     "assigned": false,
                     "claimed": false,
+                    "filters": {
+                        "tags": filters.required_tags,
+                        "focus": filters.focus,
+                        "prefix": filters.prefix,
+                        "contains": filters.contains
+                    },
                     "task": null
                 });
                 if json {
@@ -3157,8 +3300,6 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 )?;
             }
             let status_map = task_status_map(&state);
-            let blocked_by = task_blocked_by(&task, &status_map);
-            let ready = task.status != TaskStatus::Done && blocked_by.is_empty();
             let payload = json!({
                 "schema_version": "fugit.task.request.v1",
                 "generated_at_utc": now_utc(),
@@ -3166,20 +3307,13 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 "assigned": true,
                 "claimed": claimed,
                 "dispatch_kind": dispatch_kind.as_str(),
-                "task": {
-                    "task_id": task.task_id,
-                    "title": task.title,
-                    "detail": task.detail,
-                    "priority": task.priority,
-                    "status": task.status,
-                    "tags": task.tags,
-                    "depends_on": task.depends_on,
-                    "blocked_by": blocked_by,
-                    "ready": ready,
-                    "created_by_agent_id": task.created_by_agent_id,
-                    "claimed_by_agent_id": task.claimed_by_agent_id,
-                    "claim_expires_at_utc": task.claim_expires_at_utc
-                }
+                "filters": {
+                    "tags": filters.required_tags,
+                    "focus": filters.focus,
+                    "prefix": filters.prefix,
+                    "contains": filters.contains
+                },
+                "task": task_to_json_payload(&task, &status_map)
             });
             if json {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -3248,6 +3382,10 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
         TaskAction::Done {
             task_id,
             agent,
+            summary,
+            notes,
+            artifacts,
+            commands,
             json,
         } => {
             let agent_id = agent.unwrap_or_else(default_agent_id);
@@ -3270,6 +3408,11 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             state.tasks[task_index].updated_at_utc = now.clone();
             state.tasks[task_index].completed_at_utc = Some(now);
             state.tasks[task_index].completed_by_agent_id = Some(agent_id.clone());
+            state.tasks[task_index].completed_summary =
+                normalize_optional_text(summary, "task completion summary")?;
+            state.tasks[task_index].completion_notes = normalize_string_list(notes);
+            state.tasks[task_index].completion_artifacts = normalize_string_list(artifacts);
+            state.tasks[task_index].completion_commands = normalize_string_list(commands);
             state.tasks[task_index].claimed_by_agent_id = None;
             state.tasks[task_index].claim_started_at_utc = None;
             state.tasks[task_index].claim_expires_at_utc = None;
@@ -4168,29 +4311,7 @@ fn task_gui_payload(repo_root: &Path, project_selector: Option<&str>) -> Result<
     sort_task_indices(&state, &mut indices);
     let tasks = indices
         .into_iter()
-        .map(|idx| {
-            let task = &state.tasks[idx];
-            let blocked_by = task_blocked_by(task, &status_map);
-            let ready = task.status != TaskStatus::Done && blocked_by.is_empty();
-            json!({
-                "task_id": task.task_id,
-                "title": task.title,
-                "detail": task.detail,
-                "priority": task.priority,
-                "status": task.status,
-                "tags": task.tags,
-                "depends_on": task.depends_on,
-                "blocked_by": blocked_by,
-                "ready": ready,
-                "created_by_agent_id": task.created_by_agent_id,
-                "claimed_by_agent_id": task.claimed_by_agent_id,
-                "claim_expires_at_utc": task.claim_expires_at_utc,
-                "created_at_utc": task.created_at_utc,
-                "updated_at_utc": task.updated_at_utc,
-                "completed_at_utc": task.completed_at_utc,
-                "completed_by_agent_id": task.completed_by_agent_id
-            })
-        })
+        .map(|idx| task_to_json_payload(&state.tasks[idx], &status_map))
         .collect::<Vec<_>>();
     Ok(json!({
         "schema_version": "fugit.task.gui.snapshot.v1",
@@ -4866,6 +4987,15 @@ fn task_gui_html() -> &'static str {
         const detail = task.detail
           ? `<p class="detail">${escapeHtml(task.detail)}</p>`
           : "";
+        const completedSummary = task.completed_summary
+          ? `<div class="meta-row">completion summary: ${escapeHtml(task.completed_summary)}</div>`
+          : "";
+        const completionArtifacts = (task.completion_artifacts || []).length > 0
+          ? `<div class="meta-row">artifacts: ${escapeHtml((task.completion_artifacts || []).join(", "))}</div>`
+          : "";
+        const completionCommands = (task.completion_commands || []).length > 0
+          ? `<div class="meta-row">commands: ${escapeHtml((task.completion_commands || []).join(" | "))}</div>`
+          : "";
         const deps = (task.depends_on || []).join(", ");
         const blockedBy = (task.blocked_by || []).join(", ");
         const stateLine = task.ready
@@ -4881,6 +5011,9 @@ fn task_gui_html() -> &'static str {
             ${detail}
             <div class="meta-row">claimed by: ${escapeHtml(task.claimed_by_agent_id || "none")}</div>
             <div class="meta-row">depends on: ${escapeHtml(deps || "none")}</div>
+            ${completedSummary}
+            ${completionArtifacts}
+            ${completionCommands}
             <div class="state">${stateLine}</div>
             <div class="tags">${tags}</div>
             <div class="task-actions">
@@ -5272,6 +5405,17 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
+            "name": "fugit_task_show",
+            "description": "Read a single task by id.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["task_id"],
+                "properties": {
+                    "task_id": { "type": "string" }
+                }
+            }
+        }),
+        json!({
             "name": "fugit_task_add",
             "description": "Create a persistent task in the shared queue.",
             "inputSchema": {
@@ -5356,6 +5500,9 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                 "properties": {
                     "agent": { "type": "string" },
                     "tags": { "type": "array", "items": { "type": "string" } },
+                    "focus": { "type": "string" },
+                    "prefix": { "type": "string" },
+                    "contains": { "type": "string" },
                     "claim_ttl_minutes": { "type": "integer" },
                     "steal_after_minutes": { "type": "integer" },
                     "no_steal": { "type": "boolean" },
@@ -5385,7 +5532,11 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                 "required": ["task_id"],
                 "properties": {
                     "task_id": { "type": "string" },
-                    "agent": { "type": "string" }
+                    "agent": { "type": "string" },
+                    "summary": { "type": "string" },
+                    "notes": { "type": "array", "items": { "type": "string" } },
+                    "artifacts": { "type": "array", "items": { "type": "string" } },
+                    "commands": { "type": "array", "items": { "type": "string" } }
                 }
             }
         }),
@@ -5688,6 +5839,22 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             repo_root,
             &["lock".to_string(), "list".to_string(), "--json".to_string()],
         )?,
+        "fugit_task_show" => {
+            let task_id = args
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_task_show requires task_id"))?;
+            run_self_cli_json(
+                repo_root,
+                &[
+                    "task".to_string(),
+                    "show".to_string(),
+                    "--task-id".to_string(),
+                    task_id.to_string(),
+                    "--json".to_string(),
+                ],
+            )?
+        }
         "fugit_task_add" => {
             let title = args
                 .get("title")
@@ -5920,6 +6087,18 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                     }
                 }
             }
+            if let Some(focus) = args.get("focus").and_then(serde_json::Value::as_str) {
+                cli_args.push("--focus".to_string());
+                cli_args.push(focus.to_string());
+            }
+            if let Some(prefix) = args.get("prefix").and_then(serde_json::Value::as_str) {
+                cli_args.push("--prefix".to_string());
+                cli_args.push(prefix.to_string());
+            }
+            if let Some(contains) = args.get("contains").and_then(serde_json::Value::as_str) {
+                cli_args.push("--contains".to_string());
+                cli_args.push(contains.to_string());
+            }
             if let Some(ttl) = args
                 .get("claim_ttl_minutes")
                 .and_then(serde_json::Value::as_i64)
@@ -5997,6 +6176,34 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
                 cli_args.push("--agent".to_string());
                 cli_args.push(agent.to_string());
+            }
+            if let Some(summary) = args.get("summary").and_then(serde_json::Value::as_str) {
+                cli_args.push("--summary".to_string());
+                cli_args.push(summary.to_string());
+            }
+            if let Some(notes) = args.get("notes").and_then(serde_json::Value::as_array) {
+                for note in notes {
+                    if let Some(note_value) = note.as_str() {
+                        cli_args.push("--note".to_string());
+                        cli_args.push(note_value.to_string());
+                    }
+                }
+            }
+            if let Some(artifacts) = args.get("artifacts").and_then(serde_json::Value::as_array) {
+                for artifact in artifacts {
+                    if let Some(artifact_value) = artifact.as_str() {
+                        cli_args.push("--artifact".to_string());
+                        cli_args.push(artifact_value.to_string());
+                    }
+                }
+            }
+            if let Some(commands) = args.get("commands").and_then(serde_json::Value::as_array) {
+                for command in commands {
+                    if let Some(command_value) = command.as_str() {
+                        cli_args.push("--command".to_string());
+                        cli_args.push(command_value.to_string());
+                    }
+                }
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
@@ -6328,20 +6535,38 @@ fn git_has_worktree_changes(repo_root: &Path) -> Result<bool> {
     Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
 }
 
+#[cfg(test)]
 fn collect_missing_timeline_objects(repo_root: &Path) -> Result<Vec<String>> {
+    Ok(collect_missing_timeline_objects_detailed(repo_root)?
+        .into_iter()
+        .map(|row| row.render())
+        .collect())
+}
+
+fn collect_missing_timeline_objects_detailed(
+    repo_root: &Path,
+) -> Result<Vec<MissingTimelineObject>> {
     if !timeline_is_initialized(repo_root) {
         return Ok(Vec::new());
     }
 
     let (_config, branches) = load_initialized_state(repo_root)?;
     let objects_dir = timeline_objects_dir(repo_root);
-    let mut missing = BTreeSet::<String>::new();
+    let mut missing = BTreeMap::<String, MissingTimelineObject>::new();
 
     for branch_name in branches.branches.keys() {
         let index = load_branch_index(repo_root, branch_name)?;
         for (path, row) in &index {
             if !objects_dir.join(&row.hash).exists() {
-                missing.insert(format!("index:{}:{} ({})", branch_name, path, row.hash));
+                let item = MissingTimelineObject {
+                    scope: "index".to_string(),
+                    branch: branch_name.clone(),
+                    event_id: None,
+                    edge: None,
+                    path: path.clone(),
+                    hash: row.hash.clone(),
+                };
+                missing.insert(item.render(), item);
             }
         }
 
@@ -6350,24 +6575,56 @@ fn collect_missing_timeline_objects(repo_root: &Path) -> Result<Vec<String>> {
                 if let Some(hash) = change.old_hash.as_deref()
                     && !objects_dir.join(hash).exists()
                 {
-                    missing.insert(format!(
-                        "event:{}:{}:old:{} ({})",
-                        branch_name, event.event_id, change.path, hash
-                    ));
+                    let item = MissingTimelineObject {
+                        scope: "event".to_string(),
+                        branch: branch_name.clone(),
+                        event_id: Some(event.event_id.clone()),
+                        edge: Some("old".to_string()),
+                        path: change.path.clone(),
+                        hash: hash.to_string(),
+                    };
+                    missing.insert(item.render(), item);
                 }
                 if let Some(hash) = change.new_hash.as_deref()
                     && !objects_dir.join(hash).exists()
                 {
-                    missing.insert(format!(
-                        "event:{}:{}:new:{} ({})",
-                        branch_name, event.event_id, change.path, hash
-                    ));
+                    let item = MissingTimelineObject {
+                        scope: "event".to_string(),
+                        branch: branch_name.clone(),
+                        event_id: Some(event.event_id.clone()),
+                        edge: Some("new".to_string()),
+                        path: change.path.clone(),
+                        hash: hash.to_string(),
+                    };
+                    missing.insert(item.render(), item);
                 }
             }
         }
     }
 
-    Ok(missing.into_iter().collect())
+    Ok(missing.into_values().collect())
+}
+
+fn repair_missing_timeline_objects_from_git(
+    repo_root: &Path,
+    missing: &[MissingTimelineObject],
+) -> Result<Vec<MissingTimelineObject>> {
+    let mut repaired = Vec::<MissingTimelineObject>::new();
+    let mut attempted = BTreeSet::<(String, String)>::new();
+    for item in missing {
+        let key = (item.path.clone(), item.hash.clone());
+        if !attempted.insert(key) {
+            continue;
+        }
+        if timeline_objects_dir(repo_root).join(&item.hash).exists() {
+            repaired.push(item.clone());
+            continue;
+        }
+        if repair_timeline_object_from_git(repo_root, &item.path, &item.hash)? {
+            repaired.push(item.clone());
+        }
+    }
+    Ok(repaired)
 }
 
 fn repair_missing_change_objects_from_git(
@@ -6855,6 +7112,23 @@ fn normalize_task_detail(detail: Option<String>) -> Option<String> {
     })
 }
 
+fn normalize_optional_text(value: Option<String>, field_name: &str) -> Result<Option<String>> {
+    match value {
+        Some(value) => {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() {
+                bail!("{} cannot be empty", field_name);
+            }
+            Ok(Some(trimmed))
+        }
+        None => Ok(None),
+    }
+}
+
+fn normalize_string_list(values: Vec<String>) -> Vec<String> {
+    dedupe_keep_order(values)
+}
+
 fn normalize_agent_id(agent: Option<String>) -> String {
     agent
         .and_then(|value| {
@@ -6866,6 +7140,17 @@ fn normalize_agent_id(agent: Option<String>) -> String {
             }
         })
         .unwrap_or_else(default_agent_id)
+}
+
+fn resolve_checkpoint_repair_mode(
+    requested: CheckpointRepairModeArg,
+    allow_lossy_repair: bool,
+) -> CheckpointRepairModeArg {
+    if allow_lossy_repair {
+        CheckpointRepairModeArg::Lossy
+    } else {
+        requested
+    }
 }
 
 fn resolve_task_text_patch(value: Option<String>, clear: bool) -> Result<TaskTextPatch> {
@@ -6970,6 +7255,10 @@ fn build_manual_task(
         claim_expires_at_utc: None,
         completed_at_utc: None,
         completed_by_agent_id: None,
+        completed_summary: None,
+        completion_notes: Vec::new(),
+        completion_artifacts: Vec::new(),
+        completion_commands: Vec::new(),
     })
 }
 
@@ -7085,6 +7374,106 @@ fn remove_task_from_state(
     removed.updated_at_utc = now.clone();
     state.updated_at_utc = now;
     Ok(removed)
+}
+
+fn normalize_task_query_filter(
+    tags: Vec<String>,
+    focus: Option<String>,
+    prefix: Option<String>,
+    contains: Option<String>,
+) -> Result<TaskQueryFilter> {
+    Ok(TaskQueryFilter {
+        required_tags: dedupe_keep_order(tags),
+        focus: normalize_optional_text(focus, "task focus")?,
+        prefix: normalize_optional_text(prefix, "task prefix")?,
+        contains: normalize_optional_text(contains, "task contains")?,
+    })
+}
+
+fn task_search_haystacks(task: &FugitTask) -> Vec<String> {
+    let mut haystacks = vec![
+        task.task_id.to_ascii_lowercase(),
+        task.title.to_ascii_lowercase(),
+    ];
+    if let Some(detail) = task.detail.as_deref() {
+        haystacks.push(detail.to_ascii_lowercase());
+    }
+    for tag in &task.tags {
+        haystacks.push(tag.to_ascii_lowercase());
+    }
+    haystacks
+}
+
+fn task_matches_tag_filters(task: &FugitTask, required_tags: &[String]) -> bool {
+    if required_tags.is_empty() {
+        return true;
+    }
+    required_tags
+        .iter()
+        .all(|required| task.tags.iter().any(|task_tag| task_tag == required))
+}
+
+fn task_matches_query_filter(task: &FugitTask, filter: &TaskQueryFilter) -> bool {
+    if !task_matches_tag_filters(task, &filter.required_tags) {
+        return false;
+    }
+    let haystacks = task_search_haystacks(task);
+
+    if let Some(prefix) = filter.prefix.as_deref() {
+        let needle = prefix.to_ascii_lowercase();
+        if !haystacks.iter().any(|value| value.starts_with(&needle)) {
+            return false;
+        }
+    }
+
+    if let Some(contains) = filter.contains.as_deref() {
+        let needle = contains.to_ascii_lowercase();
+        if !haystacks.iter().any(|value| value.contains(&needle)) {
+            return false;
+        }
+    }
+
+    if let Some(focus) = filter.focus.as_deref() {
+        let needle = focus.to_ascii_lowercase();
+        if !haystacks
+            .iter()
+            .any(|value| value == &needle || value.starts_with(&needle) || value.contains(&needle))
+        {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn task_to_json_payload(
+    task: &FugitTask,
+    status_map: &BTreeMap<String, TaskStatus>,
+) -> serde_json::Value {
+    let blocked_by = task_blocked_by(task, status_map);
+    let ready = task.status != TaskStatus::Done && blocked_by.is_empty();
+    json!({
+        "task_id": task.task_id,
+        "title": task.title,
+        "detail": task.detail,
+        "priority": task.priority,
+        "status": task.status,
+        "tags": task.tags,
+        "depends_on": task.depends_on,
+        "blocked_by": blocked_by,
+        "ready": ready,
+        "created_by_agent_id": task.created_by_agent_id,
+        "claimed_by_agent_id": task.claimed_by_agent_id,
+        "created_at_utc": task.created_at_utc,
+        "updated_at_utc": task.updated_at_utc,
+        "completed_at_utc": task.completed_at_utc,
+        "completed_by_agent_id": task.completed_by_agent_id,
+        "completed_summary": task.completed_summary,
+        "completion_notes": task.completion_notes,
+        "completion_artifacts": task.completion_artifacts,
+        "completion_commands": task.completion_commands,
+        "claim_expires_at_utc": task.claim_expires_at_utc
+    })
 }
 
 fn parse_task_import_rows(file: &Path, format: TaskImportFormatArg) -> Result<Vec<TaskImportRow>> {
@@ -7489,19 +7878,10 @@ fn task_blocked_by(task: &FugitTask, status_map: &BTreeMap<String, TaskStatus>) 
     blocked_by
 }
 
-fn task_matches_tag_filters(task: &FugitTask, required_tags: &[String]) -> bool {
-    if required_tags.is_empty() {
-        return true;
-    }
-    required_tags
-        .iter()
-        .all(|required| task.tags.iter().any(|task_tag| task_tag == required))
-}
-
 fn select_task_for_agent(
     state: &TaskState,
     agent_id: &str,
-    required_tags: &[String],
+    filters: &TaskQueryFilter,
     allow_steal: bool,
     steal_after_minutes: i64,
     now: DateTime<Utc>,
@@ -7515,7 +7895,7 @@ fn select_task_for_agent(
         if task.status == TaskStatus::Done {
             continue;
         }
-        if !task_matches_tag_filters(task, required_tags) {
+        if !task_matches_query_filter(task, filters) {
             continue;
         }
         if !task_blocked_by(task, &status_map).is_empty() {
@@ -7568,6 +7948,10 @@ fn apply_task_claim(
     };
     task.completed_at_utc = None;
     task.completed_by_agent_id = None;
+    task.completed_summary = None;
+    task.completion_notes.clear();
+    task.completion_artifacts.clear();
+    task.completion_commands.clear();
 }
 
 fn task_claim_is_expired(task: &FugitTask, now: DateTime<Utc>) -> bool {
@@ -8149,6 +8533,10 @@ mod tests {
                     claim_expires_at_utc: None,
                     completed_at_utc: None,
                     completed_by_agent_id: None,
+                    completed_summary: None,
+                    completion_notes: Vec::new(),
+                    completion_artifacts: Vec::new(),
+                    completion_commands: Vec::new(),
                 },
                 FugitTask {
                     task_id: "task_child".to_string(),
@@ -8166,6 +8554,10 @@ mod tests {
                     claim_expires_at_utc: None,
                     completed_at_utc: None,
                     completed_by_agent_id: None,
+                    completed_summary: None,
+                    completion_notes: Vec::new(),
+                    completion_artifacts: Vec::new(),
+                    completion_commands: Vec::new(),
                 },
             ],
         };
@@ -8203,6 +8595,10 @@ mod tests {
                     claim_expires_at_utc: None,
                     completed_at_utc: Some(now_utc()),
                     completed_by_agent_id: Some("agent.a".to_string()),
+                    completed_summary: None,
+                    completion_notes: Vec::new(),
+                    completion_artifacts: Vec::new(),
+                    completion_commands: Vec::new(),
                 },
                 FugitTask {
                     task_id: "task_simple".to_string(),
@@ -8220,6 +8616,10 @@ mod tests {
                     claim_expires_at_utc: None,
                     completed_at_utc: None,
                     completed_by_agent_id: None,
+                    completed_summary: None,
+                    completion_notes: Vec::new(),
+                    completion_artifacts: Vec::new(),
+                    completion_commands: Vec::new(),
                 },
                 FugitTask {
                     task_id: "task_priority_ready".to_string(),
@@ -8237,6 +8637,10 @@ mod tests {
                     claim_expires_at_utc: None,
                     completed_at_utc: None,
                     completed_by_agent_id: None,
+                    completed_summary: None,
+                    completion_notes: Vec::new(),
+                    completion_artifacts: Vec::new(),
+                    completion_commands: Vec::new(),
                 },
                 FugitTask {
                     task_id: "task_blocked".to_string(),
@@ -8254,6 +8658,10 @@ mod tests {
                     claim_expires_at_utc: None,
                     completed_at_utc: None,
                     completed_by_agent_id: None,
+                    completed_summary: None,
+                    completion_notes: Vec::new(),
+                    completion_artifacts: Vec::new(),
+                    completion_commands: Vec::new(),
                 },
             ],
         };
@@ -8261,7 +8669,10 @@ mod tests {
         let selected = select_task_for_agent(
             &state,
             "agent.worker",
-            &["ui".to_string()],
+            &TaskQueryFilter {
+                required_tags: vec!["ui".to_string()],
+                ..Default::default()
+            },
             true,
             90,
             Utc::now(),
@@ -8293,15 +8704,33 @@ mod tests {
                 claim_expires_at_utc: None,
                 completed_at_utc: None,
                 completed_by_agent_id: None,
+                completed_summary: None,
+                completion_notes: Vec::new(),
+                completion_artifacts: Vec::new(),
+                completion_commands: Vec::new(),
             }],
         };
 
-        let selection = select_task_for_agent(&state, "agent.worker", &[], true, 30, now)
-            .expect("expected steal candidate");
+        let selection = select_task_for_agent(
+            &state,
+            "agent.worker",
+            &TaskQueryFilter::default(),
+            true,
+            30,
+            now,
+        )
+        .expect("expected steal candidate");
         assert_eq!(selection.1, TaskDispatchKind::Steal);
         assert_eq!(state.tasks[selection.0].task_id, "task_claimed");
 
-        let blocked = select_task_for_agent(&state, "agent.worker", &[], false, 30, now);
+        let blocked = select_task_for_agent(
+            &state,
+            "agent.worker",
+            &TaskQueryFilter::default(),
+            false,
+            30,
+            now,
+        );
         assert!(blocked.is_none());
     }
 
@@ -8392,6 +8821,7 @@ mod tests {
                 hash_jobs: None,
                 object_jobs: None,
                 burst: false,
+                repair: CheckpointRepairModeArg::Auto,
                 allow_lossy_repair: false,
             },
         )
@@ -8436,6 +8866,7 @@ mod tests {
                 hash_jobs: None,
                 object_jobs: None,
                 burst: false,
+                repair: CheckpointRepairModeArg::Auto,
                 allow_lossy_repair: false,
             },
         )
@@ -8464,12 +8895,13 @@ mod tests {
                 hash_jobs: None,
                 object_jobs: None,
                 burst: false,
+                repair: CheckpointRepairModeArg::Auto,
                 allow_lossy_repair: false,
             },
         )
         .expect_err("strict checkpoint should fail when timeline-only blob is missing");
         assert!(
-            strict_err.to_string().contains("--allow-lossy-repair"),
+            strict_err.to_string().contains("--repair lossy"),
             "expected lossy repair hint, got: {strict_err:#}"
         );
 
@@ -8485,6 +8917,7 @@ mod tests {
                 hash_jobs: None,
                 object_jobs: None,
                 burst: false,
+                repair: CheckpointRepairModeArg::Lossy,
                 allow_lossy_repair: true,
             },
         )
@@ -8635,6 +9068,10 @@ mod tests {
             claim_expires_at_utc: None,
             completed_at_utc: Some(now_utc()),
             completed_by_agent_id: Some("agent.a".to_string()),
+            completed_summary: None,
+            completion_notes: Vec::new(),
+            completion_artifacts: Vec::new(),
+            completion_commands: Vec::new(),
         };
 
         let tags = task_timeline_tags("done", &task, Some(TaskDispatchKind::Open));
@@ -8688,6 +9125,10 @@ mod tests {
                     claim_expires_at_utc: None,
                     completed_at_utc: Some(now_utc()),
                     completed_by_agent_id: Some("agent.seed".to_string()),
+                    completed_summary: None,
+                    completion_notes: Vec::new(),
+                    completion_artifacts: Vec::new(),
+                    completion_commands: Vec::new(),
                 },
                 FugitTask {
                     task_id: "task_main".to_string(),
@@ -8705,6 +9146,10 @@ mod tests {
                     claim_expires_at_utc: None,
                     completed_at_utc: None,
                     completed_by_agent_id: None,
+                    completed_summary: None,
+                    completion_notes: Vec::new(),
+                    completion_artifacts: Vec::new(),
+                    completion_commands: Vec::new(),
                 },
             ],
         };
@@ -8751,6 +9196,10 @@ mod tests {
                     claim_expires_at_utc: None,
                     completed_at_utc: None,
                     completed_by_agent_id: None,
+                    completed_summary: None,
+                    completion_notes: Vec::new(),
+                    completion_artifacts: Vec::new(),
+                    completion_commands: Vec::new(),
                 },
                 FugitTask {
                     task_id: "task_child".to_string(),
@@ -8768,6 +9217,10 @@ mod tests {
                     claim_expires_at_utc: None,
                     completed_at_utc: None,
                     completed_by_agent_id: None,
+                    completed_summary: None,
+                    completion_notes: Vec::new(),
+                    completion_artifacts: Vec::new(),
+                    completion_commands: Vec::new(),
                 },
             ],
         };
