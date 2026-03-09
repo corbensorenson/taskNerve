@@ -4513,8 +4513,6 @@ fn verify_github_ci_for_commit(
     let started = Instant::now();
     let timeout = std::time::Duration::from_secs(timeout_minutes.saturating_mul(60));
     let poll_delay = std::time::Duration::from_secs(poll_seconds);
-    let mut last_runs = None::<Vec<GithubActionsRun>>;
-
     loop {
         let path = format!("repos/{owner}/{repo}/actions/runs?head_sha={commit_sha}&per_page=100");
         let (status, payload) = github_api_get_json(&api_base_url, &path, api_token.as_deref())?;
@@ -4539,8 +4537,7 @@ fn verify_github_ci_for_commit(
                 workflow_runs: Vec::new(),
             },
         );
-        last_runs = Some(response.workflow_runs);
-        let current_runs = last_runs.as_ref().expect("workflow runs just assigned");
+        let current_runs = response.workflow_runs;
 
         if !current_runs.is_empty() {
             let all_completed = current_runs
@@ -4614,7 +4611,6 @@ fn verify_github_ci_for_commit(
         }
 
         if started.elapsed() >= timeout {
-            let current_runs = last_runs.clone().unwrap_or_default();
             let status = if current_runs.is_empty() {
                 if require_checks {
                     "no_runs_detected"
