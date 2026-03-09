@@ -67,7 +67,7 @@ const SKILL_REF_WORKFLOW_PROFILES: &str =
 const SKILL_REF_RECOVERY_PLAYBOOKS: &str =
     include_str!("../skills/tasknerve/references/recovery-playbooks.md");
 const DEFAULT_ADVISOR_WORKFLOW_TEMPLATE: &str = include_str!("../templates/TASKNERVE_WORKFLOW.md");
-const DEFAULT_UPDATE_REPO_URL: &str = "https://github.com/corbensorenson/tasknerve.git";
+const DEFAULT_UPDATE_REPO_URL: &str = "https://github.com/corbensorenson/taskNerve.git";
 const DEFAULT_UPDATE_BRANCH: &str = "main";
 const PRODUCT_NAME: &str = "tasknerve";
 
@@ -22387,7 +22387,6 @@ fn comment_syntax_for_path(rel_path: &str) -> Option<CommentSyntax> {
             | ".zshrc"
             | ".zprofile"
             | ".gitignore"
-            | ".tasknerveignore"
             | ".tasknerveignore"
     ) {
         return Some(CommentSyntax {
