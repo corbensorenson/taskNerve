@@ -59,9 +59,11 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . task approve --all-pending-auto-replenish --agent <agent_id>`
 - To bypass your currently claimed work and fetch the next ready task:
 - `fugit --repo-root . task request --agent <agent_id> --skip-owned --json`
+- To explicitly allow one extra concurrent claim when you already own work:
+- `fugit --repo-root . task request --agent <agent_id> --max-new-claims 1 --json`
 - To request a specific task after scanning the queue:
 - `fugit --repo-root . task request --agent <agent_id> --task-id <task_id> --json`
-- `task request --json` also returns `selection_reason` so agents can branch on why a task was or was not selected.
+- `task request --json` also returns `selection_reason` plus `claim_ttl_remaining_seconds` so agents can branch on why a task was or was not selected and renew leases just-in-time.
 - optional dry assignment: `fugit --repo-root . task request --agent <agent_id> --no-claim`
 
 6. Capture progress as checkpoints:
@@ -75,8 +77,16 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . task progress <task_id> --agent <agent_id> --note "<what changed>"`
 - To attach machine-readable artifact breadcrumbs for handoff/resume:
 - `fugit --repo-root . task note <task_id> --agent <agent_id> --artifact <path>`
+- To renew a long-running claim and log progress in one round trip:
+- `fugit --repo-root . task heartbeat <task_id> --agent <agent_id> --claim-ttl-minutes 60 --note "<what changed>"`
 - To close work and pull the next ready item in one round trip:
 - `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --claim-next --regression "<test command>"`
+- To block work and move on without faking completion:
+- `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --state blocked --reason "<why blocked>" --claim-next`
+- To release a task back to the queue with explicit blocker context:
+- `fugit --repo-root . task release --task-id <task_id> --agent <agent_id> --state blocked --reason "<why blocked>"`
+- To retire a malformed or superseded task without deleting its history:
+- `fugit --repo-root . task cancel --task-id <task_id> --agent <agent_id> --reason "<why canceled>"`
 - To renew ownership on a long-running claim without re-claim side effects:
 - `fugit --repo-root . task claim <task_id> --agent <agent_id> --extend-only --claim-ttl-minutes 60`
 - Default quality gate is on: every completed task should carry at least one regression or benchmark check, and active checks run before bridge sync.
@@ -93,8 +103,10 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . bridge auto-sync set --enabled false`
 - Reopen only when work is intentionally back on the queue:
 - `fugit --repo-root . task reopen --task-id <task_id> --agent <agent_id>`
+- To clear a manual block after the dependency resolves:
+- `fugit --repo-root . task update --task-id <task_id> --clear-blocked --agent <agent_id>`
 - `fugit --repo-root . task release --task-id <task_id> --agent <agent_id>`
-- Note: task lifecycle mutations (`add`, `edit`, `claim`, `done`, `reopen`, `release`, `remove`) are mirrored into timeline events automatically.
+- Note: task lifecycle mutations (`add`, `edit`/`update`, `claim`, `heartbeat`, `done`, `block`, `reopen`, `release`, `cancel`, `remove`) are mirrored into timeline events automatically.
 
 8. Review event history:
 - `fugit --repo-root . log --limit 20`
@@ -157,6 +169,7 @@ Recoverability repair:
 - `fugit --repo-root . checkpoint --summary "..." --repair-missing-blobs`
 - `fugit --repo-root . checkpoint --summary "..." --allow-baseline-reseed`
 - `fugit --repo-root . checkpoint --summary "..." --repair lossy`
+- `fugit --repo-root . checkpoint --summary "..." --preflight --json`
 - For malformed event journals during bridge export:
 - `fugit --repo-root . bridge sync-github --no-push --repair-journal`
 

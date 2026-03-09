@@ -24,6 +24,7 @@ Use when multiple agents should coordinate by pulling from a shared queue.
 - `fugit --repo-root . task request --agent <agent_id> --focus compiler --claim-ttl-minutes 30 --steal-after-minutes 90`
 - `fugit --repo-root . task request --agent <agent_id> --title-contains "compiler" --json`
 - `fugit --repo-root . task request --agent <agent_id> --task-id <task_id> --json`
+- `fugit --repo-root . task request --agent <agent_id> --max-new-claims 1 --json`
 - `fugit --repo-root . task edit --task-id <task_id> --title "Updated X"`
 - `fugit --repo-root . task show <task_id>`
 - `fugit --repo-root . task list --jsonl --fields task_id,title,status`
@@ -31,15 +32,19 @@ Use when multiple agents should coordinate by pulling from a shared queue.
 - `fugit --repo-root . task status --agent <agent_id> --json`
 - `fugit --repo-root . status --json --summary-only`
 - `fugit --repo-root . task request --agent <agent_id> --no-claim --max 3 --json`
-- `task request --json` returns `selection_reason` for agent-side branching.
+- `task request --json` returns `selection_reason` and `claim_ttl_remaining_seconds` for agent-side branching.
 - `fugit --repo-root . task policy show --json`
 - `fugit --repo-root . task approve --all-pending-auto-replenish --agent <agent_id>`
 - `fugit --repo-root . bridge auto-sync show --json`
 - `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --summary "done summary" --regression "<test command>"`
 - `fugit --repo-root . task progress <task_id> --agent <agent_id> --note "implemented parser wiring"`
 - `fugit --repo-root . task note <task_id> --agent <agent_id> --artifact artifacts/report.json`
+- `fugit --repo-root . task heartbeat <task_id> --agent <agent_id> --claim-ttl-minutes 60 --note "reran flaky benchmark"`
 - `fugit --repo-root . task claim <task_id> --agent <agent_id> --extend-only --claim-ttl-minutes 60`
 - `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --claim-next --regression "<test command>"`
+- `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --state blocked --reason "waiting on upstream API" --claim-next`
+- `fugit --repo-root . task release --task-id <task_id> --agent <agent_id> --state blocked --reason "handoff blocked on schema"`
+- `fugit --repo-root . task cancel --task-id <task_id> --agent <agent_id> --reason "superseded"`
 - `fugit --repo-root . check run --json`
 - `fugit --repo-root . check deprecate --check-id <check_id> --reason "obsolete"`
 
@@ -54,6 +59,7 @@ Characteristics:
 - default-on regression/benchmark gate before bridge sync,
 - explicit release path for fast agent handoff,
 - easy plan maintenance through `task edit` / `task remove`.
+- explicit unblock path through `task update --clear-blocked`.
 
 ## Live Task Board
 
@@ -143,6 +149,7 @@ Use when doctor reports missing timeline blobs or checkpoint recoverability is b
 - `fugit --repo-root . checkpoint --summary "..." --repair-missing-blobs`
 - `fugit --repo-root . checkpoint --summary "..." --allow-baseline-reseed`
 - `fugit --repo-root . checkpoint --summary "..." --repair lossy`
+- `fugit --repo-root . checkpoint --summary "..." --preflight --json`
 
 Characteristics:
 - `doctor --fix` performs safe Git-backed object-store rehydration when possible,

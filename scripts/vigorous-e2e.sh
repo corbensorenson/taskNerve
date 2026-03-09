@@ -234,18 +234,67 @@ json_assert "$TMP_ROOT/task-status.json" 'payload.get("counts", {}).get("mine_cl
 json_assert "$TMP_ROOT/task-mine.json" 'len(payload) == 1 and payload[0].get("task_id") == "'"$TASK_A"'" and payload[0].get("claim_started_at_utc") is not None and payload[0].get("claim_expires_at_utc") is not None' "task list --mine should return only the agent-owned claim with lease metadata"
 "$BIN" --repo-root "$REPO_A" task claim "$TASK_A" --agent agent.runner --extend-only --claim-ttl-minutes 75 --json >"$TMP_ROOT/task-claim-extend.json"
 json_assert "$TMP_ROOT/task-claim-extend.json" 'payload.get("claim_expires_at_utc") is not None and payload.get("claimed_by_agent_id") == "agent.runner"' "task claim --extend-only should renew the existing lease without changing ownership"
+TASK_A_EXTENDED_EXPIRY="$(python3 - "$TMP_ROOT/task-claim-extend.json" <<'PY'
+import json, sys
+payload = json.load(open(sys.argv[1]))
+print(payload["claim_expires_at_utc"])
+PY
+)"
 "$BIN" --repo-root "$REPO_A" task list --status in_progress --json >"$TMP_ROOT/task-in-progress.json"
 json_assert "$TMP_ROOT/task-in-progress.json" 'any(row.get("task_id") == "'"$TASK_A"'" for row in payload)' "task list should accept in_progress as a claimed-task alias"
-"$BIN" --repo-root "$REPO_A" task request --agent agent.runner --skip-owned --json >"$TMP_ROOT/task-request-skip-owned.json"
-json_assert "$TMP_ROOT/task-request-skip-owned.json" 'payload.get("dispatch_kind") == "open" and payload.get("task",{}).get("task_id") in {"'"$TASK_C"'","'"$TASK_D"'"} and payload.get("skip_owned") is True' "task request --skip-owned should bypass the agent's existing claim"
+"$BIN" --repo-root "$REPO_A" task request --agent agent.runner --json >"$TMP_ROOT/task-request-owned.json"
+json_assert "$TMP_ROOT/task-request-owned.json" 'payload.get("dispatch_kind") == "owned_claim" and payload.get("claimed") is False and payload.get("task", {}).get("task_id") == "'"$TASK_A"'" and payload.get("task", {}).get("claim_ttl_remaining_seconds") is not None' "task request should resume the owned claim without creating a new lease"
+OWNED_REQUEST_EXPIRY="$(python3 - "$TMP_ROOT/task-request-owned.json" <<'PY'
+import json, sys
+payload = json.load(open(sys.argv[1]))
+print(payload["task"]["claim_expires_at_utc"])
+PY
+)"
+if [[ "$OWNED_REQUEST_EXPIRY" != "$TASK_A_EXTENDED_EXPIRY" ]]; then
+  echo "[vigorous-e2e] task request unexpectedly changed the owned claim expiry" >&2
+  exit 1
+fi
+"$BIN" --repo-root "$REPO_A" task request --agent agent.runner --skip-owned --no-claim --json >"$TMP_ROOT/task-request-skip-owned.json"
+json_assert "$TMP_ROOT/task-request-skip-owned.json" 'payload.get("dispatch_kind") == "open" and payload.get("claimed") is False and payload.get("task",{}).get("task_id") in {"'"$TASK_C"'","'"$TASK_D"'"} and payload.get("skip_owned") is True' "task request --skip-owned should bypass the agent's existing claim without forcing a new claim"
+"$BIN" --repo-root "$REPO_A" task request --agent agent.runner --max-new-claims 1 --json >"$TMP_ROOT/task-request-max-new.json"
+json_assert "$TMP_ROOT/task-request-max-new.json" 'payload.get("claimed") is True and payload.get("owned_claim_count") == 1 and payload.get("task",{}).get("task_id") in {"'"$TASK_C"'","'"$TASK_D"'"}' "task request --max-new-claims should explicitly allow one additional claim"
+EXTRA_TASK="$(python3 - "$TMP_ROOT/task-request-max-new.json" <<'PY'
+import json, sys
+payload = json.load(open(sys.argv[1]))
+print(payload["task"]["task_id"])
+PY
+)"
+"$BIN" --repo-root "$REPO_A" task heartbeat --task-id "$TASK_A" --agent agent.runner --claim-ttl-minutes 60 --note "lease heartbeat" --artifact artifacts/heartbeat.log --json >"$TMP_ROOT/task-heartbeat.json"
+json_assert "$TMP_ROOT/task-heartbeat.json" 'payload.get("task_id") == "'"$TASK_A"'" and payload.get("last_progress_note") == "lease heartbeat" and payload.get("last_artifact") == "artifacts/heartbeat.log"' "task heartbeat should renew the lease and attach progress/artifact breadcrumbs"
+"$BIN" --repo-root "$REPO_A" task release --task-id "$EXTRA_TASK" --agent agent.runner --state blocked --reason "waiting on upstream api" --json >"$TMP_ROOT/task-release-blocked.json"
+json_assert "$TMP_ROOT/task-release-blocked.json" 'payload.get("lifecycle_state") == "blocked" and payload.get("blocked_reason") == "waiting on upstream api"' "task release --state blocked should preserve blocker metadata on the task"
+"$BIN" --repo-root "$REPO_A" task update --task-id "$EXTRA_TASK" --clear-blocked --agent agent.runner --json >"$TMP_ROOT/task-update-clear-blocked.json"
+json_assert "$TMP_ROOT/task-update-clear-blocked.json" 'payload.get("blocked_reason") is None' "task update --clear-blocked should reopen the task for dispatch"
+"$BIN" --repo-root "$REPO_A" task request --agent agent.runner --task-id "$EXTRA_TASK" --no-claim --json >"$TMP_ROOT/task-request-unblocked.json"
+json_assert "$TMP_ROOT/task-request-unblocked.json" 'payload.get("assigned") is True and payload.get("task",{}).get("task_id") == "'"$EXTRA_TASK"'"' "cleared blocked tasks should be dispatchable again"
 "$BIN" --repo-root "$REPO_A" task progress --task-id "$TASK_A" --agent agent.runner --note "implemented root workflow" --json >"$TMP_ROOT/task-progress.json"
-json_assert "$TMP_ROOT/task-progress.json" 'payload.get("progress_count") == 1 and payload.get("last_progress_note") == "implemented root workflow"' "task progress should append an execution breadcrumb"
+json_assert "$TMP_ROOT/task-progress.json" 'payload.get("progress_count") >= 2 and payload.get("last_progress_note") == "implemented root workflow"' "task progress should append an execution breadcrumb"
 "$BIN" --repo-root "$REPO_A" task note --task-id "$TASK_A" --agent agent.runner --artifact artifacts/report.json --artifact artifacts/trace.log --json >"$TMP_ROOT/task-note.json"
-json_assert "$TMP_ROOT/task-note.json" 'payload.get("artifact_count") == 2 and payload.get("last_artifact") == "artifacts/trace.log"' "task note should append artifact breadcrumbs for handoff and resume"
+json_assert "$TMP_ROOT/task-note.json" 'payload.get("artifact_count") == 3 and payload.get("last_artifact") == "artifacts/trace.log"' "task note should append artifact breadcrumbs for handoff and resume"
+if "$BIN" --repo-root "$REPO_A" task list --all --limit 1 >/dev/null; then
+  :
+else
+  echo "[vigorous-e2e] task list --all should be accepted as a no-op alias" >&2
+  exit 1
+fi
 if "$BIN" --repo-root "$REPO_A" task done --task-id "$TASK_D" --agent agent.runner >/dev/null 2>&1; then
   echo "[vigorous-e2e] expected task done to require a regression or benchmark check by default" >&2
   exit 1
 fi
+"$BIN" --repo-root "$REPO_A" task add --title "cancel me" --agent agent.runner --json >"$TMP_ROOT/task-add-cancel.json"
+CANCEL_TASK="$(python3 - "$TMP_ROOT/task-add-cancel.json" <<'PY'
+import json, sys
+payload = json.load(open(sys.argv[1]))
+print(payload["task_id"])
+PY
+)"
+"$BIN" --repo-root "$REPO_A" task cancel --task-id "$CANCEL_TASK" --agent agent.runner --reason "superseded" --json >"$TMP_ROOT/task-cancel.json"
+json_assert "$TMP_ROOT/task-cancel.json" 'payload.get("lifecycle_state") == "canceled" and payload.get("canceled_reason") == "superseded"' "task cancel should preserve cancellation reason on the task"
 "$BIN" --repo-root "$REPO_A" task release --task-id "$TASK_C" --agent agent.runner >/dev/null
 "$BIN" --repo-root "$REPO_A" task done --task-id "$TASK_A" --agent agent.runner --summary "root lane complete" --artifact "$TMP_ROOT/task-a-edit.json" --command "cargo test" --regression "test -f README.txt" --claim-next --json >"$TMP_ROOT/task-done.json"
 json_assert "$TMP_ROOT/task-done.json" 'payload.get("completed_summary") == "root lane complete" and payload.get("auto_bridge_sync", {}).get("status") is not None and payload.get("quality_checks", {}).get("created_count") == 1 and payload.get("claim_next", {}).get("task", {}).get("task", {}).get("task_id") == "'"$TASK_B"'"' "task done should include completion metadata, quality checks, auto bridge sync status, and claim the next ready task"
@@ -579,6 +628,8 @@ if "$BIN" --repo-root "$REPO_C" checkpoint --summary "gamma" --json >"$TMP_ROOT/
   exit 1
 fi
 json_assert "$TMP_ROOT/checkpoint-error.json" 'payload.get("ok") is False and payload.get("error", {}).get("code") == "missing_old_objects" and len(payload.get("error", {}).get("missing_blobs", [])) >= 1' "checkpoint --json should emit structured failure payload"
+"$BIN" --repo-root "$REPO_C" checkpoint --summary "gamma preflight" --preflight --json >"$TMP_ROOT/checkpoint-preflight.json"
+json_assert "$TMP_ROOT/checkpoint-preflight.json" 'payload.get("ready") is False and len(payload.get("missing_old_objects", [])) >= 1' "checkpoint --preflight should surface missing old objects without writing a new event"
 "$BIN" --repo-root "$REPO_C" checkpoint --summary "gamma repaired" --repair-missing-blobs --json >"$TMP_ROOT/checkpoint-repair-alias.json"
 json_assert "$TMP_ROOT/checkpoint-repair-alias.json" 'payload.get("ok") is True and payload.get("repair_mode") == "auto"' "checkpoint --repair-missing-blobs should act as an auto-repair alias"
 printf '{"broken":\n' >>"$REPO_C/.fugit/branches/trunk/events.jsonl"

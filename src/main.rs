@@ -208,6 +208,8 @@ struct CheckpointArgs {
     #[arg(long, hide = true, default_value_t = false)]
     allow_lossy_repair: bool,
     #[arg(long, default_value_t = false)]
+    preflight: bool,
+    #[arg(long, default_value_t = false)]
     json: bool,
 }
 
@@ -924,6 +926,18 @@ struct FugitTask {
     #[serde(default)]
     approved_by_agent_id: Option<String>,
     #[serde(default)]
+    blocked_at_utc: Option<String>,
+    #[serde(default)]
+    blocked_by_agent_id: Option<String>,
+    #[serde(default)]
+    blocked_reason: Option<String>,
+    #[serde(default)]
+    canceled_at_utc: Option<String>,
+    #[serde(default)]
+    canceled_by_agent_id: Option<String>,
+    #[serde(default)]
+    canceled_reason: Option<String>,
+    #[serde(default)]
     progress_entries: Vec<TaskProgressEntry>,
     #[serde(default)]
     artifact_entries: Vec<TaskArtifactEntry>,
@@ -1212,6 +1226,7 @@ struct TaskEditPatch {
     priority: Option<i32>,
     tags: Option<Vec<String>>,
     depends_on: Option<Vec<String>>,
+    blocked: TaskTextPatch,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1238,6 +1253,7 @@ struct TaskRequestExecutionOptions {
     requested_task_id: Option<String>,
     filters: TaskQueryFilter,
     max: usize,
+    max_new_claims: usize,
     claim_ttl_minutes: i64,
     steal_after_minutes: i64,
     allow_steal: bool,
@@ -1446,6 +1462,8 @@ enum TaskAction {
         json: bool,
         #[arg(long, default_value_t = false)]
         jsonl: bool,
+        #[arg(long, default_value_t = false)]
+        all: bool,
         #[arg(long, value_enum)]
         status: Option<TaskStatusArg>,
         #[arg(long)]
@@ -1525,6 +1543,7 @@ enum TaskAction {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(visible_alias = "update")]
     Edit {
         #[arg(long)]
         task_id: Option<String>,
@@ -1548,6 +1567,10 @@ enum TaskAction {
         depends_on: Vec<String>,
         #[arg(long, default_value_t = false)]
         clear_depends_on: bool,
+        #[arg(long)]
+        blocked_reason: Option<String>,
+        #[arg(long, default_value_t = false)]
+        clear_blocked: bool,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -1623,6 +1646,8 @@ enum TaskAction {
         title_contains: Option<String>,
         #[arg(long, default_value_t = 1)]
         max: usize,
+        #[arg(long, default_value_t = 0)]
+        max_new_claims: usize,
         #[arg(long, default_value_t = 30)]
         claim_ttl_minutes: i64,
         #[arg(long, default_value_t = 90)]
@@ -1661,6 +1686,10 @@ enum TaskAction {
         task_id_arg: Option<String>,
         #[arg(long)]
         agent: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long, value_enum, default_value_t = TaskDoneStateArg::Done)]
+        state: TaskDoneStateArg,
         #[arg(long)]
         summary: Option<String>,
         #[arg(long = "note")]
@@ -1723,6 +1752,38 @@ enum TaskAction {
         task_id_arg: Option<String>,
         #[arg(long)]
         agent: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long, value_enum, default_value_t = TaskReleaseStateArg::Open)]
+        state: TaskReleaseStateArg,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Cancel {
+        #[arg(long)]
+        task_id: Option<String>,
+        #[arg(value_name = "TASK_ID")]
+        task_id_arg: Option<String>,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        reason: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Heartbeat {
+        #[arg(long)]
+        task_id: Option<String>,
+        #[arg(value_name = "TASK_ID")]
+        task_id_arg: Option<String>,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, default_value_t = 30)]
+        claim_ttl_minutes: i64,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long = "artifact")]
+        artifacts: Vec<String>,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -1748,6 +1809,18 @@ enum TaskStatusArg {
     #[value(alias = "in_progress")]
     Claimed,
     Done,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum TaskDoneStateArg {
+    Done,
+    Blocked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum TaskReleaseStateArg {
+    Open,
+    Blocked,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2181,6 +2254,7 @@ fn cmd_quickstart(repo_root: &Path, args: QuickstartArgs) -> Result<()> {
             repair_missing_blobs: false,
             allow_baseline_reseed: false,
             allow_lossy_repair: false,
+            preflight: false,
             json: false,
         },
     )?;
@@ -2393,8 +2467,12 @@ fn fugit_skill_bundle(include_skill_body: bool, include_openai_yaml: bool) -> se
                 "fugit_task_start",
                 "fugit_task_claim",
                 "fugit_task_done",
+                "fugit_task_progress",
+                "fugit_task_note",
                 "fugit_task_reopen",
                 "fugit_task_release",
+                "fugit_task_cancel",
+                "fugit_task_heartbeat",
                 "fugit_check_list",
                 "fugit_check_add",
                 "fugit_check_deprecate",
@@ -2694,6 +2772,27 @@ fn render_checkpoint_missing_blob_rows(
     rows
 }
 
+fn checkpoint_suggested_commands(repo_root: &Path, summary: &str) -> Vec<String> {
+    vec![
+        format!("fugit --repo-root {} doctor --fix", repo_root.display()),
+        format!(
+            "fugit --repo-root {} checkpoint --summary {:?} --repair auto",
+            repo_root.display(),
+            summary
+        ),
+        format!(
+            "fugit --repo-root {} checkpoint --summary {:?} --repair-missing-blobs",
+            repo_root.display(),
+            summary
+        ),
+        format!(
+            "fugit --repo-root {} checkpoint --summary {:?} --repair lossy",
+            repo_root.display(),
+            summary
+        ),
+    ]
+}
+
 fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
     if args.summary.trim().is_empty() {
         if args.json {
@@ -2774,6 +2873,46 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
     }
 
     let mut missing_old_objects = render_checkpoint_missing_blob_rows(&changes, repo_root);
+    if args.preflight {
+        let ready = missing_old_objects.is_empty();
+        let payload = json!({
+            "schema_version": "fugit.checkpoint.preflight.v1",
+            "generated_at_utc": now_utc(),
+            "ok": true,
+            "ready": ready,
+            "repo_root": repo_root.display().to_string(),
+            "branch": active_branch,
+            "summary": args.summary.trim(),
+            "repair_mode": checkpoint_repair_mode_label(repair_mode),
+            "missing_old_objects": missing_old_objects,
+            "suggested_commands": checkpoint_suggested_commands(repo_root, args.summary.trim()),
+            "metrics": {
+                "tracked_file_count": new_index.len(),
+                "changed_file_count": changes.len(),
+                "hash_jobs": hash_jobs,
+                "object_jobs": object_jobs,
+            },
+            "changes": changes
+        });
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else {
+            println!(
+                "[fugit-checkpoint-preflight] ready={} branch={} changed={} missing_old_objects={} repair_mode={}",
+                payload["ready"].as_bool().unwrap_or(false),
+                payload["branch"].as_str().unwrap_or("unknown"),
+                payload["metrics"]["changed_file_count"]
+                    .as_u64()
+                    .unwrap_or(0),
+                payload["missing_old_objects"]
+                    .as_array()
+                    .map(Vec::len)
+                    .unwrap_or(0),
+                payload["repair_mode"].as_str().unwrap_or("unknown"),
+            );
+        }
+        return Ok(());
+    }
     let repaired_old_objects = if matches!(repair_mode, CheckpointRepairModeArg::Strict) {
         Vec::new()
     } else {
@@ -2802,24 +2941,7 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
                     "missing_old_objects",
                     message,
                     missing_old_objects,
-                    vec![
-                        format!("fugit --repo-root {} doctor --fix", repo_root.display()),
-                        format!(
-                            "fugit --repo-root {} checkpoint --summary {:?} --repair auto",
-                            repo_root.display(),
-                            args.summary.trim()
-                        ),
-                        format!(
-                            "fugit --repo-root {} checkpoint --summary {:?} --repair-missing-blobs",
-                            repo_root.display(),
-                            args.summary.trim()
-                        ),
-                        format!(
-                            "fugit --repo-root {} checkpoint --summary {:?} --repair lossy",
-                            repo_root.display(),
-                            args.summary.trim()
-                        ),
-                    ],
+                    checkpoint_suggested_commands(repo_root, args.summary.trim()),
                 ));
             }
             bail!("{message}");
@@ -4556,6 +4678,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
         TaskAction::List {
             json,
             jsonl,
+            all,
             status,
             agent,
             mine,
@@ -4563,6 +4686,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             fields,
             limit,
         } => {
+            let _ = all;
             if json && jsonl {
                 bail!("task list accepts only one of --json or --jsonl");
             }
@@ -4789,6 +4913,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     requested_task_id,
                     filters,
                     max: 1,
+                    max_new_claims: 0,
                     claim_ttl_minutes,
                     steal_after_minutes,
                     allow_steal: !no_steal,
@@ -4875,6 +5000,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             clear_tags,
             depends_on,
             clear_depends_on,
+            blocked_reason,
+            clear_blocked,
             json,
         } => {
             let agent_id = normalize_agent_id(agent);
@@ -4885,6 +5012,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 priority,
                 tags: resolve_task_list_patch(tags, clear_tags, "tags")?,
                 depends_on: resolve_task_list_patch(depends_on, clear_depends_on, "depends-on")?,
+                blocked: resolve_task_text_patch(blocked_reason, clear_blocked)?,
             };
             let task = edit_task_in_state(&mut state, &task_id, &agent_id, patch)?;
             write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
@@ -5122,6 +5250,12 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                             awaiting_confirmation: false,
                             approved_at_utc: None,
                             approved_by_agent_id: None,
+                            blocked_at_utc: None,
+                            blocked_by_agent_id: None,
+                            blocked_reason: None,
+                            canceled_at_utc: None,
+                            canceled_by_agent_id: None,
+                            canceled_reason: None,
                         },
                         &agent_id,
                         "remove",
@@ -5240,6 +5374,12 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                             awaiting_confirmation: false,
                             approved_at_utc: None,
                             approved_by_agent_id: None,
+                            blocked_at_utc: None,
+                            blocked_by_agent_id: None,
+                            blocked_reason: None,
+                            canceled_at_utc: None,
+                            canceled_by_agent_id: None,
+                            canceled_reason: None,
                         };
                         key_to_task_id.insert(row.key.clone(), task.task_id.clone());
                         imported_records.push(json!({
@@ -5322,6 +5462,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             contains,
             title_contains,
             max,
+            max_new_claims,
             claim_ttl_minutes,
             steal_after_minutes,
             no_steal,
@@ -5343,6 +5484,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     requested_task_id,
                     filters,
                     max,
+                    max_new_claims,
                     claim_ttl_minutes,
                     steal_after_minutes,
                     allow_steal: !no_steal,
@@ -5403,6 +5545,14 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     task.task_id
                 );
             }
+            if task_is_manually_blocked(task) {
+                bail!(
+                    "task {} is blocked; clear it first with `fugit task update {} --clear-blocked --agent {}`",
+                    task.task_id,
+                    task.task_id,
+                    agent_id
+                );
+            }
             if let Some(owner) = task.claimed_by_agent_id.as_deref()
                 && owner != agent_id
                 && !task_claim_is_expired(task, now)
@@ -5438,6 +5588,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             task_id,
             task_id_arg,
             agent,
+            reason,
+            state: done_state,
             summary,
             notes,
             artifacts,
@@ -5467,90 +5619,135 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             }
             let config = load_timeline_config_or_default(repo_root)?;
             let mut check_state = load_check_state(repo_root)?;
+            let reason_value = normalize_optional_text(reason, "task reason")?;
             let regression_commands = normalize_string_list(regressions);
             let benchmark_commands = normalize_string_list(benchmarks);
             let existing_active_checks =
                 task_active_check_count(&check_state, &state.tasks[task_index].task_id);
-            if config.quality_checks_enabled
-                && config.quality_checks_require_on_task_done
-                && !skip_check_requirement
-                && existing_active_checks == 0
-                && regression_commands.is_empty()
-                && benchmark_commands.is_empty()
-            {
-                bail!(
-                    "task {} requires at least one regression or benchmark check; use --regression/--benchmark, add one with `fugit check add --task-id {}` first, or opt out with `fugit check policy set --require-on-task-done false`",
-                    state.tasks[task_index].task_id,
-                    state.tasks[task_index].task_id
-                );
-            }
             let mut created_checks = Vec::<FugitCheck>::new();
-            for command in regression_commands {
-                let normalized_command = normalize_check_command(command)?;
+            if matches!(done_state, TaskDoneStateArg::Done) {
+                if config.quality_checks_enabled
+                    && config.quality_checks_require_on_task_done
+                    && !skip_check_requirement
+                    && existing_active_checks == 0
+                    && regression_commands.is_empty()
+                    && benchmark_commands.is_empty()
+                {
+                    bail!(
+                        "task {} requires at least one regression or benchmark check; use --regression/--benchmark, add one with `fugit check add --task-id {}` first, or opt out with `fugit check policy set --require-on-task-done false`",
+                        state.tasks[task_index].task_id,
+                        state.tasks[task_index].task_id
+                    );
+                }
+                for command in regression_commands {
+                    let normalized_command = normalize_check_command(command)?;
+                    let now = now_utc();
+                    let check = FugitCheck {
+                        check_id: format!("chk_{}", Uuid::new_v4().simple()),
+                        name: format!("regression {}", state.tasks[task_index].task_id),
+                        command: normalized_command,
+                        kind: CheckKind::Regression,
+                        task_id: Some(state.tasks[task_index].task_id.clone()),
+                        created_at_utc: now.clone(),
+                        updated_at_utc: now,
+                        created_by_agent_id: agent_id.clone(),
+                        deprecated_at_utc: None,
+                        deprecated_by_agent_id: None,
+                        deprecated_reason: None,
+                        last_run_at_utc: None,
+                        last_run_status: None,
+                        last_run_duration_ms: None,
+                        last_run_exit_code: None,
+                    };
+                    check_state.checks.push(check.clone());
+                    created_checks.push(check);
+                }
+                for command in benchmark_commands {
+                    let normalized_command = normalize_check_command(command)?;
+                    let now = now_utc();
+                    let check = FugitCheck {
+                        check_id: format!("chk_{}", Uuid::new_v4().simple()),
+                        name: format!("benchmark {}", state.tasks[task_index].task_id),
+                        command: normalized_command,
+                        kind: CheckKind::Benchmark,
+                        task_id: Some(state.tasks[task_index].task_id.clone()),
+                        created_at_utc: now.clone(),
+                        updated_at_utc: now,
+                        created_by_agent_id: agent_id.clone(),
+                        deprecated_at_utc: None,
+                        deprecated_by_agent_id: None,
+                        deprecated_reason: None,
+                        last_run_at_utc: None,
+                        last_run_status: None,
+                        last_run_duration_ms: None,
+                        last_run_exit_code: None,
+                    };
+                    check_state.checks.push(check.clone());
+                    created_checks.push(check);
+                }
+                if !created_checks.is_empty() {
+                    check_state.updated_at_utc = now_utc();
+                    write_check_state(repo_root, &check_state)?;
+                    for check in &created_checks {
+                        append_check_timeline_event(repo_root, check, &agent_id, "add")?;
+                    }
+                }
                 let now = now_utc();
-                let check = FugitCheck {
-                    check_id: format!("chk_{}", Uuid::new_v4().simple()),
-                    name: format!("regression {}", state.tasks[task_index].task_id),
-                    command: normalized_command,
-                    kind: CheckKind::Regression,
-                    task_id: Some(state.tasks[task_index].task_id.clone()),
-                    created_at_utc: now.clone(),
-                    updated_at_utc: now,
-                    created_by_agent_id: agent_id.clone(),
-                    deprecated_at_utc: None,
-                    deprecated_by_agent_id: None,
-                    deprecated_reason: None,
-                    last_run_at_utc: None,
-                    last_run_status: None,
-                    last_run_duration_ms: None,
-                    last_run_exit_code: None,
-                };
-                check_state.checks.push(check.clone());
-                created_checks.push(check);
-            }
-            for command in benchmark_commands {
-                let normalized_command = normalize_check_command(command)?;
-                let now = now_utc();
-                let check = FugitCheck {
-                    check_id: format!("chk_{}", Uuid::new_v4().simple()),
-                    name: format!("benchmark {}", state.tasks[task_index].task_id),
-                    command: normalized_command,
-                    kind: CheckKind::Benchmark,
-                    task_id: Some(state.tasks[task_index].task_id.clone()),
-                    created_at_utc: now.clone(),
-                    updated_at_utc: now,
-                    created_by_agent_id: agent_id.clone(),
-                    deprecated_at_utc: None,
-                    deprecated_by_agent_id: None,
-                    deprecated_reason: None,
-                    last_run_at_utc: None,
-                    last_run_status: None,
-                    last_run_duration_ms: None,
-                    last_run_exit_code: None,
-                };
-                check_state.checks.push(check.clone());
-                created_checks.push(check);
-            }
-            if !created_checks.is_empty() {
-                check_state.updated_at_utc = now_utc();
-                write_check_state(repo_root, &check_state)?;
-                for check in &created_checks {
-                    append_check_timeline_event(repo_root, check, &agent_id, "add")?;
+                state.tasks[task_index].status = TaskStatus::Done;
+                state.tasks[task_index].updated_at_utc = now.clone();
+                state.tasks[task_index].completed_at_utc = Some(now);
+                state.tasks[task_index].completed_by_agent_id = Some(agent_id.clone());
+                state.tasks[task_index].completed_summary =
+                    normalize_optional_text(summary, "task completion summary")?;
+                state.tasks[task_index].completion_notes = normalize_string_list(notes);
+                if let Some(reason) = reason_value.as_deref() {
+                    state.tasks[task_index]
+                        .completion_notes
+                        .push(format!("reason: {}", reason));
+                    state.tasks[task_index].completion_notes =
+                        dedupe_keep_order(state.tasks[task_index].completion_notes.clone());
+                }
+                state.tasks[task_index].completion_artifacts = normalize_string_list(artifacts);
+                state.tasks[task_index].completion_commands = normalize_string_list(commands);
+                state.tasks[task_index].claimed_by_agent_id = None;
+                state.tasks[task_index].claim_started_at_utc = None;
+                state.tasks[task_index].claim_expires_at_utc = None;
+                clear_task_blocked_state(&mut state.tasks[task_index]);
+                clear_task_canceled_state(&mut state.tasks[task_index]);
+            } else {
+                let blocked_reason = reason_value
+                    .clone()
+                    .or_else(|| {
+                        normalize_optional_text(summary.clone(), "task blocked summary")
+                            .ok()
+                            .flatten()
+                    })
+                    .ok_or_else(|| {
+                        anyhow!("task done --state blocked requires --reason or --summary")
+                    })?;
+                set_task_blocked_state(&mut state.tasks[task_index], &agent_id, &blocked_reason);
+                append_transition_reason_note(
+                    &mut state,
+                    &task_id,
+                    &agent_id,
+                    "blocked",
+                    Some(blocked_reason.as_str()),
+                )?;
+                for note in normalize_string_list(notes) {
+                    let _ = add_task_progress_entry(&mut state, &task_id, &agent_id, note)?;
+                }
+                if !artifacts.is_empty() {
+                    let _ = add_task_artifact_entries(&mut state, &task_id, &agent_id, artifacts)?;
+                }
+                for command in normalize_string_list(commands) {
+                    let _ = add_task_progress_entry(
+                        &mut state,
+                        &task_id,
+                        &agent_id,
+                        format!("command: {}", command),
+                    )?;
                 }
             }
-            let now = now_utc();
-            state.tasks[task_index].status = TaskStatus::Done;
-            state.tasks[task_index].updated_at_utc = now.clone();
-            state.tasks[task_index].completed_at_utc = Some(now);
-            state.tasks[task_index].completed_by_agent_id = Some(agent_id.clone());
-            state.tasks[task_index].completed_summary =
-                normalize_optional_text(summary, "task completion summary")?;
-            state.tasks[task_index].completion_notes = normalize_string_list(notes);
-            state.tasks[task_index].completion_artifacts = normalize_string_list(artifacts);
-            state.tasks[task_index].completion_commands = normalize_string_list(commands);
-            state.tasks[task_index].claimed_by_agent_id = None;
-            state.tasks[task_index].claim_started_at_utc = None;
-            state.tasks[task_index].claim_expires_at_utc = None;
             let task = state.tasks[task_index].clone();
             let now = Utc::now();
             let respect_date_gates = !next_ignore_date_gates;
@@ -5588,7 +5785,12 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             }
             state.updated_at_utc = now_utc();
             write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
-            append_task_timeline_event(repo_root, &task, &agent_id, "done", None)?;
+            let task_event_action = if matches!(done_state, TaskDoneStateArg::Blocked) {
+                "block"
+            } else {
+                "done"
+            };
+            append_task_timeline_event(repo_root, &task, &agent_id, task_event_action, None)?;
             for task_id in &auto_replenish.created_task_ids {
                 if let Some(auto_task) = state.tasks.iter().find(|row| row.task_id == *task_id) {
                     append_task_timeline_event(repo_root, auto_task, SYSTEM_AGENT_ID, "add", None)?;
@@ -5615,8 +5817,14 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     Some(dispatch_kind),
                 )?;
             }
-            let auto_bridge_sync =
-                maybe_queue_auto_bridge_sync_for_task_done(repo_root, &config, &task);
+            let auto_bridge_sync = if matches!(done_state, TaskDoneStateArg::Done) {
+                maybe_queue_auto_bridge_sync_for_task_done(repo_root, &config, &task)
+            } else {
+                json!({
+                    "enabled": config.auto_bridge_sync_enabled,
+                    "status": "skipped_for_blocked_task"
+                })
+            };
             if json {
                 let mut payload = serde_json::to_value(&state.tasks[task_index])?;
                 if let Some(object) = payload.as_object_mut() {
@@ -5657,7 +5865,12 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     .map(|(idx, _)| state.tasks[idx].task_id.as_str())
                     .unwrap_or("none");
                 println!(
-                    "[fugit-task] completed {} by {} quality_checks_added={} auto_bridge_sync={} next_task={}",
+                    "[fugit-task] state={} task_id={} by={} quality_checks_added={} auto_bridge_sync={} next_task={}",
+                    if matches!(done_state, TaskDoneStateArg::Blocked) {
+                        "blocked"
+                    } else {
+                        "done"
+                    },
                     state.tasks[task_index].task_id,
                     agent_id,
                     created_checks.len(),
@@ -5775,6 +5988,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             task_id,
             task_id_arg,
             agent,
+            reason,
+            state: release_state,
             json,
         } => {
             let agent_id = agent.unwrap_or_else(default_agent_id);
@@ -5799,22 +6014,136 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     agent_id
                 );
             }
-            state.tasks[task_index].status = TaskStatus::Open;
-            state.tasks[task_index].updated_at_utc = now_utc();
-            state.tasks[task_index].claimed_by_agent_id = None;
-            state.tasks[task_index].claim_started_at_utc = None;
-            state.tasks[task_index].claim_expires_at_utc = None;
+            let reason_value = normalize_optional_text(reason, "release reason")?;
+            if matches!(release_state, TaskReleaseStateArg::Blocked) {
+                let blocked_reason = reason_value
+                    .clone()
+                    .ok_or_else(|| anyhow!("task release --state blocked requires --reason"))?;
+                set_task_blocked_state(&mut state.tasks[task_index], &agent_id, &blocked_reason);
+                append_transition_reason_note(
+                    &mut state,
+                    &task_id,
+                    &agent_id,
+                    "blocked",
+                    Some(blocked_reason.as_str()),
+                )?;
+            } else {
+                state.tasks[task_index].status = TaskStatus::Open;
+                state.tasks[task_index].updated_at_utc = now_utc();
+                state.tasks[task_index].claimed_by_agent_id = None;
+                state.tasks[task_index].claim_started_at_utc = None;
+                state.tasks[task_index].claim_expires_at_utc = None;
+                append_transition_reason_note(
+                    &mut state,
+                    &task_id,
+                    &agent_id,
+                    "released",
+                    reason_value.as_deref(),
+                )?;
+            }
             state.updated_at_utc = now_utc();
             write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
             let task = state.tasks[task_index].clone();
-            append_task_timeline_event(repo_root, &task, &agent_id, "release", None)?;
+            append_task_timeline_event(
+                repo_root,
+                &task,
+                &agent_id,
+                if matches!(release_state, TaskReleaseStateArg::Blocked) {
+                    "block"
+                } else {
+                    "release"
+                },
+                None,
+            )?;
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&state.tasks[task_index])?
                 );
             } else {
-                println!("[fugit-task] released {}", state.tasks[task_index].task_id);
+                println!(
+                    "[fugit-task] state={} task_id={}",
+                    if matches!(release_state, TaskReleaseStateArg::Blocked) {
+                        "blocked"
+                    } else {
+                        "released"
+                    },
+                    state.tasks[task_index].task_id
+                );
+            }
+        }
+        TaskAction::Cancel {
+            task_id,
+            task_id_arg,
+            agent,
+            reason,
+            json,
+        } => {
+            let agent_id = normalize_agent_id(agent);
+            let task_id = resolve_required_task_id(task_id, task_id_arg, "task cancel")?;
+            let task = cancel_task_in_state(&mut state, &task_id, &agent_id, reason)?;
+            write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+            append_task_timeline_event(repo_root, &task, &agent_id, "cancel", None)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&task_to_json_payload(
+                        &task,
+                        &task_status_map(&state)
+                    ))?
+                );
+            } else {
+                println!("[fugit-task] canceled {} by {}", task.task_id, agent_id);
+            }
+        }
+        TaskAction::Heartbeat {
+            task_id,
+            task_id_arg,
+            agent,
+            claim_ttl_minutes,
+            note,
+            artifacts,
+            json,
+        } => {
+            let agent_id = normalize_agent_id(agent);
+            let task_id = resolve_required_task_id(task_id, task_id_arg, "task heartbeat")?;
+            let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id)
+            else {
+                bail!("task not found: {}", task_id);
+            };
+            if state.tasks[task_index].status != TaskStatus::Claimed
+                || state.tasks[task_index].claimed_by_agent_id.as_deref() != Some(agent_id.as_str())
+            {
+                bail!(
+                    "task {} is not actively claimed by {}; cannot heartbeat",
+                    state.tasks[task_index].task_id,
+                    agent_id
+                );
+            }
+            extend_task_claim(&mut state.tasks[task_index], claim_ttl_minutes, Utc::now());
+            if let Some(note) = note {
+                let _ = add_task_progress_entry(&mut state, &task_id, &agent_id, note)?;
+            }
+            if !artifacts.is_empty() {
+                let _ = add_task_artifact_entries(&mut state, &task_id, &agent_id, artifacts)?;
+            }
+            state.updated_at_utc = now_utc();
+            write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+            let task = state.tasks[task_index].clone();
+            append_task_timeline_event(repo_root, &task, &agent_id, "heartbeat", None)?;
+            let payload = task_to_json_payload(&task, &task_status_map(&state));
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!(
+                    "[fugit-task] heartbeat task_id={} ttl_remaining={} progress_count={} artifact_count={}",
+                    payload["task_id"].as_str().unwrap_or("unknown"),
+                    payload["claim_ttl_remaining_seconds"]
+                        .as_i64()
+                        .unwrap_or(-1),
+                    payload["progress_count"].as_u64().unwrap_or(0),
+                    payload["artifact_count"].as_u64().unwrap_or(0)
+                );
             }
         }
         TaskAction::Gui {
@@ -7383,6 +7712,7 @@ fn task_gui_edit_task(
             priority: request.priority,
             tags: request.tags.map(dedupe_keep_order),
             depends_on: request.depends_on.map(dedupe_keep_order),
+            blocked: TaskTextPatch::Keep,
         },
     )?;
     write_pretty_json(&timeline_tasks_path(&selected_repo), &state)?;
@@ -9139,6 +9469,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "repair": { "type": "string", "enum": ["auto", "strict", "lossy"] },
                     "repair_missing_blobs": { "type": "boolean" },
                     "allow_baseline_reseed": { "type": "boolean" },
+                    "preflight": { "type": "boolean" },
                     "hash_jobs": { "type": "integer", "minimum": 1 },
                     "object_jobs": { "type": "integer", "minimum": 1 },
                     "burst": { "type": "boolean" }
@@ -9254,7 +9585,9 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "tags": { "type": "array", "items": { "type": "string" } },
                     "clear_tags": { "type": "boolean" },
                     "depends_on": { "type": "array", "items": { "type": "string" } },
-                    "clear_depends_on": { "type": "boolean" }
+                    "clear_depends_on": { "type": "boolean" },
+                    "blocked_reason": { "type": "string" },
+                    "clear_blocked": { "type": "boolean" }
                 }
             }
         }),
@@ -9365,6 +9698,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "contains": { "type": "string" },
                     "title_contains": { "type": "string" },
                     "max": { "type": "integer", "minimum": 1 },
+                    "max_new_claims": { "type": "integer", "minimum": 0 },
                     "claim_ttl_minutes": { "type": "integer" },
                     "steal_after_minutes": { "type": "integer" },
                     "no_steal": { "type": "boolean" },
@@ -9418,6 +9752,8 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                 "properties": {
                     "task_id": { "type": "string" },
                     "agent": { "type": "string" },
+                    "reason": { "type": "string" },
+                    "state": { "type": "string", "enum": ["done", "blocked"] },
                     "summary": { "type": "string" },
                     "notes": { "type": "array", "items": { "type": "string" } },
                     "artifacts": { "type": "array", "items": { "type": "string" } },
@@ -9476,7 +9812,37 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                 "required": ["task_id"],
                 "properties": {
                     "task_id": { "type": "string" },
-                    "agent": { "type": "string" }
+                    "agent": { "type": "string" },
+                    "reason": { "type": "string" },
+                    "state": { "type": "string", "enum": ["open", "blocked"] }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_task_cancel",
+            "description": "Cancel a task with a reason and keep the cancellation on task history.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["task_id", "reason"],
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "agent": { "type": "string" },
+                    "reason": { "type": "string" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_task_heartbeat",
+            "description": "Extend a claimed task lease and optionally append a note or artifacts in one call.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["task_id"],
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "agent": { "type": "string" },
+                    "claim_ttl_minutes": { "type": "integer" },
+                    "note": { "type": "string" },
+                    "artifacts": { "type": "array", "items": { "type": "string" } }
                 }
             }
         }),
@@ -9871,6 +10237,13 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             {
                 cli_args.push("--allow-baseline-reseed".to_string());
             }
+            if args
+                .get("preflight")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--preflight".to_string());
+            }
             if let Some(hash_jobs) = args.get("hash_jobs").and_then(serde_json::Value::as_u64) {
                 cli_args.push("--hash-jobs".to_string());
                 cli_args.push(hash_jobs.to_string());
@@ -10115,6 +10488,20 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 .unwrap_or(false)
             {
                 cli_args.push("--clear-depends-on".to_string());
+            }
+            if let Some(blocked_reason) = args
+                .get("blocked_reason")
+                .and_then(serde_json::Value::as_str)
+            {
+                cli_args.push("--blocked-reason".to_string());
+                cli_args.push(blocked_reason.to_string());
+            }
+            if args
+                .get("clear_blocked")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--clear-blocked".to_string());
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
@@ -10509,6 +10896,13 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 cli_args.push("--max".to_string());
                 cli_args.push(max.to_string());
             }
+            if let Some(max_new_claims) = args
+                .get("max_new_claims")
+                .and_then(serde_json::Value::as_u64)
+            {
+                cli_args.push("--max-new-claims".to_string());
+                cli_args.push(max_new_claims.to_string());
+            }
             if let Some(ttl) = args
                 .get("claim_ttl_minutes")
                 .and_then(serde_json::Value::as_i64)
@@ -10607,6 +11001,14 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
                 cli_args.push("--agent".to_string());
                 cli_args.push(agent.to_string());
+            }
+            if let Some(reason) = args.get("reason").and_then(serde_json::Value::as_str) {
+                cli_args.push("--reason".to_string());
+                cli_args.push(reason.to_string());
+            }
+            if let Some(state) = args.get("state").and_then(serde_json::Value::as_str) {
+                cli_args.push("--state".to_string());
+                cli_args.push(state.to_string());
             }
             if let Some(summary) = args.get("summary").and_then(serde_json::Value::as_str) {
                 cli_args.push("--summary".to_string());
@@ -10763,6 +11165,75 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
                 cli_args.push("--agent".to_string());
                 cli_args.push(agent.to_string());
+            }
+            if let Some(reason) = args.get("reason").and_then(serde_json::Value::as_str) {
+                cli_args.push("--reason".to_string());
+                cli_args.push(reason.to_string());
+            }
+            if let Some(state) = args.get("state").and_then(serde_json::Value::as_str) {
+                cli_args.push("--state".to_string());
+                cli_args.push(state.to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_task_cancel" => {
+            let task_id = args
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_task_cancel requires task_id"))?;
+            let reason = args
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_task_cancel requires reason"))?;
+            let mut cli_args = vec![
+                "task".to_string(),
+                "cancel".to_string(),
+                "--task-id".to_string(),
+                task_id.to_string(),
+                "--reason".to_string(),
+                reason.to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_task_heartbeat" => {
+            let task_id = args
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_task_heartbeat requires task_id"))?;
+            let mut cli_args = vec![
+                "task".to_string(),
+                "heartbeat".to_string(),
+                "--task-id".to_string(),
+                task_id.to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            if let Some(ttl) = args
+                .get("claim_ttl_minutes")
+                .and_then(serde_json::Value::as_i64)
+            {
+                cli_args.push("--claim-ttl-minutes".to_string());
+                cli_args.push(ttl.to_string());
+            }
+            if let Some(note) = args.get("note").and_then(serde_json::Value::as_str) {
+                cli_args.push("--note".to_string());
+                cli_args.push(note.to_string());
+            }
+            if let Some(artifacts) = args.get("artifacts").and_then(serde_json::Value::as_array) {
+                for artifact in artifacts {
+                    if let Some(artifact_value) = artifact.as_str() {
+                        cli_args.push("--artifact".to_string());
+                        cli_args.push(artifact_value.to_string());
+                    }
+                }
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
@@ -13753,6 +14224,12 @@ fn sync_advisor_generated_tasks(
                 awaiting_confirmation: false,
                 approved_at_utc: None,
                 approved_by_agent_id: None,
+                blocked_at_utc: None,
+                blocked_by_agent_id: None,
+                blocked_reason: None,
+                canceled_at_utc: None,
+                canceled_by_agent_id: None,
+                canceled_reason: None,
             },
             &agent_id,
             "remove",
@@ -14932,6 +15409,97 @@ fn normalize_string_list(values: Vec<String>) -> Vec<String> {
     dedupe_keep_order(values)
 }
 
+fn task_is_manually_blocked(task: &FugitTask) -> bool {
+    task.blocked_reason
+        .as_deref()
+        .map(|reason| !reason.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn task_claim_ttl_remaining_seconds(task: &FugitTask, now: DateTime<Utc>) -> Option<i64> {
+    let expires_at = task
+        .claim_expires_at_utc
+        .as_deref()
+        .and_then(parse_rfc3339_utc)?;
+    let remaining = expires_at.signed_duration_since(now).num_seconds();
+    Some(remaining.max(0))
+}
+
+fn task_lifecycle_state(task: &FugitTask) -> &'static str {
+    if task.canceled_at_utc.is_some() {
+        "canceled"
+    } else if task_is_manually_blocked(task) && task.status != TaskStatus::Claimed {
+        "blocked"
+    } else {
+        match task.status {
+            TaskStatus::Open => "open",
+            TaskStatus::Claimed => "claimed",
+            TaskStatus::Done => "done",
+        }
+    }
+}
+
+fn clear_task_blocked_state(task: &mut FugitTask) {
+    task.blocked_at_utc = None;
+    task.blocked_by_agent_id = None;
+    task.blocked_reason = None;
+}
+
+fn clear_task_canceled_state(task: &mut FugitTask) {
+    task.canceled_at_utc = None;
+    task.canceled_by_agent_id = None;
+    task.canceled_reason = None;
+}
+
+fn set_task_blocked_state(task: &mut FugitTask, agent_id: &str, reason: &str) {
+    let now = now_utc();
+    task.status = TaskStatus::Open;
+    task.updated_at_utc = now.clone();
+    task.claimed_by_agent_id = None;
+    task.claim_started_at_utc = None;
+    task.claim_expires_at_utc = None;
+    task.completed_at_utc = None;
+    task.completed_by_agent_id = None;
+    task.completed_summary = None;
+    task.completion_notes.clear();
+    task.completion_artifacts.clear();
+    task.completion_commands.clear();
+    clear_task_canceled_state(task);
+    task.blocked_at_utc = Some(now);
+    task.blocked_by_agent_id = Some(agent_id.to_string());
+    task.blocked_reason = Some(reason.to_string());
+}
+
+fn append_transition_reason_note(
+    state: &mut TaskState,
+    task_id: &str,
+    agent_id: &str,
+    prefix: &str,
+    reason: Option<&str>,
+) -> Result<()> {
+    let Some(reason) = reason else {
+        return Ok(());
+    };
+    let note = normalize_required_text(format!("{}: {}", prefix, reason), "transition reason")?;
+    let _ = add_task_progress_entry(state, task_id, agent_id, note)?;
+    Ok(())
+}
+
+fn agent_owned_claim_indices(state: &TaskState, agent_id: &str) -> Vec<usize> {
+    let mut indices = state
+        .tasks
+        .iter()
+        .enumerate()
+        .filter(|(_, task)| {
+            task.status == TaskStatus::Claimed
+                && task.claimed_by_agent_id.as_deref() == Some(agent_id)
+        })
+        .map(|(idx, _)| idx)
+        .collect::<Vec<_>>();
+    sort_task_indices(state, &mut indices);
+    indices
+}
+
 fn normalize_agent_id(agent: Option<String>) -> String {
     agent
         .and_then(|value| {
@@ -15073,6 +15641,12 @@ fn build_manual_task(
         awaiting_confirmation: false,
         approved_at_utc: None,
         approved_by_agent_id: None,
+        blocked_at_utc: None,
+        blocked_by_agent_id: None,
+        blocked_reason: None,
+        canceled_at_utc: None,
+        canceled_by_agent_id: None,
+        canceled_reason: None,
     })
 }
 
@@ -15144,6 +15718,33 @@ fn edit_task_in_state(
     {
         state.tasks[task_index].depends_on = depends_on;
         changed = true;
+    }
+
+    match patch.blocked {
+        TaskTextPatch::Keep => {}
+        TaskTextPatch::Clear => {
+            if task_is_manually_blocked(&state.tasks[task_index]) {
+                clear_task_blocked_state(&mut state.tasks[task_index]);
+                changed = true;
+            }
+        }
+        TaskTextPatch::Set(value) => {
+            let normalized = normalize_required_text(value, "blocked reason")?;
+            let mut next_changed = false;
+            if state.tasks[task_index].blocked_reason.as_deref() != Some(normalized.as_str()) {
+                state.tasks[task_index].blocked_reason = Some(normalized);
+                next_changed = true;
+            }
+            if state.tasks[task_index].blocked_by_agent_id.as_deref() != Some(agent_id) {
+                state.tasks[task_index].blocked_by_agent_id = Some(agent_id.to_string());
+                next_changed = true;
+            }
+            if state.tasks[task_index].blocked_at_utc.is_none() || next_changed {
+                state.tasks[task_index].blocked_at_utc = Some(now_utc());
+                next_changed = true;
+            }
+            changed = changed || next_changed;
+        }
     }
 
     if !changed {
@@ -15220,7 +15821,58 @@ fn reopen_task_in_state(state: &mut TaskState, task_id: &str, agent_id: &str) ->
     state.tasks[task_index].completion_notes = Vec::new();
     state.tasks[task_index].completion_artifacts = Vec::new();
     state.tasks[task_index].completion_commands = Vec::new();
+    clear_task_blocked_state(&mut state.tasks[task_index]);
+    clear_task_canceled_state(&mut state.tasks[task_index]);
     state.updated_at_utc = now;
+    Ok(state.tasks[task_index].clone())
+}
+
+fn cancel_task_in_state(
+    state: &mut TaskState,
+    task_id: &str,
+    agent_id: &str,
+    reason: String,
+) -> Result<FugitTask> {
+    let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id) else {
+        bail!("task not found: {}", task_id);
+    };
+    if let Some(owner) = state.tasks[task_index].claimed_by_agent_id.as_deref()
+        && owner != agent_id
+    {
+        bail!(
+            "task {} is claimed by {}; cannot cancel as {}",
+            state.tasks[task_index].task_id,
+            owner,
+            agent_id
+        );
+    }
+    if state.tasks[task_index].status == TaskStatus::Done {
+        if state.tasks[task_index].canceled_at_utc.is_some() {
+            bail!("task already canceled: {}", state.tasks[task_index].task_id);
+        }
+        bail!(
+            "task already completed: {}",
+            state.tasks[task_index].task_id
+        );
+    }
+    let normalized_reason = normalize_required_text(reason, "cancel reason")?;
+    let now = now_utc();
+    state.tasks[task_index].status = TaskStatus::Done;
+    state.tasks[task_index].updated_at_utc = now.clone();
+    state.tasks[task_index].claimed_by_agent_id = None;
+    state.tasks[task_index].claim_started_at_utc = None;
+    state.tasks[task_index].claim_expires_at_utc = None;
+    state.tasks[task_index].completed_at_utc = Some(now.clone());
+    state.tasks[task_index].completed_by_agent_id = Some(agent_id.to_string());
+    state.tasks[task_index].completed_summary = Some(format!("Canceled: {}", normalized_reason));
+    state.tasks[task_index].completion_notes = vec![format!("canceled: {}", normalized_reason)];
+    state.tasks[task_index].completion_artifacts.clear();
+    state.tasks[task_index].completion_commands.clear();
+    clear_task_blocked_state(&mut state.tasks[task_index]);
+    state.tasks[task_index].canceled_at_utc = Some(now);
+    state.tasks[task_index].canceled_by_agent_id = Some(agent_id.to_string());
+    state.tasks[task_index].canceled_reason = Some(normalized_reason);
+    state.updated_at_utc = now_utc();
     Ok(state.tasks[task_index].clone())
 }
 
@@ -15589,6 +16241,7 @@ fn task_is_ready_for_dispatch_at(
 ) -> bool {
     task.status != TaskStatus::Done
         && !task.awaiting_confirmation
+        && !task_is_manually_blocked(task)
         && task_blocked_by(task, status_map).is_empty()
         && task_schedule_state(task, today) == TaskScheduleState::Ready
 }
@@ -15603,6 +16256,7 @@ fn task_is_dispatchable_without_date_gate(
 ) -> bool {
     task.status != TaskStatus::Done
         && !task.awaiting_confirmation
+        && !task_is_manually_blocked(task)
         && task_blocked_by(task, status_map).is_empty()
 }
 
@@ -15675,6 +16329,12 @@ fn build_auto_replenish_task(agent_id: &str, require_confirmation: bool) -> Fugi
         awaiting_confirmation: require_confirmation,
         approved_at_utc: None,
         approved_by_agent_id: None,
+       blocked_at_utc: None,
+       blocked_by_agent_id: None,
+       blocked_reason: None,
+       canceled_at_utc: None,
+       canceled_by_agent_id: None,
+       canceled_reason: None,
     }
 }
 
@@ -15985,10 +16645,17 @@ fn task_to_json_payload(
     task: &FugitTask,
     status_map: &BTreeMap<String, TaskStatus>,
 ) -> serde_json::Value {
+    let now = Utc::now();
     let today = Utc::now().date_naive();
     let date_window = task_date_window(task);
     let schedule_state = task_schedule_state(task, today);
     let mut blocked_by = task_blocked_by(task, status_map);
+    if task_is_manually_blocked(task) {
+        blocked_by.push(format!(
+            "blocked:{}",
+            task.blocked_reason.as_deref().unwrap_or("manual")
+        ));
+    }
     if task.awaiting_confirmation {
         blocked_by.push("confirmation".to_string());
     }
@@ -16019,12 +16686,20 @@ fn task_to_json_payload(
         "completion_artifacts": task.completion_artifacts,
         "completion_commands": task.completion_commands,
         "claim_expires_at_utc": task.claim_expires_at_utc,
+        "claim_ttl_remaining_seconds": task_claim_ttl_remaining_seconds(task, now),
         "source_key": task.source_key,
         "source_plan": task.source_plan,
+        "lifecycle_state": task_lifecycle_state(task),
         "auto_replenish": task_is_auto_replenish(task),
         "awaiting_confirmation": task.awaiting_confirmation,
         "approved_at_utc": task.approved_at_utc,
         "approved_by_agent_id": task.approved_by_agent_id,
+        "blocked_at_utc": task.blocked_at_utc,
+        "blocked_by_agent_id": task.blocked_by_agent_id,
+        "blocked_reason": task.blocked_reason,
+        "canceled_at_utc": task.canceled_at_utc,
+        "canceled_by_agent_id": task.canceled_by_agent_id,
+        "canceled_reason": task.canceled_reason,
         "progress_entries": task.progress_entries,
         "progress_count": task.progress_entries.len(),
         "last_progress_note": task.progress_entries.last().map(|entry| entry.note.clone()),
@@ -16193,6 +16868,7 @@ fn task_status_summary_payload(
         .iter()
         .filter(|task| {
             task.status == TaskStatus::Open
+                && !task_is_manually_blocked(task)
                 && !task.awaiting_confirmation
                 && task_blocked_by(task, &status_map).is_empty()
                 && matches!(
@@ -16206,7 +16882,8 @@ fn task_status_summary_payload(
         .iter()
         .filter(|task| {
             task.status == TaskStatus::Open
-                && (!task_blocked_by(task, &status_map).is_empty()
+                && (task_is_manually_blocked(task)
+                    || !task_blocked_by(task, &status_map).is_empty()
                     || task.awaiting_confirmation
                     || matches!(
                         task_schedule_state(task, today),
@@ -16265,17 +16942,7 @@ fn task_status_summary_payload(
 
 fn task_current_payload(state: &TaskState, agent_id: &str) -> serde_json::Value {
     let status_map = task_status_map(state);
-    let mut indices = state
-        .tasks
-        .iter()
-        .enumerate()
-        .filter(|(_, task)| {
-            task.status == TaskStatus::Claimed
-                && task.claimed_by_agent_id.as_deref() == Some(agent_id)
-        })
-        .map(|(idx, _)| idx)
-        .collect::<Vec<_>>();
-    sort_task_indices(state, &mut indices);
+    let indices = agent_owned_claim_indices(state, agent_id);
     let rows = indices
         .iter()
         .map(|idx| task_to_json_payload(&state.tasks[*idx], &status_map))
@@ -16324,6 +16991,12 @@ fn execute_task_request(
         .requested_task_id
         .as_deref()
         .and_then(|task_id| state.tasks.iter().position(|task| task.task_id == task_id));
+    let owned_claim_indices = if options.requested_task_id.is_none() {
+        agent_owned_claim_indices(state, &options.agent_id)
+    } else {
+        Vec::new()
+    };
+    let has_owned_claims = !owned_claim_indices.is_empty();
     let mut candidates = if let Some(task_id) = options.requested_task_id.as_deref() {
         select_specific_task_candidate(
             state,
@@ -16337,12 +17010,14 @@ fn execute_task_request(
         .into_iter()
         .collect::<Vec<_>>()
     } else {
+        let include_owned_claims =
+            !options.skip_owned && !(has_owned_claims && options.max_new_claims > 0);
         select_task_candidates_for_agent(
             state,
             &options.agent_id,
             &options.filters,
             options.allow_steal,
-            !options.skip_owned,
+            include_owned_claims,
             options.respect_date_gates,
             options.steal_after_minutes,
             now,
@@ -16373,6 +17048,17 @@ fn execute_task_request(
             now,
             max,
         );
+    }
+    if candidates.is_empty()
+        && options.requested_task_id.is_none()
+        && !options.skip_owned
+        && has_owned_claims
+    {
+        candidates = owned_claim_indices
+            .iter()
+            .take(max)
+            .map(|idx| (*idx, TaskDispatchKind::OwnedClaim))
+            .collect();
     }
 
     let mut timeline_events = Vec::<(String, String, String, Option<TaskDispatchKind>)>::new();
@@ -16453,7 +17139,9 @@ fn execute_task_request(
             "assigned_count": 0,
             "claimed": false,
             "max": max,
+            "max_new_claims": options.max_new_claims,
             "requested_task_id": options.requested_task_id.clone(),
+            "owned_claim_count": owned_claim_indices.len(),
             "skip_owned": options.skip_owned,
             "selection_reason": selection_reason,
             "request_reason": request_reason_value,
@@ -16483,7 +17171,7 @@ fn execute_task_request(
     };
 
     let mut claimed = false;
-    if !options.no_claim {
+    if !options.no_claim && !matches!(dispatch_kind, TaskDispatchKind::OwnedClaim) {
         apply_task_claim(
             &mut state.tasks[task_index],
             &options.agent_id,
@@ -16530,7 +17218,9 @@ fn execute_task_request(
         "assigned_count": task_rows.len(),
         "claimed": claimed,
         "max": max,
+        "max_new_claims": options.max_new_claims,
         "requested_task_id": options.requested_task_id.clone(),
+        "owned_claim_count": owned_claim_indices.len(),
         "skip_owned": options.skip_owned,
         "dispatch_kind": dispatch_kind.as_str(),
         "selection_reason": task_request_selection_reason(
@@ -17169,6 +17859,12 @@ fn sync_plan_into_task_state(
                     awaiting_confirmation: false,
                     approved_at_utc: None,
                     approved_by_agent_id: None,
+                    blocked_at_utc: None,
+                    blocked_by_agent_id: None,
+                    blocked_reason: None,
+                    canceled_at_utc: None,
+                    canceled_by_agent_id: None,
+                    canceled_reason: None,
                 };
                 key_to_task_id.insert(row.key.clone(), task.task_id.clone());
                 expected_task_ids.insert(task.task_id.clone());
@@ -18070,6 +18766,9 @@ fn specific_task_unavailable_reason(
     if task.awaiting_confirmation {
         return "awaiting_confirmation".to_string();
     }
+    if task_is_manually_blocked(task) {
+        return "blocked".to_string();
+    }
     if !task_blocked_by(task, &status_map).is_empty() {
         return "blocked_by_dependencies".to_string();
     }
@@ -18200,6 +18899,8 @@ fn apply_task_claim(
     task.completion_notes.clear();
     task.completion_artifacts.clear();
     task.completion_commands.clear();
+    clear_task_blocked_state(task);
+    clear_task_canceled_state(task);
 }
 
 fn extend_task_claim(task: &mut FugitTask, claim_ttl_minutes: i64, now: DateTime<Utc>) {
@@ -18852,6 +19553,12 @@ mod tests {
             awaiting_confirmation: false,
             approved_at_utc: None,
             approved_by_agent_id: None,
+            blocked_at_utc: None,
+            blocked_by_agent_id: None,
+            blocked_reason: None,
+            canceled_at_utc: None,
+            canceled_by_agent_id: None,
+            canceled_reason: None,
         }
     }
 
@@ -18975,6 +19682,12 @@ mod tests {
                     awaiting_confirmation: false,
                     approved_at_utc: None,
                     approved_by_agent_id: None,
+                    blocked_at_utc: None,
+                    blocked_by_agent_id: None,
+                    blocked_reason: None,
+                    canceled_at_utc: None,
+                    canceled_by_agent_id: None,
+                    canceled_reason: None,
                 },
                 FugitTask {
                     task_id: "task_child".to_string(),
@@ -19003,6 +19716,12 @@ mod tests {
                     awaiting_confirmation: false,
                     approved_at_utc: None,
                     approved_by_agent_id: None,
+                    blocked_at_utc: None,
+                    blocked_by_agent_id: None,
+                    blocked_reason: None,
+                    canceled_at_utc: None,
+                    canceled_by_agent_id: None,
+                    canceled_reason: None,
                 },
             ],
         };
@@ -19051,6 +19770,12 @@ mod tests {
                     awaiting_confirmation: false,
                     approved_at_utc: None,
                     approved_by_agent_id: None,
+                    blocked_at_utc: None,
+                    blocked_by_agent_id: None,
+                    blocked_reason: None,
+                    canceled_at_utc: None,
+                    canceled_by_agent_id: None,
+                    canceled_reason: None,
                 },
                 FugitTask {
                     task_id: "task_simple".to_string(),
@@ -19079,6 +19804,12 @@ mod tests {
                     awaiting_confirmation: false,
                     approved_at_utc: None,
                     approved_by_agent_id: None,
+                    blocked_at_utc: None,
+                    blocked_by_agent_id: None,
+                    blocked_reason: None,
+                    canceled_at_utc: None,
+                    canceled_by_agent_id: None,
+                    canceled_reason: None,
                 },
                 FugitTask {
                     task_id: "task_priority_ready".to_string(),
@@ -19107,6 +19838,12 @@ mod tests {
                     awaiting_confirmation: false,
                     approved_at_utc: None,
                     approved_by_agent_id: None,
+                    blocked_at_utc: None,
+                    blocked_by_agent_id: None,
+                    blocked_reason: None,
+                    canceled_at_utc: None,
+                    canceled_by_agent_id: None,
+                    canceled_reason: None,
                 },
                 FugitTask {
                     task_id: "task_blocked".to_string(),
@@ -19135,6 +19872,12 @@ mod tests {
                     awaiting_confirmation: false,
                     approved_at_utc: None,
                     approved_by_agent_id: None,
+                    blocked_at_utc: None,
+                    blocked_by_agent_id: None,
+                    blocked_reason: None,
+                    canceled_at_utc: None,
+                    canceled_by_agent_id: None,
+                    canceled_reason: None,
                 },
             ],
         };
@@ -19190,6 +19933,12 @@ mod tests {
                 awaiting_confirmation: false,
                 approved_at_utc: None,
                 approved_by_agent_id: None,
+                blocked_at_utc: None,
+                blocked_by_agent_id: None,
+                blocked_reason: None,
+                canceled_at_utc: None,
+                canceled_by_agent_id: None,
+                canceled_reason: None,
             }],
         };
 
@@ -19254,6 +20003,12 @@ mod tests {
                     awaiting_confirmation: false,
                     approved_at_utc: None,
                     approved_by_agent_id: None,
+                    blocked_at_utc: None,
+                    blocked_by_agent_id: None,
+                    blocked_reason: None,
+                    canceled_at_utc: None,
+                    canceled_by_agent_id: None,
+                    canceled_reason: None,
                 },
                 FugitTask {
                     task_id: "task_open".to_string(),
@@ -19282,6 +20037,12 @@ mod tests {
                     awaiting_confirmation: false,
                     approved_at_utc: None,
                     approved_by_agent_id: None,
+                    blocked_at_utc: None,
+                    blocked_by_agent_id: None,
+                    blocked_reason: None,
+                    canceled_at_utc: None,
+                    canceled_by_agent_id: None,
+                    canceled_reason: None,
                 },
             ],
         };
@@ -19487,6 +20248,12 @@ mod tests {
                 awaiting_confirmation: false,
                 approved_at_utc: None,
                 approved_by_agent_id: None,
+                blocked_at_utc: None,
+                blocked_by_agent_id: None,
+                blocked_reason: None,
+                canceled_at_utc: None,
+                canceled_by_agent_id: None,
+                canceled_reason: None,
             }],
         };
 
@@ -19502,6 +20269,186 @@ mod tests {
         .expect("expected owned targeted task");
         assert_eq!(selected.1, TaskDispatchKind::OwnedClaim);
         assert_eq!(state.tasks[selected.0].task_id, "task_owned");
+    }
+
+    #[test]
+    fn execute_task_request_keeps_owned_claim_ttl_unchanged() {
+        let repo = TestRepo::new("owned-claim-ttl");
+        cmd_init(
+            repo.path(),
+            InitArgs {
+                branch: "trunk".to_string(),
+                bridge_branch: None,
+                bridge_remote: "origin".to_string(),
+            },
+        )
+        .expect("init timeline");
+
+        let expires_at = "2026-03-09T11:33:11Z".to_string();
+        let state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![FugitTask {
+                task_id: "task_owned".to_string(),
+                title: "owned".to_string(),
+                detail: None,
+                priority: 5,
+                tags: vec![],
+                depends_on: vec![],
+                status: TaskStatus::Claimed,
+                created_at_utc: "2026-03-01T00:00:00Z".to_string(),
+                updated_at_utc: now_utc(),
+                created_by_agent_id: "agent.seed".to_string(),
+                claimed_by_agent_id: Some("agent.worker".to_string()),
+                claim_started_at_utc: Some("2026-03-09T10:33:11Z".to_string()),
+                claim_expires_at_utc: Some(expires_at.clone()),
+                completed_at_utc: None,
+                completed_by_agent_id: None,
+                completed_summary: None,
+                completion_notes: Vec::new(),
+                completion_artifacts: Vec::new(),
+                completion_commands: Vec::new(),
+                progress_entries: Vec::new(),
+                artifact_entries: Vec::new(),
+                source_key: None,
+                source_plan: None,
+                awaiting_confirmation: false,
+                approved_at_utc: None,
+                approved_by_agent_id: None,
+                blocked_at_utc: None,
+                blocked_by_agent_id: None,
+                blocked_reason: None,
+                canceled_at_utc: None,
+                canceled_by_agent_id: None,
+                canceled_reason: None,
+            }],
+        };
+        write_pretty_json(&timeline_tasks_path(repo.path()), &state).expect("write task state");
+
+        let mut state = load_task_state(repo.path()).expect("load task state");
+        let payload = execute_task_request(
+            repo.path(),
+            &mut state,
+            false,
+            &TaskRequestExecutionOptions {
+                agent_id: "agent.worker".to_string(),
+                requested_task_id: None,
+                filters: TaskQueryFilter::default(),
+                max: 1,
+                max_new_claims: 0,
+                claim_ttl_minutes: 30,
+                steal_after_minutes: 90,
+                allow_steal: true,
+                skip_owned: false,
+                respect_date_gates: true,
+                no_claim: false,
+            },
+        )
+        .expect("request succeeds");
+
+        assert_eq!(
+            payload["dispatch_kind"],
+            serde_json::Value::from("owned_claim")
+        );
+        assert_eq!(payload["claimed"], serde_json::Value::Bool(false));
+        assert_eq!(
+            state.tasks[0].claim_expires_at_utc.as_deref(),
+            Some(expires_at.as_str())
+        );
+    }
+
+    #[test]
+    fn execute_task_request_can_claim_new_task_when_explicitly_allowed() {
+        let repo = TestRepo::new("max-new-claims");
+        cmd_init(
+            repo.path(),
+            InitArgs {
+                branch: "trunk".to_string(),
+                bridge_branch: None,
+                bridge_remote: "origin".to_string(),
+            },
+        )
+        .expect("init timeline");
+
+        let state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![
+                FugitTask {
+                    task_id: "task_owned".to_string(),
+                    title: "owned".to_string(),
+                    detail: None,
+                    priority: 100,
+                    tags: vec![],
+                    depends_on: vec![],
+                    status: TaskStatus::Claimed,
+                    created_at_utc: "2026-03-01T00:00:00Z".to_string(),
+                    updated_at_utc: now_utc(),
+                    created_by_agent_id: "agent.seed".to_string(),
+                    claimed_by_agent_id: Some("agent.worker".to_string()),
+                    claim_started_at_utc: Some("2026-03-09T10:33:11Z".to_string()),
+                    claim_expires_at_utc: Some("2026-03-09T11:33:11Z".to_string()),
+                    completed_at_utc: None,
+                    completed_by_agent_id: None,
+                    completed_summary: None,
+                    completion_notes: Vec::new(),
+                    completion_artifacts: Vec::new(),
+                    completion_commands: Vec::new(),
+                    progress_entries: Vec::new(),
+                    artifact_entries: Vec::new(),
+                    source_key: None,
+                    source_plan: None,
+                    awaiting_confirmation: false,
+                    approved_at_utc: None,
+                    approved_by_agent_id: None,
+                    blocked_at_utc: None,
+                    blocked_by_agent_id: None,
+                    blocked_reason: None,
+                    canceled_at_utc: None,
+                    canceled_by_agent_id: None,
+                    canceled_reason: None,
+                },
+                sample_task("task_open", "open", 5, TaskStatus::Open),
+            ],
+        };
+        write_pretty_json(&timeline_tasks_path(repo.path()), &state).expect("write task state");
+
+        let mut state = load_task_state(repo.path()).expect("load task state");
+        let payload = execute_task_request(
+            repo.path(),
+            &mut state,
+            false,
+            &TaskRequestExecutionOptions {
+                agent_id: "agent.worker".to_string(),
+                requested_task_id: None,
+                filters: TaskQueryFilter::default(),
+                max: 1,
+                max_new_claims: 1,
+                claim_ttl_minutes: 45,
+                steal_after_minutes: 90,
+                allow_steal: true,
+                skip_owned: false,
+                respect_date_gates: true,
+                no_claim: false,
+            },
+        )
+        .expect("request succeeds");
+
+        assert_eq!(
+            payload["task"]["task_id"],
+            serde_json::Value::from("task_open")
+        );
+        assert_eq!(payload["claimed"], serde_json::Value::Bool(true));
+        assert_eq!(payload["owned_claim_count"], serde_json::Value::from(1_u64));
+        let claimed_open = state
+            .tasks
+            .iter()
+            .find(|task| task.task_id == "task_open")
+            .expect("open task");
+        assert_eq!(
+            claimed_open.claimed_by_agent_id.as_deref(),
+            Some("agent.worker")
+        );
     }
 
     #[test]
@@ -19701,6 +20648,55 @@ Prefer evidence-backed tasks.
     }
 
     #[test]
+    fn blocked_tasks_do_not_dispatch_until_cleared() {
+        let mut state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![sample_task("task_blocked", "blocked", 5, TaskStatus::Open)],
+        };
+        state.tasks[0].blocked_at_utc = Some(now_utc());
+        state.tasks[0].blocked_by_agent_id = Some("agent.reviewer".to_string());
+        state.tasks[0].blocked_reason = Some("waiting on API contract".to_string());
+
+        let blocked = select_task_for_agent(
+            &state,
+            "agent.worker",
+            &TaskQueryFilter::default(),
+            true,
+            true,
+            true,
+            90,
+            Utc::now(),
+        );
+        assert!(blocked.is_none());
+
+        let task = edit_task_in_state(
+            &mut state,
+            "task_blocked",
+            "agent.worker",
+            TaskEditPatch {
+                blocked: TaskTextPatch::Clear,
+                ..TaskEditPatch::default()
+            },
+        )
+        .expect("clear blocked");
+        assert!(task.blocked_reason.is_none());
+
+        let selected = select_task_for_agent(
+            &state,
+            "agent.worker",
+            &TaskQueryFilter::default(),
+            true,
+            true,
+            true,
+            90,
+            Utc::now(),
+        )
+        .expect("task dispatches after clear");
+        assert_eq!(state.tasks[selected.0].task_id, "task_blocked");
+    }
+
+    #[test]
     fn task_gui_url_maps_wildcard_host_for_browser() {
         assert_eq!(task_gui_url("0.0.0.0", 7788, None), "http://127.0.0.1:7788");
         assert_eq!(
@@ -19791,6 +20787,7 @@ Prefer evidence-backed tasks.
                 repair_missing_blobs: false,
                 allow_baseline_reseed: false,
                 allow_lossy_repair: false,
+                preflight: false,
                 json: false,
             },
         )
@@ -19839,6 +20836,7 @@ Prefer evidence-backed tasks.
                 repair_missing_blobs: false,
                 allow_baseline_reseed: false,
                 allow_lossy_repair: false,
+                preflight: false,
                 json: false,
             },
         )
@@ -19871,6 +20869,7 @@ Prefer evidence-backed tasks.
                 repair_missing_blobs: false,
                 allow_baseline_reseed: false,
                 allow_lossy_repair: false,
+                preflight: false,
                 json: false,
             },
         )
@@ -19896,6 +20895,7 @@ Prefer evidence-backed tasks.
                 repair_missing_blobs: false,
                 allow_baseline_reseed: false,
                 allow_lossy_repair: true,
+                preflight: false,
                 json: false,
             },
         )
@@ -19908,6 +20908,66 @@ Prefer evidence-backed tasks.
             .hash
             .clone();
         assert_eq!(current_hash, hash_bytes(b"gamma\n"));
+    }
+
+    #[test]
+    fn checkpoint_preflight_reports_missing_old_objects_without_writing_event() {
+        let repo = TestRepo::new("checkpoint-preflight");
+        repo.git(&["init"]);
+        repo.git(&["config", "user.name", "Fugit Test"]);
+        repo.git(&["config", "user.email", "fugit-test@example.com"]);
+        repo.write_file("tracked.txt", "alpha\n");
+        repo.git(&["add", "."]);
+        repo.git(&["commit", "-m", "baseline"]);
+
+        cmd_init(
+            repo.path(),
+            InitArgs {
+                branch: "trunk".to_string(),
+                bridge_branch: None,
+                bridge_remote: "origin".to_string(),
+            },
+        )
+        .expect("init timeline");
+
+        let before_events = fs::read_to_string(timeline_branch_events_path(repo.path(), "trunk"))
+            .expect("read events before");
+        let index = load_branch_index(repo.path(), "trunk").expect("load branch index");
+        let tracked = index.get("tracked.txt").expect("tracked row");
+        let object_path = timeline_objects_dir(repo.path()).join(&tracked.hash);
+        fs::remove_file(&object_path).expect("remove stored object");
+
+        repo.write_file("tracked.txt", "beta\n");
+
+        cmd_checkpoint(
+            repo.path(),
+            CheckpointArgs {
+                summary: "preflight missing object".to_string(),
+                agent: Some("test.agent".to_string()),
+                tags: vec![],
+                files: vec![],
+                strict_hash: true,
+                ignore_locks: false,
+                hash_jobs: None,
+                object_jobs: None,
+                burst: false,
+                repair: CheckpointRepairModeArg::Auto,
+                repair_missing_blobs: false,
+                allow_baseline_reseed: false,
+                allow_lossy_repair: false,
+                preflight: true,
+                json: false,
+            },
+        )
+        .expect("preflight succeeds");
+
+        let after_events = fs::read_to_string(timeline_branch_events_path(repo.path(), "trunk"))
+            .expect("read events after");
+        assert_eq!(before_events, after_events);
+        assert!(
+            !object_path.exists(),
+            "preflight should not repair or reseed"
+        );
     }
 
     #[test]
@@ -20080,6 +21140,12 @@ Prefer evidence-backed tasks.
             awaiting_confirmation: false,
             approved_at_utc: None,
             approved_by_agent_id: None,
+            blocked_at_utc: None,
+            blocked_by_agent_id: None,
+            blocked_reason: None,
+            canceled_at_utc: None,
+            canceled_by_agent_id: None,
+            canceled_reason: None,
         };
 
         let tags = task_timeline_tags("done", &task, Some(TaskDispatchKind::Open));
@@ -20144,6 +21210,12 @@ Prefer evidence-backed tasks.
                     awaiting_confirmation: false,
                     approved_at_utc: None,
                     approved_by_agent_id: None,
+                    blocked_at_utc: None,
+                    blocked_by_agent_id: None,
+                    blocked_reason: None,
+                    canceled_at_utc: None,
+                    canceled_by_agent_id: None,
+                    canceled_reason: None,
                 },
                 FugitTask {
                     task_id: "task_main".to_string(),
@@ -20172,6 +21244,12 @@ Prefer evidence-backed tasks.
                     awaiting_confirmation: false,
                     approved_at_utc: None,
                     approved_by_agent_id: None,
+                    blocked_at_utc: None,
+                    blocked_by_agent_id: None,
+                    blocked_reason: None,
+                    canceled_at_utc: None,
+                    canceled_by_agent_id: None,
+                    canceled_reason: None,
                 },
             ],
         };
@@ -20186,6 +21264,7 @@ Prefer evidence-backed tasks.
                 priority: Some(9),
                 tags: Some(vec!["compiler".to_string(), "gui".to_string()]),
                 depends_on: Some(vec!["task_dep".to_string()]),
+                blocked: TaskTextPatch::Keep,
             },
         )
         .expect("expected edit to succeed");
@@ -20229,6 +21308,12 @@ Prefer evidence-backed tasks.
                     awaiting_confirmation: false,
                     approved_at_utc: None,
                     approved_by_agent_id: None,
+                    blocked_at_utc: None,
+                    blocked_by_agent_id: None,
+                    blocked_reason: None,
+                    canceled_at_utc: None,
+                    canceled_by_agent_id: None,
+                    canceled_reason: None,
                 },
                 FugitTask {
                     task_id: "task_child".to_string(),
@@ -20257,6 +21342,12 @@ Prefer evidence-backed tasks.
                     awaiting_confirmation: false,
                     approved_at_utc: None,
                     approved_by_agent_id: None,
+                    blocked_at_utc: None,
+                    blocked_by_agent_id: None,
+                    blocked_reason: None,
+                    canceled_at_utc: None,
+                    canceled_by_agent_id: None,
+                    canceled_reason: None,
                 },
             ],
         };
@@ -20298,6 +21389,12 @@ Prefer evidence-backed tasks.
                 awaiting_confirmation: false,
                 approved_at_utc: None,
                 approved_by_agent_id: None,
+                blocked_at_utc: None,
+                blocked_by_agent_id: None,
+                blocked_reason: None,
+                canceled_at_utc: None,
+                canceled_by_agent_id: None,
+                canceled_reason: None,
             }],
         };
 
@@ -20345,6 +21442,12 @@ Prefer evidence-backed tasks.
                     awaiting_confirmation: false,
                     approved_at_utc: None,
                     approved_by_agent_id: None,
+                    blocked_at_utc: None,
+                    blocked_by_agent_id: None,
+                    blocked_reason: None,
+                    canceled_at_utc: None,
+                    canceled_by_agent_id: None,
+                    canceled_reason: None,
                 },
                 FugitTask {
                     task_id: "task_a02".to_string(),
@@ -20373,6 +21476,12 @@ Prefer evidence-backed tasks.
                     awaiting_confirmation: false,
                     approved_at_utc: None,
                     approved_by_agent_id: None,
+                    blocked_at_utc: None,
+                    blocked_by_agent_id: None,
+                    blocked_reason: None,
+                    canceled_at_utc: None,
+                    canceled_by_agent_id: None,
+                    canceled_reason: None,
                 },
             ],
         };
