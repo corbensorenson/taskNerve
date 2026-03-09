@@ -257,6 +257,12 @@ By default the refresh is best-effort and does not block the triggering git acti
 export FUGIT_DEV_AUTO_INSTALL_STRICT=1
 ```
 
+The auto-refresh script also has a safety timeout so a bad local build does not wedge git hooks forever. Override it when needed with:
+
+```bash
+export FUGIT_DEV_AUTO_INSTALL_TIMEOUT_SECONDS=300
+```
+
 ## Privacy
 
 - Fugit keeps advisor runtime state, provider outputs, generated plans, and worker status under `.fugit/`, which is ignored by Git by default.

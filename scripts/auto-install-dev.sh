@@ -6,9 +6,37 @@ HOOK_NAME="${1:-manual}"
 STAMP_FILE="$REPO_ROOT/.git/fugit-auto-install.stamp"
 LOCK_DIR="$REPO_ROOT/.git/fugit-auto-install.lock"
 STRICT="${FUGIT_DEV_AUTO_INSTALL_STRICT:-0}"
+TIMEOUT_SECONDS="${FUGIT_DEV_AUTO_INSTALL_TIMEOUT_SECONDS:-180}"
 
 log() {
   printf '[fugit-dev-auto-install] %s\n' "$*" >&2
+}
+
+run_install() {
+  python3 - "$REPO_ROOT" "$TIMEOUT_SECONDS" <<'PY'
+import os
+import subprocess
+import sys
+
+repo_root = sys.argv[1]
+timeout = int(sys.argv[2])
+cmd = [
+    "bash",
+    os.path.join(repo_root, "install.sh"),
+    "--with-skill",
+    "--overwrite-skill",
+    "--no-path-update",
+]
+try:
+    completed = subprocess.run(cmd, cwd=repo_root, timeout=timeout)
+except subprocess.TimeoutExpired:
+    print(
+        f"[fugit-dev-auto-install] warning: local fugit refresh timed out after {timeout}s",
+        file=sys.stderr,
+    )
+    sys.exit(124)
+sys.exit(completed.returncode)
+PY
 }
 
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
@@ -51,7 +79,7 @@ if [[ -f "$STAMP_FILE" ]] && [[ "$(cat "$STAMP_FILE")" == "$CURRENT_STAMP" ]]; t
 fi
 
 log "refreshing local fugit install after ${HOOK_NAME}"
-if bash "$REPO_ROOT/install.sh" --with-skill --overwrite-skill --no-path-update; then
+if run_install; then
   printf '%s\n' "$CURRENT_STAMP" >"$STAMP_FILE"
   ACTIVE_BIN="$(command -v fugit || true)"
   ACTIVE_VERSION="$(fugit --version 2>/dev/null || true)"
@@ -60,7 +88,12 @@ if bash "$REPO_ROOT/install.sh" --with-skill --overwrite-skill --no-path-update;
     log "active version: $ACTIVE_VERSION"
   fi
 else
-  log "warning: local fugit refresh failed"
+  EXIT_CODE="$?"
+  if [[ "$EXIT_CODE" == "124" ]]; then
+    log "warning: local fugit refresh timed out"
+  else
+    log "warning: local fugit refresh failed"
+  fi
   if [[ "$STRICT" == "1" ]]; then
     exit 1
   fi
