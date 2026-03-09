@@ -5294,21 +5294,22 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             }
 
             let Some((task_index, dispatch_kind)) = candidates.first().copied() else {
-                let request_reason_value =
-                    requested_task_id
-                        .as_deref()
-                        .map(|_| match requested_task_index {
-                            None => "task_not_found".to_string(),
-                            Some(task_index) => specific_task_unavailable_reason(
-                                &state,
-                                task_index,
-                                &agent_id,
-                                !no_steal,
-                                respect_date_gates,
-                                steal_after_minutes,
-                                now,
-                            ),
-                        });
+                let request_reason_value = if requested_task_id.is_some() {
+                    Some(match requested_task_index {
+                        None => "task_not_found".to_string(),
+                        Some(task_index) => specific_task_unavailable_reason(
+                            &state,
+                            task_index,
+                            &agent_id,
+                            !no_steal,
+                            respect_date_gates,
+                            steal_after_minutes,
+                            now,
+                        ),
+                    })
+                } else {
+                    None
+                };
                 let date_gate_filtered = respect_date_gates
                     && requested_task_id.is_none()
                     && task_request_has_date_gated_match(
@@ -5323,11 +5324,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 let selection_reason = task_request_failure_reason(
                     requested_task_id.as_deref(),
                     request_reason_value.as_deref(),
-                    auto_replenish
-                        .pending_confirmation_task_ids
-                        .iter()
-                        .next()
-                        .is_some(),
+                    !auto_replenish.pending_confirmation_task_ids.is_empty(),
                     date_gate_filtered,
                 );
                 if state_changed
