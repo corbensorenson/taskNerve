@@ -571,12 +571,16 @@ enum TaskAction {
     List {
         #[arg(long, default_value_t = false)]
         json: bool,
+        #[arg(long, default_value_t = false)]
+        jsonl: bool,
         #[arg(long, value_enum)]
         status: Option<TaskStatusArg>,
         #[arg(long)]
         agent: Option<String>,
         #[arg(long, default_value_t = false)]
         ready_only: bool,
+        #[arg(long, value_delimiter = ',')]
+        fields: Vec<String>,
         #[arg(long, default_value_t = 200)]
         limit: usize,
     },
@@ -659,6 +663,8 @@ enum TaskAction {
         prefix: Option<String>,
         #[arg(long)]
         contains: Option<String>,
+        #[arg(long, default_value_t = 1)]
+        max: usize,
         #[arg(long, default_value_t = 30)]
         claim_ttl_minutes: i64,
         #[arg(long, default_value_t = 90)]
@@ -2891,11 +2897,16 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
     match args.action {
         TaskAction::List {
             json,
+            jsonl,
             status,
             agent,
             ready_only,
+            fields,
             limit,
         } => {
+            if json && jsonl {
+                bail!("task list accepts only one of --json or --jsonl");
+            }
             if state_changed {
                 state.updated_at_utc = now_utc();
                 write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
@@ -2928,7 +2939,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 {
                     continue;
                 }
-                rows.push(payload);
+                rows.push(select_task_payload_fields(&payload, &fields));
                 if rows.len() >= limit {
                     break;
                 }
@@ -2936,6 +2947,23 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else if jsonl {
+                for row in rows {
+                    println!("{}", serde_json::to_string(&row)?);
+                }
+            } else if !fields.is_empty() {
+                println!("{}", fields.join("\t"));
+                for row in rows {
+                    let values = fields
+                        .iter()
+                        .map(|field| {
+                            row.get(field.trim())
+                                .map(json_value_compact_text)
+                                .unwrap_or_default()
+                        })
+                        .collect::<Vec<_>>();
+                    println!("{}", values.join("\t"));
+                }
             } else {
                 println!("[fugit-task] count={}", rows.len());
                 for row in rows {
@@ -3227,6 +3255,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             focus,
             prefix,
             contains,
+            max,
             claim_ttl_minutes,
             steal_after_minutes,
             no_steal,
@@ -3235,16 +3264,21 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
         } => {
             let agent_id = agent.unwrap_or_else(default_agent_id);
             let filters = normalize_task_query_filter(tags, focus, prefix, contains)?;
+            let max = max.max(1);
+            if max > 1 && !no_claim {
+                bail!("task request --max > 1 requires --no-claim");
+            }
             let now = Utc::now();
-            let selection = select_task_for_agent(
+            let candidates = select_task_candidates_for_agent(
                 &state,
                 &agent_id,
                 &filters,
                 !no_steal,
                 steal_after_minutes,
                 now,
+                max,
             );
-            let Some((task_index, dispatch_kind)) = selection else {
+            let Some((task_index, dispatch_kind)) = candidates.first().copied() else {
                 if state_changed {
                     state.updated_at_utc = now_utc();
                     write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
@@ -3254,13 +3288,16 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     "generated_at_utc": now_utc(),
                     "agent_id": agent_id,
                     "assigned": false,
+                    "assigned_count": 0,
                     "claimed": false,
+                    "max": max,
                     "filters": {
                         "tags": filters.required_tags,
                         "focus": filters.focus,
                         "prefix": filters.prefix,
                         "contains": filters.contains
                     },
+                    "tasks": [],
                     "task": null
                 });
                 if json {
@@ -3300,12 +3337,23 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 )?;
             }
             let status_map = task_status_map(&state);
+            let task_rows = candidates
+                .iter()
+                .map(|(idx, dispatch)| {
+                    json!({
+                        "dispatch_kind": dispatch.as_str(),
+                        "task": task_to_json_payload(&state.tasks[*idx], &status_map)
+                    })
+                })
+                .collect::<Vec<_>>();
             let payload = json!({
                 "schema_version": "fugit.task.request.v1",
                 "generated_at_utc": now_utc(),
                 "agent_id": agent_id,
                 "assigned": true,
+                "assigned_count": task_rows.len(),
                 "claimed": claimed,
+                "max": max,
                 "dispatch_kind": dispatch_kind.as_str(),
                 "filters": {
                     "tags": filters.required_tags,
@@ -3313,6 +3361,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     "prefix": filters.prefix,
                     "contains": filters.contains
                 },
+                "tasks": task_rows,
                 "task": task_to_json_payload(&task, &status_map)
             });
             if json {
@@ -3321,9 +3370,10 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 let task_id = payload["task"]["task_id"].as_str().unwrap_or("unknown");
                 let title = payload["task"]["title"].as_str().unwrap_or("untitled");
                 println!(
-                    "[fugit-task] dispatch={} claimed={} task_id={} title={}",
+                    "[fugit-task] dispatch={} claimed={} max={} task_id={} title={}",
                     dispatch_kind.as_str(),
                     claimed,
+                    max,
                     task_id,
                     title
                 );
@@ -5488,6 +5538,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "status": { "type": "string", "enum": ["open", "claimed", "done"] },
                     "agent": { "type": "string" },
                     "ready_only": { "type": "boolean" },
+                    "fields": { "type": "array", "items": { "type": "string" } },
                     "limit": { "type": "integer", "minimum": 1 }
                 }
             }
@@ -5503,6 +5554,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "focus": { "type": "string" },
                     "prefix": { "type": "string" },
                     "contains": { "type": "string" },
+                    "max": { "type": "integer", "minimum": 1 },
                     "claim_ttl_minutes": { "type": "integer" },
                     "steal_after_minutes": { "type": "integer" },
                     "no_steal": { "type": "boolean" },
@@ -6063,6 +6115,19 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             {
                 cli_args.push("--ready-only".to_string());
             }
+            if let Some(fields) = args.get("fields").and_then(serde_json::Value::as_array) {
+                let joined = fields
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|field| !field.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                if !joined.is_empty() {
+                    cli_args.push("--fields".to_string());
+                    cli_args.push(joined);
+                }
+            }
             if let Some(limit) = args.get("limit").and_then(serde_json::Value::as_u64) {
                 cli_args.push("--limit".to_string());
                 cli_args.push(limit.to_string());
@@ -6098,6 +6163,10 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             if let Some(contains) = args.get("contains").and_then(serde_json::Value::as_str) {
                 cli_args.push("--contains".to_string());
                 cli_args.push(contains.to_string());
+            }
+            if let Some(max) = args.get("max").and_then(serde_json::Value::as_u64) {
+                cli_args.push("--max".to_string());
+                cli_args.push(max.to_string());
             }
             if let Some(ttl) = args
                 .get("claim_ttl_minutes")
@@ -7476,6 +7545,40 @@ fn task_to_json_payload(
     })
 }
 
+fn select_task_payload_fields(payload: &serde_json::Value, fields: &[String]) -> serde_json::Value {
+    if fields.is_empty() {
+        return payload.clone();
+    }
+    let mut out = serde_json::Map::<String, serde_json::Value>::new();
+    for field in fields {
+        let key = field.trim();
+        if key.is_empty() {
+            continue;
+        }
+        if let Some(value) = payload.get(key) {
+            out.insert(key.to_string(), value.clone());
+        } else {
+            out.insert(key.to_string(), serde_json::Value::Null);
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
+fn json_value_compact_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Bool(flag) => flag.to_string(),
+        serde_json::Value::Number(number) => number.to_string(),
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(json_value_compact_text)
+            .collect::<Vec<_>>()
+            .join(","),
+        serde_json::Value::Object(_) => serde_json::to_string(value).unwrap_or_default(),
+    }
+}
+
 fn parse_task_import_rows(file: &Path, format: TaskImportFormatArg) -> Result<Vec<TaskImportRow>> {
     let content = fs::read_to_string(file)
         .with_context(|| format!("failed reading task import file {}", file.display()))?;
@@ -7878,6 +7981,7 @@ fn task_blocked_by(task: &FugitTask, status_map: &BTreeMap<String, TaskStatus>) 
     blocked_by
 }
 
+#[cfg(test)]
 fn select_task_for_agent(
     state: &TaskState,
     agent_id: &str,
@@ -7886,6 +7990,31 @@ fn select_task_for_agent(
     steal_after_minutes: i64,
     now: DateTime<Utc>,
 ) -> Option<(usize, TaskDispatchKind)> {
+    select_task_candidates_for_agent(
+        state,
+        agent_id,
+        filters,
+        allow_steal,
+        steal_after_minutes,
+        now,
+        1,
+    )
+    .into_iter()
+    .next()
+}
+
+fn select_task_candidates_for_agent(
+    state: &TaskState,
+    agent_id: &str,
+    filters: &TaskQueryFilter,
+    allow_steal: bool,
+    steal_after_minutes: i64,
+    now: DateTime<Utc>,
+    max: usize,
+) -> Vec<(usize, TaskDispatchKind)> {
+    if max == 0 {
+        return Vec::new();
+    }
     let status_map = task_status_map(state);
     let mut owned_claims = Vec::<usize>::new();
     let mut open_tasks = Vec::<usize>::new();
@@ -7918,16 +8047,26 @@ fn select_task_for_agent(
     sort_task_indices(state, &mut open_tasks);
     sort_task_indices(state, &mut stealable_tasks);
 
-    if let Some(idx) = owned_claims.first().copied() {
-        return Some((idx, TaskDispatchKind::OwnedClaim));
+    let mut out = Vec::<(usize, TaskDispatchKind)>::new();
+    for idx in owned_claims {
+        if out.len() >= max {
+            return out;
+        }
+        out.push((idx, TaskDispatchKind::OwnedClaim));
     }
-    if let Some(idx) = open_tasks.first().copied() {
-        return Some((idx, TaskDispatchKind::Open));
+    for idx in open_tasks {
+        if out.len() >= max {
+            return out;
+        }
+        out.push((idx, TaskDispatchKind::Open));
     }
-    if let Some(idx) = stealable_tasks.first().copied() {
-        return Some((idx, TaskDispatchKind::Steal));
+    for idx in stealable_tasks {
+        if out.len() >= max {
+            return out;
+        }
+        out.push((idx, TaskDispatchKind::Steal));
     }
-    None
+    out
 }
 
 fn apply_task_claim(

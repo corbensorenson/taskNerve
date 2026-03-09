@@ -47,6 +47,21 @@ if not ok:
 PY
 }
 
+jsonl_assert() {
+  local jsonl_file="$1"
+  local expr="$2"
+  local message="$3"
+  python3 - "$jsonl_file" "$expr" "$message" <<'PY'
+import json, sys
+path, expr, message = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path, "r", encoding="utf-8") as f:
+    rows = [json.loads(line) for line in f if line.strip()]
+ok = eval(expr, {"rows": rows})
+if not ok:
+    raise SystemExit(f"[vigorous-e2e] assertion failed: {message}\nexpr={expr}\nrows={rows}")
+PY
+}
+
 echo "[vigorous-e2e] preparing repositories"
 REPO_A="$TMP_ROOT/repo-a"
 REPO_B="$TMP_ROOT/repo-b"
@@ -112,6 +127,8 @@ PY
 json_assert "$TMP_ROOT/task-a-edit.json" 'payload.get("detail") == "root task" and "root" in payload.get("tags", [])' "task edit should replace requested fields"
 "$BIN" --repo-root "$REPO_A" task show --task-id "$TASK_A" --json >"$TMP_ROOT/task-a-show.json"
 json_assert "$TMP_ROOT/task-a-show.json" 'payload.get("task_id") is not None and payload.get("detail") == "root task"' "task show should expose edited task state"
+"$BIN" --repo-root "$REPO_A" task list --jsonl --fields task_id,title,status --limit 2 >"$TMP_ROOT/task-list.jsonl"
+jsonl_assert "$TMP_ROOT/task-list.jsonl" 'all(set(row.keys()) == {"task_id","title","status"} for row in rows)' "task list --jsonl --fields should emit compact rows"
 "$BIN" --repo-root "$REPO_A" task add --title "task-c" --priority 1 --agent agent.c --json >"$TMP_ROOT/task-c.json"
 TASK_C="$(python3 - "$TMP_ROOT/task-c.json" <<'PY'
 import json,sys
@@ -119,6 +136,8 @@ print(json.load(open(sys.argv[1]))["task_id"])
 PY
 )"
 "$BIN" --repo-root "$REPO_A" task remove --task-id "$TASK_C" --agent agent.c >/dev/null
+"$BIN" --repo-root "$REPO_A" task request --agent agent.runner --no-claim --max 2 --json >"$TMP_ROOT/task-request-preview.json"
+json_assert "$TMP_ROOT/task-request-preview.json" 'payload.get("assigned_count", 0) >= 1 and isinstance(payload.get("tasks"), list)' "task request preview should return a prioritized slice"
 "$BIN" --repo-root "$REPO_A" task request --agent agent.runner --focus root --json >"$TMP_ROOT/task-request-1.json"
 json_assert "$TMP_ROOT/task-request-1.json" 'payload.get("assigned") is True and payload.get("task",{}).get("task_id") is not None' "task request should assign a task"
 "$BIN" --repo-root "$REPO_A" task done --task-id "$TASK_A" --agent agent.runner --summary "root lane complete" --artifact "$TMP_ROOT/task-a-edit.json" --command "cargo test" >/dev/null
@@ -280,6 +299,17 @@ if "result" not in resp:
 
 send({
     "jsonrpc":"2.0",
+    "id":31,
+    "method":"tools/call",
+    "params":{"name":"fugit_task_list","arguments":{"limit":2,"fields":["task_id","title"]}}
+})
+resp = recv()
+listed = resp.get("result", {}).get("structuredContent", [])
+if "result" not in resp or not listed or set(listed[0].keys()) != {"task_id","title"}:
+    raise RuntimeError(f"fugit_task_list MCP compact call failed: {resp}")
+
+send({
+    "jsonrpc":"2.0",
     "id":4,
     "method":"tools/call",
     "params":{"name":"fugit_task_add","arguments":{"title":"mcp task","priority":3}}
@@ -307,6 +337,17 @@ send({
     "jsonrpc":"2.0",
     "id":6,
     "method":"tools/call",
+    "params":{"name":"fugit_task_request","arguments":{"agent":"agent.preview","no_claim":True,"max":2}}
+})
+resp = recv()
+preview = resp.get("result", {}).get("structuredContent", {})
+if "result" not in resp or preview.get("assigned_count", 0) < 1 or not isinstance(preview.get("tasks"), list):
+    raise RuntimeError(f"fugit_task_request preview MCP call failed: {resp}")
+
+send({
+    "jsonrpc":"2.0",
+    "id":7,
+    "method":"tools/call",
     "params":{"name":"fugit_task_show","arguments":{"task_id":mcp_task_id}}
 })
 resp = recv()
@@ -316,7 +357,7 @@ if "result" not in resp or shown.get("task_id") != mcp_task_id:
 
 send({
     "jsonrpc":"2.0",
-    "id":7,
+    "id":8,
     "method":"tools/call",
     "params":{"name":"fugit_task_remove","arguments":{"task_id":mcp_task_id}}
 })

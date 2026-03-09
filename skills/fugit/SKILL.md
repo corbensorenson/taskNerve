@@ -56,6 +56,10 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . log --limit 20`
 - Inspect one task directly:
 - `fugit --repo-root . task show --task-id <task_id>`
+- For compact queue scans:
+- `fugit --repo-root . task list --jsonl --fields task_id,title,status`
+- For preview scheduling without claiming:
+- `fugit --repo-root . task request --agent <agent_id> --no-claim --max 3 --json`
 
 9. Coordinate ownership when multiple agents touch overlapping files:
 - `fugit --repo-root . lock add --pattern "src/**" --agent <agent_id> --ttl-minutes 30`

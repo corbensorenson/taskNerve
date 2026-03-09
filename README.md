@@ -191,8 +191,10 @@ Task maintenance from CLI:
 
 ```bash
 fugit --repo-root . task show --task-id <task_id>
+fugit --repo-root . task list --jsonl --fields task_id,title,status
 fugit --repo-root . task edit --task-id <task_id> --title "Updated title" --tag compiler
 fugit --repo-root . task remove --task-id <task_id>
+fugit --repo-root . task request --agent agent.worker --no-claim --max 3 --json
 ```
 
 Recoverability repair:
