@@ -12,6 +12,7 @@ Characteristics:
 - single-worker local scan/object operations,
 - lowest background load,
 - GitHub remotes default to GitHub CI verification while non-GitHub/local remotes stay on local checks,
+- GitHub issue intake stays available for manual sync or low-task replenishment on GitHub-backed repos,
 - best default for laptops/shared dev boxes.
 
 ## Persistent Task Queue (Multi-Agent)
@@ -59,6 +60,7 @@ Characteristics:
 - optional confirmation gate before scout tasks can start,
 - default-on background bridge sync after task completion,
 - default-on GitHub CI verification on GitHub remotes, with deterministic CI-failure tasks,
+- default-on low-task GitHub issue monitoring with deterministic issue-to-task sync and reviewer follow-up when configured,
 - local/non-GitHub repos keep the registered regression/benchmark gate,
 - explicit release path for fast agent handoff,
 - easy plan maintenance through `task edit` / `task remove`.

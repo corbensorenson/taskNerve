@@ -94,6 +94,7 @@ Use this skill when any of the following are true:
 - To renew ownership on a long-running claim without re-claim side effects:
 - `fugit --repo-root . task claim <task_id> --agent <agent_id> --extend-only --claim-ttl-minutes 60`
 - Default quality gate is on: GitHub-backed repos verify pushed commits through GitHub CI by default, while local/non-GitHub repos keep using registered regression/benchmark checks. Failed GitHub CI runs deterministically create or refresh follow-up tasks without advisor/model help.
+- Low-task GitHub repos also run a deterministic issue monitor by default: safe open issues can be imported into the queue under `.fugit:github_issues`, while obviously harmful/non-actionable issues are skipped.
 - Register or retire checks explicitly when needed:
 - `fugit --repo-root . check add --kind regression --task-id <task_id> --command "<test command>"`
 - `fugit --repo-root . check deprecate --check-id <check_id> --reason "<why obsolete>"`
@@ -101,6 +102,10 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . check policy show --json`
 - `fugit --repo-root . check policy set --backend local --require-on-task-done true`
 - `fugit --repo-root . check policy set --backend github-ci --github-timeout-minutes 30 --github-auto-task-on-failure true`
+- Inspect or tune GitHub issue intake with:
+- `fugit --repo-root . bridge issue-monitor show --json`
+- `fugit --repo-root . bridge issue-monitor set --enabled true --low-task-threshold 3 --cooldown-minutes 60 --max-issues 25`
+- `fugit --repo-root . bridge sync-github-issues --json`
 - By default this also queues a background bridge sync so the completed-task note is pushed without blocking the agent on network I/O.
 - Inspect that worker with:
 - `fugit --repo-root . bridge auto-sync show --json`
@@ -143,6 +148,7 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . advisor research --background`
 - `fugit --repo-root . advisor run show --run-id <run_id> --json`
 - `fugit --repo-root . advisor run rerun --run-id <run_id> --background --json`
+- Low-task GitHub repos will also try the deterministic issue monitor before advisor low-task automation. If a reviewer provider is configured, successful issue syncs queue a reviewer pass automatically.
 - Assign distinct models/providers per role:
 - `fugit --repo-root . advisor provider assign --role reviewer --provider <provider_id> --model <model>`
 - `fugit --repo-root . advisor provider assign --role task-manager --provider <provider_id> --model <model>`

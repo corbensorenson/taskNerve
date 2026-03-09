@@ -160,6 +160,8 @@ By default, `task request` respects date gates discovered from tags like `not_be
 
 By default, fugit uses GitHub CI verification when the repo's `origin` points at GitHub, and local registered checks elsewhere. On GitHub-backed repos, `bridge sync-github` waits for the pushed commit's Actions runs, reports the result, and deterministically opens or refreshes CI-failure tasks when verification fails. On non-GitHub or fully local repos, the existing registered regression/benchmark checks stay available through `check add|run|deprecate|policy`.
 
+By default, low-task requests also run a deterministic GitHub issue monitor on GitHub-backed repos. It fetches open issues, filters out obvious spam/non-actionable/harmful requests, syncs safe issues into the backlog under `.fugit:github_issues`, and queues a reviewer pass when a reviewer provider is configured.
+
 By default, low-task requests can also queue advisor runs in the background. The advisor can use different providers/models for the reviewer and smart task-manager roles, then sync generated backlog through managed plan files instead of mutating the queue ad hoc.
 
 ## Advisor Automation
@@ -173,6 +175,9 @@ fugit --repo-root . advisor provider add-claude --assign-role reviewer
 fugit --repo-root . advisor provider add-ollama --model qwen3.5-coder:latest
 fugit --repo-root . advisor provider assign --role task-manager --provider <provider_id> --model qwen3.5-coder:latest
 fugit --repo-root . advisor provider assign --role reviewer --provider <provider_id> --model sonnet
+fugit --repo-root . bridge issue-monitor show --json
+fugit --repo-root . bridge issue-monitor set --enabled true --low-task-threshold 3 --cooldown-minutes 60 --max-issues 25
+fugit --repo-root . bridge sync-github-issues --json
 ```
 
 Manual runs:
@@ -191,7 +196,9 @@ fugit --repo-root . advisor run rerun --run-id <run_id> --background --json
 
 Notes:
 - `advisor research` imports generated tasks through managed TSV plans under `.fugit/advisor/` so dedupe and promotion stay deterministic.
+- `bridge sync-github-issues` imports screened GitHub issues through the managed source `.fugit:github_issues`, keeping dedupe deterministic and leaving obvious harmful/non-actionable issues out of the queue.
 - `task request` will queue background advisor review/research automatically when standard work falls below the configured threshold.
+- `task request` will also try the GitHub issue monitor before advisor low-task automation, so real upstream issues can replenish the queue without waiting on model output.
 - The task GUI now includes advisor controls for provider selection, policy, manual review/research triggers, workflow visibility, run detail inspection, and rerun controls.
 - Custom provider wrappers are supported through `advisor provider add-command`; command args can use placeholders such as `{role}`, `{model}`, `{goal}`, `{repo_root}`, and `{prompt}`.
 

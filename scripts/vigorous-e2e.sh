@@ -150,6 +150,12 @@ json_assert "$TMP_ROOT/status-summary.json" 'payload.get("changes_included") is 
 "$BIN" --repo-root "$REPO_A" backend show --json >"$TMP_ROOT/backend-show.json"
 json_assert "$TMP_ROOT/backend-show.json" 'payload.get("backend_mode") == "git_bridge"' "backend mode should default to git_bridge"
 "$BIN" --repo-root "$REPO_A" backend set --mode git-bridge --bridge-remote origin --bridge-branch trunk >/dev/null
+"$BIN" --repo-root "$REPO_A" bridge issue-monitor show --json >"$TMP_ROOT/issue-monitor-show.json"
+json_assert "$TMP_ROOT/issue-monitor-show.json" 'payload.get("enabled") is True and payload.get("status") == "idle"' "issue monitor should default to enabled/idle"
+"$BIN" --repo-root "$REPO_A" bridge issue-monitor set --low-task-threshold 1 --cooldown-minutes 5 --max-issues 10 --json >"$TMP_ROOT/issue-monitor-set.json"
+json_assert "$TMP_ROOT/issue-monitor-set.json" 'payload.get("low_task_threshold") == 1 and payload.get("cooldown_minutes") == 5 and payload.get("max_issues") == 10' "issue monitor policy update should persist"
+"$BIN" --repo-root "$REPO_A" bridge sync-github-issues --json >"$TMP_ROOT/issue-monitor-sync.json"
+json_assert "$TMP_ROOT/issue-monitor-sync.json" 'payload.get("status") == "non_github_remote"' "issue monitor should report non-GitHub remotes cleanly"
 
 echo "[vigorous-e2e] checkpoint/log/branch/checkout"
 mkdir -p "$REPO_A/src"

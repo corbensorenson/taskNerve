@@ -41,12 +41,14 @@ const SCHEMA_ADVISOR_RUN: &str = "fugit.advisor_run.v1";
 const SCHEMA_ADVISOR_WORKFLOW: &str = "fugit.advisor_workflow.v1";
 const SCHEMA_ADVISOR_WORKER_STATE: &str = "fugit.advisor_worker_state.v1";
 const SCHEMA_ADVISOR_WORKER_LOCK: &str = "fugit.advisor_worker_lock.v1";
+const SCHEMA_GITHUB_ISSUE_MONITOR: &str = "fugit.github_issue_monitor.v1";
 const BACKEND_MODE_GIT_BRIDGE: &str = "git_bridge";
 const BACKEND_MODE_FUGIT_CLOUD: &str = "fugit_cloud";
 const QUALITY_CHECK_BACKEND_LOCAL: &str = "local";
 const QUALITY_CHECK_BACKEND_GITHUB_CI: &str = "github_ci";
 const AUTO_REPLENISH_SOURCE_PLAN: &str = ".fugit:auto_replenish";
 const GITHUB_CI_FAILURE_SOURCE_PLAN: &str = ".fugit:github_ci_failures";
+const GITHUB_ISSUE_SOURCE_PLAN: &str = ".fugit:github_issues";
 const ADVISOR_AUTO_PLAN_FILE: &str = ".fugit/advisor/auto_backlog.tsv";
 const ADVISOR_WORKFLOW_FILE: &str = "FUGIT_WORKFLOW.md";
 const SYSTEM_AGENT_ID: &str = "fugit.system";
@@ -300,6 +302,10 @@ enum BridgeAction {
         #[command(subcommand)]
         action: BridgeAutoSyncAction,
     },
+    IssueMonitor {
+        #[command(subcommand)]
+        action: BridgeIssueMonitorAction,
+    },
     SyncGithub {
         #[arg(long)]
         remote: Option<String>,
@@ -328,6 +334,18 @@ enum BridgeAction {
         #[arg(long, hide = true, default_value_t = false)]
         background_worker: bool,
         #[arg(long, hide = true)]
+        trigger: Option<String>,
+    },
+    SyncGithubIssues {
+        #[arg(long)]
+        remote: Option<String>,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long, default_value_t = false)]
+        ignore_cooldown: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        #[arg(long)]
         trigger: Option<String>,
     },
     PullGithub {
@@ -399,6 +417,26 @@ enum BridgeAutoSyncAction {
         event_count: Option<usize>,
         #[arg(long)]
         no_push: Option<bool>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum BridgeIssueMonitorAction {
+    Show {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Set {
+        #[arg(long)]
+        enabled: Option<bool>,
+        #[arg(long)]
+        low_task_threshold: Option<usize>,
+        #[arg(long)]
+        cooldown_minutes: Option<i64>,
+        #[arg(long)]
+        max_issues: Option<usize>,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -2052,6 +2090,14 @@ struct TimelineConfig {
     quality_checks_github_auto_task_on_failure: bool,
     #[serde(default = "default_quality_checks_github_failure_task_priority")]
     quality_checks_github_failure_task_priority: i32,
+    #[serde(default = "default_github_issue_monitor_enabled")]
+    github_issue_monitor_enabled: bool,
+    #[serde(default = "default_github_issue_monitor_low_task_threshold")]
+    github_issue_monitor_low_task_threshold: usize,
+    #[serde(default = "default_github_issue_monitor_cooldown_minutes")]
+    github_issue_monitor_cooldown_minutes: i64,
+    #[serde(default = "default_github_issue_monitor_max_issues")]
+    github_issue_monitor_max_issues: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2170,6 +2216,31 @@ struct BridgeAutoSyncLock {
     created_at_utc: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GithubIssueMonitorState {
+    schema_version: String,
+    updated_at_utc: String,
+    status: String,
+    enabled: bool,
+    low_task_threshold: usize,
+    cooldown_minutes: i64,
+    max_issues: usize,
+    last_requested_at_utc: Option<String>,
+    last_started_at_utc: Option<String>,
+    last_finished_at_utc: Option<String>,
+    last_trigger: Option<String>,
+    last_result: Option<String>,
+    last_error: Option<String>,
+    #[serde(default)]
+    last_created_task_ids: Vec<String>,
+    #[serde(default)]
+    last_updated_task_ids: Vec<String>,
+    #[serde(default)]
+    last_reopened_task_ids: Vec<String>,
+    #[serde(default)]
+    last_skipped: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 struct BridgeSyncGithubOptions {
     remote: String,
@@ -2209,6 +2280,38 @@ struct GithubActionsRun {
 struct GithubActionsJobsResponse {
     #[serde(default)]
     jobs: Vec<GithubActionsJob>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GithubIssue {
+    number: u64,
+    title: String,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    html_url: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    updated_at: Option<String>,
+    #[serde(default)]
+    user: Option<GithubIssueUser>,
+    #[serde(default)]
+    labels: Vec<GithubIssueLabel>,
+    #[serde(default)]
+    pull_request: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GithubIssueUser {
+    #[serde(default)]
+    login: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GithubIssueLabel {
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2621,6 +2724,9 @@ fn fugit_skill_bundle(include_skill_body: bool, include_openai_yaml: bool) -> se
                 "fugit_check_run",
                 "fugit_check_policy_show",
                 "fugit_check_policy_set",
+                "fugit_bridge_issue_monitor_show",
+                "fugit_bridge_issue_monitor_set",
+                "fugit_bridge_sync_github_issues",
                 "fugit_advisor_show",
                 "fugit_advisor_runs",
                 "fugit_advisor_workflow_show",
@@ -3562,6 +3668,89 @@ fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
                 }
             }
         },
+        BridgeAction::IssueMonitor { action } => match action {
+            BridgeIssueMonitorAction::Show { json } => {
+                let state = load_github_issue_monitor_state(repo_root, &config)?;
+                let payload = github_issue_monitor_payload(&state);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    println!(
+                        "[fugit-github-issues] enabled={} status={} low_task_threshold={} cooldown_minutes={} max_issues={} created={} updated={} reopened={}",
+                        payload["enabled"].as_bool().unwrap_or(false),
+                        payload["status"].as_str().unwrap_or("unknown"),
+                        payload["low_task_threshold"].as_u64().unwrap_or(0),
+                        payload["cooldown_minutes"].as_i64().unwrap_or(0),
+                        payload["max_issues"].as_u64().unwrap_or(0),
+                        payload["last_created_task_ids"]
+                            .as_array()
+                            .map(|rows| rows.len())
+                            .unwrap_or(0),
+                        payload["last_updated_task_ids"]
+                            .as_array()
+                            .map(|rows| rows.len())
+                            .unwrap_or(0),
+                        payload["last_reopened_task_ids"]
+                            .as_array()
+                            .map(|rows| rows.len())
+                            .unwrap_or(0)
+                    );
+                }
+            }
+            BridgeIssueMonitorAction::Set {
+                enabled,
+                low_task_threshold,
+                cooldown_minutes,
+                max_issues,
+                json,
+            } => {
+                let mut next_config = config.clone();
+                let mut changed = false;
+                if let Some(enabled) = enabled
+                    && next_config.github_issue_monitor_enabled != enabled
+                {
+                    next_config.github_issue_monitor_enabled = enabled;
+                    changed = true;
+                }
+                if let Some(low_task_threshold) = low_task_threshold.map(|value| value.max(1))
+                    && next_config.github_issue_monitor_low_task_threshold != low_task_threshold
+                {
+                    next_config.github_issue_monitor_low_task_threshold = low_task_threshold;
+                    changed = true;
+                }
+                if let Some(cooldown_minutes) = cooldown_minutes.map(|value| value.max(1))
+                    && next_config.github_issue_monitor_cooldown_minutes != cooldown_minutes
+                {
+                    next_config.github_issue_monitor_cooldown_minutes = cooldown_minutes;
+                    changed = true;
+                }
+                if let Some(max_issues) = max_issues.map(|value| value.clamp(1, 100))
+                    && next_config.github_issue_monitor_max_issues != max_issues
+                {
+                    next_config.github_issue_monitor_max_issues = max_issues;
+                    changed = true;
+                }
+                if changed {
+                    next_config.updated_at_utc = now_utc();
+                    write_pretty_json(&timeline_config_path(repo_root), &next_config)?;
+                }
+                let mut state = load_github_issue_monitor_state(repo_root, &next_config)?;
+                state.updated_at_utc = now_utc();
+                write_github_issue_monitor_state(repo_root, &state)?;
+                let payload = github_issue_monitor_payload(&state);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    println!(
+                        "[fugit-github-issues] enabled={} low_task_threshold={} cooldown_minutes={} max_issues={}",
+                        payload["enabled"].as_bool().unwrap_or(false),
+                        payload["low_task_threshold"].as_u64().unwrap_or(0),
+                        payload["cooldown_minutes"].as_i64().unwrap_or(0),
+                        payload["max_issues"].as_u64().unwrap_or(0)
+                    );
+                }
+            }
+        },
         BridgeAction::SyncGithub {
             remote,
             branch,
@@ -3667,6 +3856,41 @@ fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
                         report["verification_backend"].as_str().unwrap_or("local")
                     );
                 }
+            }
+        }
+        BridgeAction::SyncGithubIssues {
+            remote,
+            limit,
+            ignore_cooldown,
+            json,
+            trigger,
+        } => {
+            let remote_name = remote.unwrap_or(config.default_bridge_remote.clone());
+            let mut task_state = load_task_state(repo_root)?;
+            let payload = sync_github_issue_tasks(
+                repo_root,
+                &mut task_state,
+                &config,
+                &remote_name,
+                trigger.as_deref().unwrap_or("manual"),
+                ignore_cooldown,
+                limit,
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!(
+                    "[fugit-github-issues] status={} remote={} created={} updated={} reopened={} skipped={}",
+                    payload["status"].as_str().unwrap_or("unknown"),
+                    payload["remote"].as_str().unwrap_or("origin"),
+                    payload["created_count"].as_u64().unwrap_or(0),
+                    payload["updated_count"].as_u64().unwrap_or(0),
+                    payload["reopened_count"].as_u64().unwrap_or(0),
+                    payload["skipped"]
+                        .as_array()
+                        .map(|rows| rows.len())
+                        .unwrap_or(0)
+                );
             }
         }
         BridgeAction::PullGithub {
@@ -4483,6 +4707,379 @@ fn sync_github_ci_failure_tasks(
         "reopened_count": report.reopened.len(),
         "blocked_count": report.blocked.len(),
         "task_ids": task_ids,
+        "report": report
+    }))
+}
+
+fn github_issue_label_names(issue: &GithubIssue) -> Vec<String> {
+    dedupe_keep_order(
+        issue
+            .labels
+            .iter()
+            .filter_map(|label| {
+                label
+                    .name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string)
+            })
+            .collect(),
+    )
+}
+
+fn truncate_issue_body(value: &str, max_chars: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let mut out = trimmed.chars().take(max_chars).collect::<String>();
+    out.push_str("...");
+    out
+}
+
+fn github_issue_skip_reason(issue: &GithubIssue) -> Option<String> {
+    if issue.pull_request.is_some() {
+        return Some("pull_request".to_string());
+    }
+    let labels = github_issue_label_names(issue)
+        .into_iter()
+        .map(|label| label.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    if let Some(label) = labels.iter().find(|label| {
+        matches!(
+            label.as_str(),
+            "duplicate" | "invalid" | "question" | "wontfix" | "not planned" | "spam"
+        )
+    }) {
+        return Some(format!("label:{}", label));
+    }
+
+    let lower = format!(
+        "{}\n{}",
+        issue.title.to_ascii_lowercase(),
+        issue
+            .body
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+    );
+    let deny_phrases = [
+        "backdoor",
+        "malware",
+        "ransomware",
+        "credential stuffing",
+        "exfiltrate",
+        "steal token",
+        "steal secret",
+        "hardcode api key",
+        "hardcode secret",
+        "embed credential",
+        "bypass auth",
+        "disable authentication",
+        "disable all tests",
+        "turn off ci permanently",
+        "delete production data",
+        "wipe database",
+        "disable encryption",
+    ];
+    deny_phrases
+        .iter()
+        .find(|phrase| lower.contains(*phrase))
+        .map(|phrase| format!("unsafe:{}", phrase.replace(' ', "_")))
+}
+
+fn github_issue_priority(issue: &GithubIssue) -> i32 {
+    let labels = github_issue_label_names(issue)
+        .into_iter()
+        .map(|label| label.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    if labels.iter().any(|label| {
+        label.contains("critical") || label.contains("sev:high") || label.contains("priority:high")
+    }) {
+        90
+    } else if labels
+        .iter()
+        .any(|label| label.contains("bug") || label.contains("regression"))
+    {
+        80
+    } else if labels
+        .iter()
+        .any(|label| label.contains("enhancement") || label.contains("feature"))
+    {
+        50
+    } else {
+        60
+    }
+}
+
+fn sync_github_issue_tasks(
+    repo_root: &Path,
+    state: &mut TaskState,
+    config: &TimelineConfig,
+    remote_name: &str,
+    trigger: &str,
+    ignore_cooldown: bool,
+    limit_override: Option<usize>,
+) -> Result<serde_json::Value> {
+    if !config.github_issue_monitor_enabled {
+        return Ok(json!({
+            "enabled": false,
+            "triggered": false,
+            "status": "disabled"
+        }));
+    }
+
+    let mut monitor_state = load_github_issue_monitor_state(repo_root, config)?;
+    if !ignore_cooldown
+        && github_issue_monitor_recently_requested(
+            &monitor_state,
+            config.github_issue_monitor_cooldown_minutes,
+        )
+    {
+        return Ok(json!({
+            "enabled": true,
+            "triggered": false,
+            "status": "cooldown",
+            "cooldown_minutes": config.github_issue_monitor_cooldown_minutes,
+            "last_requested_at_utc": monitor_state.last_requested_at_utc,
+        }));
+    }
+
+    let Some(remote_url) = git_remote_url(repo_root, remote_name)? else {
+        monitor_state.updated_at_utc = now_utc();
+        monitor_state.status = "missing_remote_url".to_string();
+        monitor_state.last_error = Some(format!("git remote '{}' has no URL", remote_name));
+        write_github_issue_monitor_state(repo_root, &monitor_state)?;
+        return Ok(json!({
+            "enabled": true,
+            "triggered": false,
+            "status": "missing_remote_url",
+            "remote": remote_name
+        }));
+    };
+    let Some(host) = parse_git_host(&remote_url) else {
+        monitor_state.updated_at_utc = now_utc();
+        monitor_state.status = "non_github_remote".to_string();
+        monitor_state.last_finished_at_utc = Some(now_utc());
+        monitor_state.last_error = Some("failed parsing remote host".to_string());
+        write_github_issue_monitor_state(repo_root, &monitor_state)?;
+        return Ok(json!({
+            "enabled": true,
+            "triggered": false,
+            "status": "non_github_remote",
+            "remote": remote_name,
+            "remote_url": remote_url
+        }));
+    };
+    let Some((owner, repo)) = parse_github_repo_slug(&remote_url) else {
+        monitor_state.updated_at_utc = now_utc();
+        monitor_state.status = "non_github_remote".to_string();
+        monitor_state.last_finished_at_utc = Some(now_utc());
+        monitor_state.last_error = Some("remote is not a GitHub repository".to_string());
+        write_github_issue_monitor_state(repo_root, &monitor_state)?;
+        return Ok(json!({
+            "enabled": true,
+            "triggered": false,
+            "status": "non_github_remote",
+            "remote": remote_name,
+            "remote_url": remote_url
+        }));
+    };
+    let api_base_url = github_api_base_url_for_host(&host);
+    let api_token = resolve_github_api_token(repo_root, &host)?;
+    let per_page = limit_override
+        .unwrap_or(config.github_issue_monitor_max_issues)
+        .clamp(1, 100);
+
+    monitor_state.updated_at_utc = now_utc();
+    monitor_state.status = "running".to_string();
+    monitor_state.last_requested_at_utc = Some(now_utc());
+    monitor_state.last_started_at_utc = Some(now_utc());
+    monitor_state.last_trigger = Some(trigger.to_string());
+    monitor_state.last_error = None;
+    write_github_issue_monitor_state(repo_root, &monitor_state)?;
+
+    let path = format!(
+        "repos/{owner}/{repo}/issues?state=open&sort=updated&direction=desc&per_page={per_page}"
+    );
+    let (status, payload) = github_api_get_json(&api_base_url, &path, api_token.as_deref())?;
+    if !(200..300).contains(&status) {
+        monitor_state.updated_at_utc = now_utc();
+        monitor_state.status = "github_api_error".to_string();
+        monitor_state.last_finished_at_utc = Some(now_utc());
+        monitor_state.last_error = Some(format!("GitHub API returned HTTP {}", status));
+        write_github_issue_monitor_state(repo_root, &monitor_state)?;
+        return Ok(json!({
+            "enabled": true,
+            "triggered": false,
+            "status": "github_api_error",
+            "remote": remote_name,
+            "repository": format!("{owner}/{repo}"),
+            "error": format!("GitHub API returned HTTP {}", status)
+        }));
+    }
+
+    let issues = serde_json::from_value::<Vec<GithubIssue>>(payload).unwrap_or_default();
+    let mut rows_by_key = BTreeMap::<String, TaskImportRow>::new();
+    let mut skipped = Vec::<String>::new();
+    for issue in issues {
+        if let Some(reason) = github_issue_skip_reason(&issue) {
+            skipped.push(format!("#{}:{}", issue.number, reason));
+            continue;
+        }
+
+        let key = format!("github-issue-{}", issue.number);
+        let issue_labels = github_issue_label_names(&issue);
+        let mut tags = vec![
+            "github-issue".to_string(),
+            format!("github-issue:{}", issue.number),
+        ];
+        for label in &issue_labels {
+            tags.push(format!("gh-label:{}", slugify_ci_task_token(label)));
+        }
+        let reporter = issue
+            .user
+            .as_ref()
+            .and_then(|user| user.login.as_deref())
+            .unwrap_or("unknown");
+        let detail = normalize_task_detail(Some(format!(
+            "Repository: {owner}/{repo}\nIssue: #{}\nURL: {}\nReporter: {}\nLabels: {}\nUpdated: {}\nState: {}\n\nIssue summary:\n{}",
+            issue.number,
+            issue.html_url.as_deref().unwrap_or("n/a"),
+            reporter,
+            if issue_labels.is_empty() {
+                "none".to_string()
+            } else {
+                issue_labels.join(", ")
+            },
+            issue.updated_at.as_deref().unwrap_or("n/a"),
+            issue.state.as_deref().unwrap_or("open"),
+            truncate_issue_body(
+                issue.body.as_deref().unwrap_or("No issue body provided."),
+                2500
+            ),
+        )));
+        rows_by_key
+            .entry(key.clone())
+            .or_insert_with(|| TaskImportRow {
+                source_key: Some(key.clone()),
+                key,
+                title: format!(
+                    "Handle GitHub issue #{}: {}",
+                    issue.number,
+                    issue.title.trim()
+                ),
+                detail,
+                priority: Some(github_issue_priority(&issue)),
+                tags,
+                depends_on_keys: Vec::new(),
+                agent: Some(SYSTEM_AGENT_ID.to_string()),
+            });
+    }
+
+    if rows_by_key.is_empty() {
+        monitor_state.updated_at_utc = now_utc();
+        monitor_state.status = "no_candidates".to_string();
+        monitor_state.last_finished_at_utc = Some(now_utc());
+        monitor_state.last_result = Some("no safe GitHub issues to import".to_string());
+        monitor_state.last_skipped = skipped.clone();
+        monitor_state.last_created_task_ids.clear();
+        monitor_state.last_updated_task_ids.clear();
+        monitor_state.last_reopened_task_ids.clear();
+        write_github_issue_monitor_state(repo_root, &monitor_state)?;
+        return Ok(json!({
+            "enabled": true,
+            "triggered": false,
+            "status": "no_candidates",
+            "remote": remote_name,
+            "repository": format!("{owner}/{repo}"),
+            "skipped": skipped,
+            "task_ids": []
+        }));
+    }
+
+    let mut report = sync_plan_into_task_state(
+        state,
+        rows_by_key.into_values().collect(),
+        GITHUB_ISSUE_SOURCE_PLAN,
+        SYSTEM_AGENT_ID,
+        60,
+        true,
+    )?;
+    report.generated_at_utc = now_utc();
+    report.plan = GITHUB_ISSUE_SOURCE_PLAN.to_string();
+    report.format = "github_issues".to_string();
+    report.dry_run = false;
+
+    state.updated_at_utc = now_utc();
+    write_pretty_json(&timeline_tasks_path(repo_root), state)?;
+    for task in &report.created {
+        if let Some(full_task) = state.tasks.iter().find(|row| row.task_id == task.task_id) {
+            append_task_timeline_event(repo_root, full_task, SYSTEM_AGENT_ID, "add", None)?;
+        }
+    }
+    for task in &report.reopened {
+        if let Some(full_task) = state.tasks.iter().find(|row| row.task_id == task.task_id) {
+            append_task_timeline_event(repo_root, full_task, SYSTEM_AGENT_ID, "reopen", None)?;
+        }
+    }
+    for task in &report.updated {
+        if let Some(full_task) = state.tasks.iter().find(|row| row.task_id == task.task_id) {
+            append_task_timeline_event(repo_root, full_task, SYSTEM_AGENT_ID, "edit", None)?;
+        }
+    }
+
+    let task_ids = report
+        .created
+        .iter()
+        .chain(report.updated.iter())
+        .chain(report.reopened.iter())
+        .map(|task| task.task_id.clone())
+        .collect::<Vec<_>>();
+    monitor_state.updated_at_utc = now_utc();
+    monitor_state.status = if task_ids.is_empty() {
+        "unchanged".to_string()
+    } else {
+        "synced".to_string()
+    };
+    monitor_state.last_finished_at_utc = Some(now_utc());
+    monitor_state.last_result = Some(format!(
+        "created={} updated={} reopened={}",
+        report.created.len(),
+        report.updated.len(),
+        report.reopened.len()
+    ));
+    monitor_state.last_created_task_ids = report
+        .created
+        .iter()
+        .map(|task| task.task_id.clone())
+        .collect();
+    monitor_state.last_updated_task_ids = report
+        .updated
+        .iter()
+        .map(|task| task.task_id.clone())
+        .collect();
+    monitor_state.last_reopened_task_ids = report
+        .reopened
+        .iter()
+        .map(|task| task.task_id.clone())
+        .collect();
+    monitor_state.last_skipped = skipped.clone();
+    write_github_issue_monitor_state(repo_root, &monitor_state)?;
+
+    Ok(json!({
+        "enabled": true,
+        "triggered": !task_ids.is_empty(),
+        "status": monitor_state.status,
+        "remote": remote_name,
+        "repository": format!("{owner}/{repo}"),
+        "created_count": report.created.len(),
+        "updated_count": report.updated.len(),
+        "reopened_count": report.reopened.len(),
+        "blocked_count": report.blocked.len(),
+        "task_ids": task_ids,
+        "skipped": skipped,
         "report": report
     }))
 }
@@ -10825,6 +11422,36 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
+            "name": "fugit_bridge_issue_monitor_show",
+            "description": "Inspect GitHub issue monitor policy and recent sync status.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "fugit_bridge_issue_monitor_set",
+            "description": "Update GitHub issue monitor policy.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": { "type": "boolean" },
+                    "low_task_threshold": { "type": "integer", "minimum": 1 },
+                    "cooldown_minutes": { "type": "integer", "minimum": 1 },
+                    "max_issues": { "type": "integer", "minimum": 1 }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_bridge_sync_github_issues",
+            "description": "Fetch open GitHub issues, screen them deterministically, and sync safe ones into the task queue.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "remote": { "type": "string" },
+                    "limit": { "type": "integer", "minimum": 1 },
+                    "ignore_cooldown": { "type": "boolean" }
+                }
+            }
+        }),
+        json!({
             "name": "fugit_advisor_show",
             "description": "Show advisor providers, role assignments, policy, worker state, and recent runs.",
             "inputSchema": { "type": "object", "properties": {} }
@@ -12369,6 +12996,69 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
                 cli_args.push("--agent".to_string());
                 cli_args.push(agent.to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_bridge_issue_monitor_show" => run_self_cli_json(
+            repo_root,
+            &[
+                "bridge".to_string(),
+                "issue-monitor".to_string(),
+                "show".to_string(),
+                "--json".to_string(),
+            ],
+        )?,
+        "fugit_bridge_issue_monitor_set" => {
+            let mut cli_args = vec![
+                "bridge".to_string(),
+                "issue-monitor".to_string(),
+                "set".to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(enabled) = args.get("enabled").and_then(serde_json::Value::as_bool) {
+                cli_args.push("--enabled".to_string());
+                cli_args.push(enabled.to_string());
+            }
+            if let Some(low_task_threshold) = args
+                .get("low_task_threshold")
+                .and_then(serde_json::Value::as_u64)
+            {
+                cli_args.push("--low-task-threshold".to_string());
+                cli_args.push(low_task_threshold.to_string());
+            }
+            if let Some(cooldown_minutes) = args
+                .get("cooldown_minutes")
+                .and_then(serde_json::Value::as_i64)
+            {
+                cli_args.push("--cooldown-minutes".to_string());
+                cli_args.push(cooldown_minutes.to_string());
+            }
+            if let Some(max_issues) = args.get("max_issues").and_then(serde_json::Value::as_u64) {
+                cli_args.push("--max-issues".to_string());
+                cli_args.push(max_issues.to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_bridge_sync_github_issues" => {
+            let mut cli_args = vec![
+                "bridge".to_string(),
+                "sync-github-issues".to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(remote) = args.get("remote").and_then(serde_json::Value::as_str) {
+                cli_args.push("--remote".to_string());
+                cli_args.push(remote.to_string());
+            }
+            if let Some(limit) = args.get("limit").and_then(serde_json::Value::as_u64) {
+                cli_args.push("--limit".to_string());
+                cli_args.push(limit.to_string());
+            }
+            if args
+                .get("ignore_cooldown")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--ignore-cooldown".to_string());
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
@@ -15569,6 +16259,97 @@ fn count_standard_active_tasks(state: &TaskState) -> usize {
         .count()
 }
 
+fn maybe_sync_github_issue_monitor(
+    repo_root: &Path,
+    state: &mut TaskState,
+) -> Result<serde_json::Value> {
+    let config = load_timeline_config_or_default(repo_root)?;
+    if !config.github_issue_monitor_enabled {
+        return Ok(json!({
+            "enabled": false,
+            "triggered": false,
+            "status": "disabled"
+        }));
+    }
+    let active_standard_tasks = count_standard_active_tasks(state);
+    if active_standard_tasks > config.github_issue_monitor_low_task_threshold {
+        return Ok(json!({
+            "enabled": true,
+            "triggered": false,
+            "status": "threshold_not_met",
+            "active_standard_tasks": active_standard_tasks,
+            "low_task_threshold": config.github_issue_monitor_low_task_threshold
+        }));
+    }
+    let mut payload = sync_github_issue_tasks(
+        repo_root,
+        state,
+        &config,
+        &config.default_bridge_remote,
+        "low_task_threshold",
+        false,
+        None,
+    )?;
+    if let Some(map) = payload.as_object_mut() {
+        map.insert(
+            "active_standard_tasks".to_string(),
+            json!(active_standard_tasks),
+        );
+        map.insert(
+            "low_task_threshold".to_string(),
+            json!(config.github_issue_monitor_low_task_threshold),
+        );
+        let synced_count = map
+            .get("created_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+            + map
+                .get("updated_count")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+            + map
+                .get("reopened_count")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+        let reviewer_payload = if synced_count == 0 {
+            json!({
+                "queued": false,
+                "status": "no_synced_issues"
+            })
+        } else {
+            let advisor_state = ensure_advisor_state(repo_root)?;
+            let worker =
+                load_advisor_worker_state(repo_root, AdvisorRoleArg::Reviewer, &advisor_state)?;
+            let probe = AdvisorRunOptions {
+                role: AdvisorRoleArg::Reviewer,
+                goal: Some("Review the newly synced GitHub issue backlog against the repository. Highlight unsafe requests, duplicates, or higher-leverage next steps without mutating files.".to_string()),
+                provider_id_override: None,
+                model_override: None,
+                allow_online_research: false,
+                require_confirmation_override: None,
+                sync_suggested_tasks: false,
+                trigger: "github_issue_monitor".to_string(),
+                plan_mode: AdvisorPlanModeArg::AutoBacklog,
+            };
+            if resolve_advisor_provider(&advisor_state, &probe).is_ok()
+                && !advisor_worker_recently_requested(
+                    &worker,
+                    advisor_state.policy.auto_trigger_cooldown_minutes,
+                )
+            {
+                queue_advisor_background(repo_root, &probe)?
+            } else {
+                json!({
+                    "queued": false,
+                    "status": "reviewer_unavailable_or_cooldown"
+                })
+            }
+        };
+        map.insert("reviewer".to_string(), reviewer_payload);
+    }
+    Ok(payload)
+}
+
 fn maybe_queue_auto_advisor_runs(repo_root: &Path, state: &TaskState) -> Result<serde_json::Value> {
     let advisor_state = ensure_advisor_state(repo_root)?;
     if !advisor_state.policy.enabled {
@@ -15981,6 +16762,10 @@ fn build_default_timeline_config(repo_root: &Path) -> TimelineConfig {
             default_quality_checks_github_auto_task_on_failure(),
         quality_checks_github_failure_task_priority:
             default_quality_checks_github_failure_task_priority(),
+        github_issue_monitor_enabled: default_github_issue_monitor_enabled(),
+        github_issue_monitor_low_task_threshold: default_github_issue_monitor_low_task_threshold(),
+        github_issue_monitor_cooldown_minutes: default_github_issue_monitor_cooldown_minutes(),
+        github_issue_monitor_max_issues: default_github_issue_monitor_max_issues(),
     }
 }
 
@@ -15997,7 +16782,100 @@ fn load_timeline_config_or_default(repo_root: &Path) -> Result<TimelineConfig> {
     if config.quality_checks_github_poll_seconds == 0 {
         config.quality_checks_github_poll_seconds = default_quality_checks_github_poll_seconds();
     }
+    if config.github_issue_monitor_low_task_threshold == 0 {
+        config.github_issue_monitor_low_task_threshold =
+            default_github_issue_monitor_low_task_threshold();
+    }
+    if config.github_issue_monitor_cooldown_minutes <= 0 {
+        config.github_issue_monitor_cooldown_minutes =
+            default_github_issue_monitor_cooldown_minutes();
+    }
+    if config.github_issue_monitor_max_issues == 0 {
+        config.github_issue_monitor_max_issues = default_github_issue_monitor_max_issues();
+    }
     Ok(config)
+}
+
+fn default_github_issue_monitor_state(config: &TimelineConfig) -> GithubIssueMonitorState {
+    GithubIssueMonitorState {
+        schema_version: SCHEMA_GITHUB_ISSUE_MONITOR.to_string(),
+        updated_at_utc: now_utc(),
+        status: "idle".to_string(),
+        enabled: config.github_issue_monitor_enabled,
+        low_task_threshold: config.github_issue_monitor_low_task_threshold,
+        cooldown_minutes: config.github_issue_monitor_cooldown_minutes,
+        max_issues: config.github_issue_monitor_max_issues,
+        last_requested_at_utc: None,
+        last_started_at_utc: None,
+        last_finished_at_utc: None,
+        last_trigger: None,
+        last_result: None,
+        last_error: None,
+        last_created_task_ids: Vec::new(),
+        last_updated_task_ids: Vec::new(),
+        last_reopened_task_ids: Vec::new(),
+        last_skipped: Vec::new(),
+    }
+}
+
+fn load_github_issue_monitor_state(
+    repo_root: &Path,
+    config: &TimelineConfig,
+) -> Result<GithubIssueMonitorState> {
+    let mut state = load_json_optional::<GithubIssueMonitorState>(
+        &timeline_github_issue_monitor_state_path(repo_root),
+    )?
+    .unwrap_or_else(|| default_github_issue_monitor_state(config));
+    state.enabled = config.github_issue_monitor_enabled;
+    state.low_task_threshold = config.github_issue_monitor_low_task_threshold;
+    state.cooldown_minutes = config.github_issue_monitor_cooldown_minutes;
+    state.max_issues = config.github_issue_monitor_max_issues;
+    if state.schema_version.trim().is_empty() {
+        state.schema_version = SCHEMA_GITHUB_ISSUE_MONITOR.to_string();
+    }
+    Ok(state)
+}
+
+fn write_github_issue_monitor_state(
+    repo_root: &Path,
+    state: &GithubIssueMonitorState,
+) -> Result<()> {
+    write_pretty_json(&timeline_github_issue_monitor_state_path(repo_root), state)
+}
+
+fn github_issue_monitor_recently_requested(
+    state: &GithubIssueMonitorState,
+    cooldown_minutes: i64,
+) -> bool {
+    let Some(last_requested_at_utc) = state.last_requested_at_utc.as_deref() else {
+        return false;
+    };
+    let Some(last_requested_at) = parse_rfc3339_utc(last_requested_at_utc) else {
+        return false;
+    };
+    last_requested_at + Duration::minutes(cooldown_minutes.max(1)) > Utc::now()
+}
+
+fn github_issue_monitor_payload(state: &GithubIssueMonitorState) -> serde_json::Value {
+    json!({
+        "schema_version": SCHEMA_GITHUB_ISSUE_MONITOR,
+        "generated_at_utc": now_utc(),
+        "enabled": state.enabled,
+        "status": state.status,
+        "low_task_threshold": state.low_task_threshold,
+        "cooldown_minutes": state.cooldown_minutes,
+        "max_issues": state.max_issues,
+        "last_requested_at_utc": state.last_requested_at_utc,
+        "last_started_at_utc": state.last_started_at_utc,
+        "last_finished_at_utc": state.last_finished_at_utc,
+        "last_trigger": state.last_trigger,
+        "last_result": state.last_result,
+        "last_error": state.last_error,
+        "last_created_task_ids": state.last_created_task_ids,
+        "last_updated_task_ids": state.last_updated_task_ids,
+        "last_reopened_task_ids": state.last_reopened_task_ids,
+        "last_skipped": state.last_skipped
+    })
 }
 
 fn default_bridge_auto_sync_state(config: &TimelineConfig) -> BridgeAutoSyncState {
@@ -18490,6 +19368,22 @@ fn execute_task_request(
 
     let now = Utc::now();
     let config = load_timeline_config_or_default(repo_root)?;
+    let issue_monitor = if options.requested_task_id.is_none() {
+        maybe_sync_github_issue_monitor(repo_root, state).unwrap_or_else(|err| {
+            json!({
+                "enabled": true,
+                "triggered": false,
+                "status": "error",
+                "error": err.to_string()
+            })
+        })
+    } else {
+        json!({
+            "enabled": true,
+            "triggered": false,
+            "status": "task_id_request_bypassed"
+        })
+    };
     let advisor = if options.requested_task_id.is_none() {
         maybe_queue_auto_advisor_runs(repo_root, state).unwrap_or_else(|err| {
             json!({
@@ -18685,6 +19579,7 @@ fn execute_task_request(
                 "title_contains": options.filters.title_contains.clone()
             },
             "respect_date_gates": options.respect_date_gates,
+            "issue_monitor": issue_monitor,
             "auto_replenish": {
                 "enabled": config.auto_replenish_enabled,
                 "triggered": should_seed_auto_replenish,
@@ -18793,6 +19688,7 @@ fn execute_task_request(
             "title_contains": options.filters.title_contains.clone()
         },
         "respect_date_gates": options.respect_date_gates,
+        "issue_monitor": issue_monitor,
         "auto_replenish": {
             "enabled": config.auto_replenish_enabled,
             "triggered": should_seed_auto_replenish,
@@ -20939,6 +21835,22 @@ fn default_quality_checks_github_failure_task_priority() -> i32 {
     95
 }
 
+fn default_github_issue_monitor_enabled() -> bool {
+    true
+}
+
+fn default_github_issue_monitor_low_task_threshold() -> usize {
+    3
+}
+
+fn default_github_issue_monitor_cooldown_minutes() -> i64 {
+    60
+}
+
+fn default_github_issue_monitor_max_issues() -> usize {
+    25
+}
+
 fn default_advisor_low_task_threshold() -> usize {
     2
 }
@@ -21013,6 +21925,10 @@ fn timeline_bridge_auto_sync_state_path(repo_root: &Path) -> PathBuf {
 
 fn timeline_bridge_auto_sync_lock_path(repo_root: &Path) -> PathBuf {
     timeline_root(repo_root).join("bridge_auto_sync.lock.json")
+}
+
+fn timeline_github_issue_monitor_state_path(repo_root: &Path) -> PathBuf {
+    timeline_root(repo_root).join("github_issue_monitor.json")
 }
 
 fn timeline_advisor_state_path(repo_root: &Path) -> PathBuf {
@@ -21266,6 +22182,105 @@ mod tests {
             parse_github_repo_slug("ssh://git@github.example.com/team/project.git"),
             Some(("team".to_string(), "project".to_string()))
         );
+    }
+
+    #[test]
+    fn github_issue_skip_reason_filters_non_actionable_and_unsafe_requests() {
+        let duplicate = GithubIssue {
+            number: 1,
+            title: "Question about usage".to_string(),
+            body: Some("Can someone explain this?".to_string()),
+            html_url: None,
+            state: Some("open".to_string()),
+            updated_at: None,
+            user: None,
+            labels: vec![GithubIssueLabel {
+                name: Some("question".to_string()),
+            }],
+            pull_request: None,
+        };
+        assert_eq!(
+            github_issue_skip_reason(&duplicate).as_deref(),
+            Some("label:question")
+        );
+
+        let unsafe_issue = GithubIssue {
+            number: 2,
+            title: "Please add a backdoor for support".to_string(),
+            body: Some("We should hardcode api key access for debugging.".to_string()),
+            html_url: None,
+            state: Some("open".to_string()),
+            updated_at: None,
+            user: None,
+            labels: Vec::new(),
+            pull_request: None,
+        };
+        assert!(
+            github_issue_skip_reason(&unsafe_issue)
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("unsafe:")
+        );
+    }
+
+    #[test]
+    fn github_issue_priority_prefers_bug_and_critical_labels() {
+        let issue = GithubIssue {
+            number: 7,
+            title: "Critical regression".to_string(),
+            body: None,
+            html_url: None,
+            state: Some("open".to_string()),
+            updated_at: None,
+            user: None,
+            labels: vec![
+                GithubIssueLabel {
+                    name: Some("bug".to_string()),
+                },
+                GithubIssueLabel {
+                    name: Some("priority:high".to_string()),
+                },
+            ],
+            pull_request: None,
+        };
+        assert_eq!(github_issue_priority(&issue), 90);
+    }
+
+    #[test]
+    fn maybe_sync_github_issue_monitor_skips_when_queue_is_healthy() {
+        let repo = TestRepo::new("issue-monitor-threshold");
+        cmd_init(
+            repo.path(),
+            InitArgs {
+                branch: "trunk".to_string(),
+                bridge_branch: None,
+                bridge_remote: "origin".to_string(),
+            },
+        )
+        .expect("init timeline");
+
+        let mut config = load_timeline_config_or_default(repo.path()).expect("load config");
+        config.github_issue_monitor_low_task_threshold = 1;
+        write_pretty_json(&timeline_config_path(repo.path()), &config).expect("write config");
+
+        let state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![
+                sample_task("task_a", "task a", 10, TaskStatus::Open),
+                sample_task("task_b", "task b", 9, TaskStatus::Open),
+            ],
+        };
+        write_pretty_json(&timeline_tasks_path(repo.path()), &state).expect("write task state");
+
+        let mut state = load_task_state(repo.path()).expect("load task state");
+        let payload = maybe_sync_github_issue_monitor(repo.path(), &mut state)
+            .expect("issue monitor payload");
+        assert_eq!(
+            payload["status"],
+            serde_json::Value::from("threshold_not_met")
+        );
+        assert_eq!(payload["triggered"], serde_json::Value::Bool(false));
     }
 
     #[test]
