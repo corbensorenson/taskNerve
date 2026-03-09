@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<USAGE
-Publish fugit Codex skill to a shared directory.
+Publish tasknerve Codex skill to a shared directory.
 
 Usage:
   bash scripts/publish-shared-skill.sh [options]
@@ -59,8 +59,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SRC_SKILL_DIR="$REPO_ROOT/skills/fugit"
-DEST_SKILL_DIR="$DEST_ROOT/fugit"
+SRC_SKILL_DIR="$REPO_ROOT/skills/tasknerve"
+DEST_SKILL_DIR="$DEST_ROOT/tasknerve"
 
 if [[ ! -d "$SRC_SKILL_DIR" ]]; then
   echo "missing source skill: $SRC_SKILL_DIR" >&2

@@ -1,5 +1,5 @@
 param(
-    [string]$InstallDir = "$env:USERPROFILE\\.fugit-alpha\\bin",
+    [string]$InstallDir = "$env:USERPROFILE\\.tasknerve\\bin",
     [switch]$WithSkill,
     [switch]$OverwriteSkill,
     [switch]$SkipRustInstall,
@@ -10,10 +10,10 @@ $ErrorActionPreference = "Stop"
 
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $CargoToml = Join-Path $RepoRoot "Cargo.toml"
-$BinaryName = "fugit.exe"
+$BinaryName = "tasknerve.exe"
 
 if (-not (Test-Path $CargoToml)) {
-    throw "Cargo.toml not found next to installer. Run this script from the fugit-alpha repository root."
+    throw "Cargo.toml not found next to installer. Run this script from the tasknerve repository root."
 }
 
 function Ensure-Cargo {
@@ -42,7 +42,7 @@ function Ensure-Cargo {
 
 Ensure-Cargo
 
-Write-Host "[installer] building fugit-alpha (binary: fugit)"
+Write-Host "[installer] building tasknerve (binary: tasknerve)"
 & cargo build --release --manifest-path $CargoToml
 if ($LASTEXITCODE -ne 0) {
     throw "cargo build failed"
@@ -89,5 +89,5 @@ if ($WithSkill) {
     }
 }
 
-Write-Host "[installer] installed fugit to: $BinaryDest"
+Write-Host "[installer] installed tasknerve to: $BinaryDest"
 Write-Host "[installer] done"

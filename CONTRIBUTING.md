@@ -1,4 +1,4 @@
-# Contributing to fugit-alpha
+# Contributing to tasknerve
 
 Thanks for contributing.
 

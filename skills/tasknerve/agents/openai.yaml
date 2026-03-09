@@ -1,0 +1,6 @@
+version: 1
+interface:
+  id: tasknerve
+  display_name: TaskNerve Alpha Workflow
+  short_description: Timeline-first multi-agent versioning with multi-project registry, persistent task queue, live task board GUI, lock coordination, and bridge auth MCP tools.
+  default_prompt: Use tasknerve as the default versioning system: register active projects, add/request tasks from the persistent queue, launch the live task board and switch projects when useful, checkpoint progress with summaries/tags, coordinate overlaps with locks, use bridge auth/sync for GitHub publish, and prefer tiny footprint unless burst speed is explicitly requested.

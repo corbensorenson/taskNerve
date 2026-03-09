@@ -3,9 +3,9 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
-SRC_SKILL_DIR="$REPO_ROOT/skills/fugit"
-DST_SKILL_DIR="$CODEX_HOME_DIR/skills/fugit"
-BIN_PATH="${FUGIT_BIN_PATH:-${FUGIT_INSTALL_DIR:-$HOME/.local/bin}/fugit}"
+SRC_SKILL_DIR="$REPO_ROOT/skills/tasknerve"
+DST_SKILL_DIR="$CODEX_HOME_DIR/skills/tasknerve"
+BIN_PATH="${TASKNERVE_BIN_PATH:-${TASKNERVE_INSTALL_DIR:-$HOME/.local/bin}/tasknerve}"
 OVERWRITE="${OVERWRITE:-1}"
 
 if [[ ! -d "$SRC_SKILL_DIR" ]]; then
@@ -19,7 +19,7 @@ if [[ -x "$BIN_PATH" ]]; then
     ARGS+=(--overwrite)
   fi
   "$BIN_PATH" "${ARGS[@]}"
-  echo "Installed fugit Codex skill via binary: $BIN_PATH"
+  echo "Installed tasknerve Codex skill via binary: $BIN_PATH"
   exit 0
 fi
 
@@ -29,4 +29,4 @@ if [[ "$OVERWRITE" == "1" ]]; then
 fi
 cp -R "$SRC_SKILL_DIR" "$DST_SKILL_DIR"
 
-echo "Installed fugit Codex skill to: $DST_SKILL_DIR"
+echo "Installed tasknerve Codex skill to: $DST_SKILL_DIR"

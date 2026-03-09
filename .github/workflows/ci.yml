@@ -106,12 +106,12 @@ jobs:
 
       - name: Install Binary
         run: |
-          bash ./install.sh --install-dir "$RUNNER_TEMP/fugit-bin" --skip-rust-install --with-skill --overwrite-skill
+          bash ./install.sh --install-dir "$RUNNER_TEMP/tasknerve-bin" --skip-rust-install --with-skill --overwrite-skill
 
       - name: Validate Binary
         run: |
-          "$RUNNER_TEMP/fugit-bin/fugit" --help
-          "$RUNNER_TEMP/fugit-bin/fugit" skill doctor
+          "$RUNNER_TEMP/tasknerve-bin/tasknerve" --help
+          "$RUNNER_TEMP/tasknerve-bin/tasknerve" skill doctor
 
   installer-smoke-windows:
     name: Installer Smoke (Windows)
@@ -127,10 +127,10 @@ jobs:
       - name: Install Binary
         shell: pwsh
         run: |
-          powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 -InstallDir "$env:RUNNER_TEMP\fugit-bin" -SkipRustInstall -NoPathUpdate -WithSkill -OverwriteSkill
+          powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 -InstallDir "$env:RUNNER_TEMP\tasknerve-bin" -SkipRustInstall -NoPathUpdate -WithSkill -OverwriteSkill
 
       - name: Validate Binary
         shell: pwsh
         run: |
-          & "$env:RUNNER_TEMP\fugit-bin\fugit.exe" --help
-          & "$env:RUNNER_TEMP\fugit-bin\fugit.exe" skill doctor
+          & "$env:RUNNER_TEMP\tasknerve-bin\tasknerve.exe" --help
+          & "$env:RUNNER_TEMP\tasknerve-bin\tasknerve.exe" skill doctor

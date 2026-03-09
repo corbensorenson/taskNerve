@@ -3,13 +3,13 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOOK_NAME="${1:-manual}"
-STAMP_FILE="$REPO_ROOT/.git/fugit-auto-install.stamp"
-LOCK_DIR="$REPO_ROOT/.git/fugit-auto-install.lock"
-STRICT="${FUGIT_DEV_AUTO_INSTALL_STRICT:-0}"
-TIMEOUT_SECONDS="${FUGIT_DEV_AUTO_INSTALL_TIMEOUT_SECONDS:-180}"
+STAMP_FILE="$REPO_ROOT/.git/tasknerve-auto-install.stamp"
+LOCK_DIR="$REPO_ROOT/.git/tasknerve-auto-install.lock"
+STRICT="${TASKNERVE_DEV_AUTO_INSTALL_STRICT:-0}"
+TIMEOUT_SECONDS="${TASKNERVE_DEV_AUTO_INSTALL_TIMEOUT_SECONDS:-180}"
 
 log() {
-  printf '[fugit-dev-auto-install] %s\n' "$*" >&2
+  printf '[tasknerve-dev-auto-install] %s\n' "$*" >&2
 }
 
 run_install() {
@@ -31,7 +31,7 @@ try:
     completed = subprocess.run(cmd, cwd=repo_root, timeout=timeout)
 except subprocess.TimeoutExpired:
     print(
-        f"[fugit-dev-auto-install] warning: local fugit refresh timed out after {timeout}s",
+        f"[tasknerve-dev-auto-install] warning: local tasknerve refresh timed out after {timeout}s",
         file=sys.stderr,
     )
     sys.exit(124)
@@ -58,7 +58,7 @@ done < <(
     scripts/install.sh \
     scripts/install-unix.sh \
     scripts/install_codex_skill.sh \
-    scripts/fugit-gui \
+    scripts/tasknerve-gui \
     README.md \
     CHANGELOG.md
 )
@@ -78,11 +78,11 @@ if [[ -f "$STAMP_FILE" ]] && [[ "$(cat "$STAMP_FILE")" == "$CURRENT_STAMP" ]]; t
   exit 0
 fi
 
-log "refreshing local fugit install after ${HOOK_NAME}"
+log "refreshing local tasknerve install after ${HOOK_NAME}"
 if run_install; then
   printf '%s\n' "$CURRENT_STAMP" >"$STAMP_FILE"
-  ACTIVE_BIN="$(command -v fugit || true)"
-  ACTIVE_VERSION="$(fugit --version 2>/dev/null || true)"
+  ACTIVE_BIN="$(command -v tasknerve || true)"
+  ACTIVE_VERSION="$(tasknerve --version 2>/dev/null || true)"
   log "active binary: ${ACTIVE_BIN:-unknown}"
   if [[ -n "$ACTIVE_VERSION" ]]; then
     log "active version: $ACTIVE_VERSION"
@@ -90,9 +90,9 @@ if run_install; then
 else
   EXIT_CODE="$?"
   if [[ "$EXIT_CODE" == "124" ]]; then
-    log "warning: local fugit refresh timed out"
+    log "warning: local tasknerve refresh timed out"
   else
-    log "warning: local fugit refresh failed"
+    log "warning: local tasknerve refresh failed"
   fi
   if [[ "$STRICT" == "1" ]]; then
     exit 1

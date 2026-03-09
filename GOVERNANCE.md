@@ -2,7 +2,7 @@
 
 ## Model
 
-fugit-alpha is open source (MIT) and maintainer-led.
+TaskNerve is open source (MIT) and maintainer-led.
 
 - The repository owner/maintainer controls upstream roadmap, merges, release timing, and project direction for the mainline repository.
 - Contributions are welcome through issues and pull requests.

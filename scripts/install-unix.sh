@@ -3,14 +3,14 @@ set -euo pipefail
 
 usage() {
   cat <<USAGE
-fugit-alpha unix installer
+tasknerve unix installer
 
 Usage:
   bash scripts/install-unix.sh [options]
 
 Options:
   --platform <linux|macos>   Target platform check (auto-detected if omitted)
-  --install-dir <path>       Install directory (default: \$FUGIT_INSTALL_DIR or \$HOME/.local/bin)
+  --install-dir <path>       Install directory (default: \$TASKNERVE_INSTALL_DIR or \$HOME/.local/bin)
   --no-path-update           Do not auto-update shell startup files with install dir
   --with-skill               Install bundled Codex skill after binary install
   --overwrite-skill          Overwrite existing Codex skill files when used with --with-skill
@@ -20,7 +20,7 @@ USAGE
 }
 
 PLATFORM=""
-INSTALL_DIR="${FUGIT_INSTALL_DIR:-$HOME/.local/bin}"
+INSTALL_DIR="${TASKNERVE_INSTALL_DIR:-$HOME/.local/bin}"
 PATH_UPDATE=1
 WITH_SKILL=0
 OVERWRITE_SKILL=0
@@ -95,8 +95,8 @@ case "$PLATFORM" in
 esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN_NAME="fugit"
-GUI_LAUNCHER_NAME="fugit-gui"
+BIN_NAME="tasknerve"
+GUI_LAUNCHER_NAME="tasknerve-gui"
 
 ensure_cargo() {
   if command -v cargo >/dev/null 2>&1; then
@@ -145,10 +145,10 @@ install_gui_launcher() {
 }
 
 install_macos_gui_app() {
-  local app_root="$HOME/Applications/Fugit GUI.app"
+  local app_root="$HOME/Applications/TaskNerve GUI.app"
   local macos_dir="$app_root/Contents/MacOS"
   local plist_path="$app_root/Contents/Info.plist"
-  local launcher_path="$macos_dir/fugit-gui-launcher"
+  local launcher_path="$macos_dir/tasknerve-gui-launcher"
   mkdir -p "$macos_dir"
   cat >"$launcher_path" <<EOF
 #!/usr/bin/env bash
@@ -162,13 +162,13 @@ EOF
 <plist version="1.0">
 <dict>
   <key>CFBundleDisplayName</key>
-  <string>Fugit GUI</string>
+  <string>TaskNerve GUI</string>
   <key>CFBundleExecutable</key>
-  <string>fugit-gui-launcher</string>
+  <string>tasknerve-gui-launcher</string>
   <key>CFBundleIdentifier</key>
-  <string>io.fugit.gui</string>
+  <string>io.tasknerve.gui</string>
   <key>CFBundleName</key>
-  <string>Fugit GUI</string>
+  <string>TaskNerve GUI</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleVersion</key>
@@ -181,15 +181,15 @@ EOF
 
 install_linux_desktop_entry() {
   local desktop_dir="$HOME/.local/share/applications"
-  local desktop_file="$desktop_dir/fugit-gui.desktop"
+  local desktop_file="$desktop_dir/tasknerve-gui.desktop"
   local escaped_exec
   mkdir -p "$desktop_dir"
   escaped_exec="$(desktop_exec_escape "$INSTALL_DIR/$GUI_LAUNCHER_NAME")"
   cat >"$desktop_file" <<EOF
 [Desktop Entry]
 Type=Application
-Name=Fugit GUI
-Comment=Launch the fugit task board
+Name=TaskNerve GUI
+Comment=Launch the tasknerve task board
 Exec=$escaped_exec
 Terminal=false
 Categories=Development;
@@ -197,7 +197,7 @@ EOF
   echo "[installer] installed Linux desktop entry to: $desktop_file"
 }
 
-echo "[installer] building fugit-alpha (binary: fugit)"
+echo "[installer] building tasknerve (binary: tasknerve)"
 cargo build --release --manifest-path "$REPO_ROOT/Cargo.toml"
 
 BIN_SRC="$REPO_ROOT/target/release/$BIN_NAME"

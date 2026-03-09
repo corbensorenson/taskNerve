@@ -1,8 +1,8 @@
-# Git Complaints + Fugit v1 Speed Plan (2026-03-09)
+# Git Complaints + TaskNerve v1 Speed Plan (2026-03-09)
 
 ## Why this exists
 
-This note captures externally reported Git pain points and maps them to fugit v1 features and backlog. The goal is to remove common Git friction while keeping fugit tiny by default and fast on demand.
+This note captures externally reported Git pain points and maps them to tasknerve v1 features and backlog. The goal is to remove common Git friction while keeping tasknerve tiny by default and fast on demand.
 
 ## Source-backed pain points
 
@@ -28,12 +28,12 @@ This note captures externally reported Git pain points and maps them to fugit v1
 
 ## v1 features implemented against those complaints
 
-1. Auth wrapping in fugit bridge.
-- Added `fugit bridge auth status|login|logout` using Git credential protocol.
+1. Auth wrapping in tasknerve bridge.
+- Added `tasknerve bridge auth status|login|logout` using Git credential protocol.
 - Added HTTPS credential preflight in `bridge sync-github`.
 
 2. Pull-with-local-changes quality-of-life.
-- Added `fugit bridge pull-github --autostash` to encapsulate stash/pull/pop.
+- Added `tasknerve bridge pull-github --autostash` to encapsulate stash/pull/pop.
 
 3. Tiny-by-default local performance with burst mode.
 - Local scan/object work defaults to `1` worker (low idle footprint).
@@ -46,7 +46,7 @@ This note captures externally reported Git pain points and maps them to fugit v1
 
 ## Next high-ROI v1 additions
 
-1. `fugit bridge optimize-git --profile tiny|balanced|burst`
+1. `tasknerve bridge optimize-git --profile tiny|balanced|burst`
 - Apply vetted repo-local Git config bundles:
   - `core.untrackedCache=true`
   - `core.splitIndex=true`
@@ -54,7 +54,7 @@ This note captures externally reported Git pain points and maps them to fugit v1
   - `rerere.enabled=true`
   - `fetch.parallel`/`pack.threads` profile tuning
 
-2. `fugit bridge clone-github --filter blob:none --sparse`
+2. `tasknerve bridge clone-github --filter blob:none --sparse`
 - Use partial clone + sparse checkout for giant repos.
 
 3. Conflict-reuse defaults for teams

@@ -11,7 +11,7 @@ Do not open public issues for undisclosed vulnerabilities.
 This project handles:
 - local timeline metadata,
 - Git bridge credentials via system git credential helpers,
-- advisor runtime state and provider outputs under `.fugit/`,
+- advisor runtime state and provider outputs under `.tasknerve/`,
 - optional installer-time PATH modification.
 
 Security-sensitive changes should include:
@@ -21,6 +21,6 @@ Security-sensitive changes should include:
 
 ## Credential Hygiene
 
-- Keep `.fugit/` ignored; it can contain runtime advisor outputs, generated plans, and worker metadata.
+- Keep `.tasknerve/` ignored; it can contain runtime advisor outputs, generated plans, and worker metadata.
 - Do not commit API keys, provider tokens, or copied credential material into tracked files.
 - Prefer secure Git credential helpers (`manager-core`, `osxkeychain`, `libsecret`, `wincred`) over plaintext storage.

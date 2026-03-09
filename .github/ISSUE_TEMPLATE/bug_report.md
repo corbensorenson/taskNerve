@@ -1,11 +1,11 @@
 ---
 name: Bug report
-about: Report a defect in fugit-alpha
+about: Report a defect in tasknerve
 ---
 
 ## Environment
 - OS:
-- fugit version (`fugit --version`):
+- tasknerve version (`tasknerve --version`):
 - Install method (installer/manual):
 
 ## Reproduction

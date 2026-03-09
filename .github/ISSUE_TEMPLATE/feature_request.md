@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Propose an improvement for fugit-alpha
+about: Propose an improvement for tasknerve
 ---
 
 ## Problem

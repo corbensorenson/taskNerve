@@ -4,7 +4,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-BIN="${FUGIT_BIN:-$REPO_ROOT/target/debug/fugit}"
+BIN="${TASKNERVE_BIN:-$REPO_ROOT/target/debug/tasknerve}"
 
 echo "[vigorous-e2e] building debug binary"
 cargo build
@@ -14,19 +14,19 @@ if [[ ! -x "$BIN" ]]; then
   exit 1
 fi
 
-TMP_ROOT="$(mktemp -d /tmp/fugit-vigorous-e2e-XXXXXX)"
+TMP_ROOT="$(mktemp -d /tmp/tasknerve-vigorous-e2e-XXXXXX)"
 trap 'rm -rf "$TMP_ROOT" >/dev/null 2>&1 || true' EXIT
 
-export FUGIT_HOME="$TMP_ROOT/fugit-home"
+export TASKNERVE_HOME="$TMP_ROOT/tasknerve-home"
 export CODEX_HOME="$TMP_ROOT/codex-home"
-mkdir -p "$FUGIT_HOME" "$CODEX_HOME"
+mkdir -p "$TASKNERVE_HOME" "$CODEX_HOME"
 
 create_git_repo() {
   local dir="$1"
   mkdir -p "$dir"
   git -C "$dir" init >/dev/null
-  git -C "$dir" config user.name "fugit-e2e"
-  git -C "$dir" config user.email "fugit-e2e@example.local"
+  git -C "$dir" config user.name "tasknerve-e2e"
+  git -C "$dir" config user.email "tasknerve-e2e@example.local"
   if ! git -C "$dir" rev-parse --verify trunk >/dev/null 2>&1; then
     git -C "$dir" checkout -b trunk >/dev/null 2>&1 || true
   fi
@@ -145,8 +145,8 @@ git -C "$REPO_C" commit -m "seed repo-c" >/dev/null
 
 mkdir -p "$UPDATE_SRC"
 git -C "$UPDATE_SRC" init >/dev/null
-git -C "$UPDATE_SRC" config user.name "fugit-e2e"
-git -C "$UPDATE_SRC" config user.email "fugit-e2e@example.local"
+git -C "$UPDATE_SRC" config user.name "tasknerve-e2e"
+git -C "$UPDATE_SRC" config user.email "tasknerve-e2e@example.local"
 git -C "$UPDATE_SRC" checkout -b main >/dev/null 2>&1 || true
 echo "updater" >"$UPDATE_SRC/README.txt"
 git -C "$UPDATE_SRC" add README.txt
@@ -159,13 +159,13 @@ echo "[vigorous-e2e] init/status/backend"
 python3 - "$TMP_ROOT/version.txt" <<'PY'
 import sys
 version = open(sys.argv[1], "r", encoding="utf-8").read().strip()
-if not version.startswith("fugit 0.1.0"):
+if not version.startswith("tasknerve 0.1.0"):
     raise SystemExit(f"[vigorous-e2e] unexpected version output: {version}")
 if "+" not in version:
     raise SystemExit(f"[vigorous-e2e] expected build fingerprint in version output: {version}")
 PY
 "$BIN" version --json >"$TMP_ROOT/version-json.json"
-json_assert "$TMP_ROOT/version-json.json" 'payload.get("schema_version") == "fugit.version.v1" and payload.get("version", "").startswith("fugit 0.1.0") and isinstance(payload.get("path_resolution", {}).get("candidates"), list)' "version --json should expose machine-readable build and PATH resolution details"
+json_assert "$TMP_ROOT/version-json.json" 'payload.get("schema_version") == "tasknerve.version.v1" and payload.get("version", "").startswith("tasknerve 0.1.0") and isinstance(payload.get("path_resolution", {}).get("candidates"), list)' "version --json should expose machine-readable build and PATH resolution details"
 "$BIN" --repo-root "$REPO_A" init --branch trunk >/dev/null
 "$BIN" --repo-root "$REPO_A" status --json >"$TMP_ROOT/status.json"
 json_assert "$TMP_ROOT/status.json" 'payload.get("schema_version") == "timeline.status.v1" and payload.get("branch") == "trunk"' "status schema/branch mismatch after init"
@@ -180,11 +180,11 @@ json_assert "$TMP_ROOT/issue-monitor-show.json" 'payload.get("enabled") is True 
 json_assert "$TMP_ROOT/issue-monitor-set.json" 'payload.get("low_task_threshold") == 1 and payload.get("cooldown_minutes") == 5 and payload.get("max_issues") == 10' "issue monitor policy update should persist"
 "$BIN" --repo-root "$REPO_A" bridge sync-github-issues --json >"$TMP_ROOT/issue-monitor-sync.json"
 json_assert "$TMP_ROOT/issue-monitor-sync.json" 'payload.get("status") == "non_github_remote"' "issue monitor should report non-GitHub remotes cleanly"
-FUGIT_HOME="$TMP_ROOT/update-home" FUGIT_UPDATE_REPO_URL="$UPDATE_REMOTE" FUGIT_UPDATE_BRANCH=main FUGIT_DISABLE_AUTO_UPDATE=1 "$BIN" update show --json >"$TMP_ROOT/update-show.json"
+TASKNERVE_HOME="$TMP_ROOT/update-home" TASKNERVE_UPDATE_REPO_URL="$UPDATE_REMOTE" TASKNERVE_UPDATE_BRANCH=main TASKNERVE_DISABLE_AUTO_UPDATE=1 "$BIN" update show --json >"$TMP_ROOT/update-show.json"
 json_assert "$TMP_ROOT/update-show.json" 'payload.get("status") == "idle" and payload.get("policy", {}).get("auto_check_enabled") is True' "update show should expose the default updater policy"
-FUGIT_HOME="$TMP_ROOT/update-home" FUGIT_UPDATE_REPO_URL="$UPDATE_REMOTE" FUGIT_UPDATE_BRANCH=main FUGIT_DISABLE_AUTO_UPDATE=1 "$BIN" update policy set --auto-check-enabled true --auto-apply-enabled false --check-interval-hours 12 --json >"$TMP_ROOT/update-policy-set.json"
+TASKNERVE_HOME="$TMP_ROOT/update-home" TASKNERVE_UPDATE_REPO_URL="$UPDATE_REMOTE" TASKNERVE_UPDATE_BRANCH=main TASKNERVE_DISABLE_AUTO_UPDATE=1 "$BIN" update policy set --auto-check-enabled true --auto-apply-enabled false --check-interval-hours 12 --json >"$TMP_ROOT/update-policy-set.json"
 json_assert "$TMP_ROOT/update-policy-set.json" 'payload.get("policy", {}).get("auto_check_enabled") is True and payload.get("policy", {}).get("auto_apply_enabled") is False and payload.get("policy", {}).get("check_interval_hours") == 12' "update policy set should persist updater settings"
-FUGIT_HOME="$TMP_ROOT/update-home" FUGIT_UPDATE_REPO_URL="$UPDATE_REMOTE" FUGIT_UPDATE_BRANCH=main FUGIT_DISABLE_AUTO_UPDATE=1 "$BIN" update check --json >"$TMP_ROOT/update-check.json"
+TASKNERVE_HOME="$TMP_ROOT/update-home" TASKNERVE_UPDATE_REPO_URL="$UPDATE_REMOTE" TASKNERVE_UPDATE_BRANCH=main TASKNERVE_DISABLE_AUTO_UPDATE=1 "$BIN" update check --json >"$TMP_ROOT/update-check.json"
 json_assert "$TMP_ROOT/update-check.json" 'payload.get("last_check_status") == "success" and payload.get("update_available") is True and payload.get("latest_remote_sha")' "update check should compare against the configured canonical repo"
 
 echo "[vigorous-e2e] checkpoint/log/branch/checkout"
@@ -437,7 +437,7 @@ fi
 EOF
 chmod +x "$TMP_ROOT/fake-advisor.sh"
 "$BIN" --repo-root "$REPO_C" advisor workflow init --json >"$TMP_ROOT/advisor-workflow-init.json"
-cat >"$REPO_C/FUGIT_WORKFLOW.md" <<'EOF'
+cat >"$REPO_C/TASKNERVE_WORKFLOW.md" <<'EOF'
 ---
 advisor:
   auto_task_generation: true
@@ -507,7 +507,7 @@ print(json.load(open(sys.argv[1]))["run_id"])
 PY
 )"
 "$BIN" --repo-root "$REPO_C" advisor run show --run-id "$MANUAL_ADVISOR_RUN_ID" --json >"$TMP_ROOT/advisor-run-show.json"
-json_assert "$TMP_ROOT/advisor-run-show.json" 'payload.get("run_id") == "'"$MANUAL_ADVISOR_RUN_ID"'" and payload.get("workflow", {}).get("path", "").endswith("FUGIT_WORKFLOW.md")' "advisor run show should expose stored report workflow metadata"
+json_assert "$TMP_ROOT/advisor-run-show.json" 'payload.get("run_id") == "'"$MANUAL_ADVISOR_RUN_ID"'" and payload.get("workflow", {}).get("path", "").endswith("TASKNERVE_WORKFLOW.md")' "advisor run show should expose stored report workflow metadata"
 "$BIN" --repo-root "$REPO_C" advisor run rerun --run-id "$MANUAL_ADVISOR_RUN_ID" --json >"$TMP_ROOT/advisor-rerun.json"
 json_assert "$TMP_ROOT/advisor-rerun.json" 'payload.get("run_id") != "'"$MANUAL_ADVISOR_RUN_ID"'" and payload.get("generated_task_count", 0) >= 1' "advisor run rerun should execute a fresh pass"
 "$BIN" --repo-root "$REPO_C" advisor runs --json >"$TMP_ROOT/advisor-runs.json"
@@ -521,7 +521,7 @@ cat >"$REPO_A/the_final_plan.md" <<'EOF'
   - Emit missing old-object blobs in JSON
 EOF
 "$BIN" --repo-root "$REPO_A" task sync --plan "$REPO_A/the_final_plan.md" --json >"$TMP_ROOT/task-sync-1.json"
-json_assert "$TMP_ROOT/task-sync-1.json" 'payload.get("schema_version") == "fugit.task.sync.v1" and len(payload.get("created", [])) == 2' "task sync should create plan-backed tasks"
+json_assert "$TMP_ROOT/task-sync-1.json" 'payload.get("schema_version") == "tasknerve.task.sync.v1" and len(payload.get("created", [])) == 2' "task sync should create plan-backed tasks"
 SYNC_TASK_ID="$(python3 - "$TMP_ROOT/task-sync-1.json" <<'PY'
 import json,sys
 payload=json.load(open(sys.argv[1]))
@@ -568,7 +568,7 @@ echo "[vigorous-e2e] project registry"
 "$BIN" project add --name proj-b --repo-root "$REPO_B" --json >"$TMP_ROOT/project-add-b.json"
 "$BIN" project add --name proj-c --repo-root "$REPO_C" --json >"$TMP_ROOT/project-add-c.json"
 "$BIN" project discover --root "$TMP_ROOT" --json >"$TMP_ROOT/project-discover.json"
-json_assert "$TMP_ROOT/project-discover.json" 'payload.get("selected_project", {}).get("repo_root") is not None and len(payload.get("created", [])) + len(payload.get("updated", [])) >= 2' "project discover should find initialized fugit repos under the requested root"
+json_assert "$TMP_ROOT/project-discover.json" 'payload.get("selected_project", {}).get("repo_root") is not None and len(payload.get("created", [])) + len(payload.get("updated", [])) >= 2' "project discover should find initialized tasknerve repos under the requested root"
 "$BIN" project list --json >"$TMP_ROOT/project-list.json"
 json_assert "$TMP_ROOT/project-list.json" 'isinstance(payload, list) and len(payload) >= 3 and any("is_most_recent" in row for row in payload)' "project list should include registry rows with recent-project metadata"
 "$BIN" project use --name proj-b --json >"$TMP_ROOT/project-use.json"
@@ -594,8 +594,8 @@ curl -s -X POST "http://127.0.0.1:$GUI_PORT/api/tasks/edit?project=proj-a" \
 curl -s -X POST "http://127.0.0.1:$GUI_PORT/api/tasks/remove?project=proj-a" \
   -H "Content-Type: application/json" \
   -d "{\"task_id\":\"$GUI_TASK_ID\"}" >"$TMP_ROOT/gui-remove.json"
-json_assert "$TMP_ROOT/gui-tasks.json" 'payload.get("schema_version") == "fugit.task.gui.snapshot.v1"' "task GUI payload schema mismatch"
-json_assert "$TMP_ROOT/gui-timeline.json" 'payload.get("schema_version") == "fugit.task.gui.timeline.v1"' "timeline GUI payload schema mismatch"
+json_assert "$TMP_ROOT/gui-tasks.json" 'payload.get("schema_version") == "tasknerve.task.gui.snapshot.v1"' "task GUI payload schema mismatch"
+json_assert "$TMP_ROOT/gui-timeline.json" 'payload.get("schema_version") == "tasknerve.task.gui.timeline.v1"' "timeline GUI payload schema mismatch"
 json_assert "$TMP_ROOT/gui-timeline.json" 'any("task_action" in row for row in payload.get("events",[]))' "timeline payload should include task event metadata"
 json_assert "$TMP_ROOT/gui-add.json" 'payload.get("ok") is True and payload.get("task",{}).get("task_id") is not None' "GUI add endpoint should return created task"
 json_assert "$TMP_ROOT/gui-edit.json" 'payload.get("ok") is True and payload.get("task",{}).get("title") == "gui task updated"' "GUI edit endpoint should return updated task"
@@ -632,10 +632,10 @@ fi
 
 echo "[vigorous-e2e] gui launcher wrapper"
 WRAPPER_PORT=7816
-FUGIT_BIN="$BIN" FUGIT_GUI_ROOT="$TMP_ROOT" FUGIT_GUI_PORT="$WRAPPER_PORT" "$REPO_ROOT/scripts/fugit-gui" --project proj-a --no-open >/dev/null
+TASKNERVE_BIN="$BIN" TASKNERVE_GUI_ROOT="$TMP_ROOT" TASKNERVE_GUI_PORT="$WRAPPER_PORT" "$REPO_ROOT/scripts/tasknerve-gui" --project proj-a --no-open >/dev/null
 sleep 0.7
 curl -s "http://127.0.0.1:$WRAPPER_PORT/api/tasks?project=proj-a" >"$TMP_ROOT/gui-wrapper.json"
-json_assert "$TMP_ROOT/gui-wrapper.json" 'payload.get("selected_project", {}).get("key") == "proj-a"' "fugit-gui wrapper should launch the board against the requested project"
+json_assert "$TMP_ROOT/gui-wrapper.json" 'payload.get("selected_project", {}).get("key") == "proj-a"' "tasknerve-gui wrapper should launch the board against the requested project"
 WRAPPER_PID="$(lsof -ti tcp:$WRAPPER_PORT || true)"
 if [[ -n "$WRAPPER_PID" ]]; then
   kill "$WRAPPER_PID" || true
@@ -649,8 +649,8 @@ echo "[vigorous-e2e] bridge auth/sync/pull"
 "$BIN" --repo-root "$REPO_A" bridge sync-github --remote origin --branch trunk --event-count 5 >/dev/null
 
 git clone "$REMOTE_BARE" "$CLONE_B" >/dev/null 2>&1
-git -C "$CLONE_B" config user.name "fugit-e2e"
-git -C "$CLONE_B" config user.email "fugit-e2e@example.local"
+git -C "$CLONE_B" config user.name "tasknerve-e2e"
+git -C "$CLONE_B" config user.email "tasknerve-e2e@example.local"
 git -C "$CLONE_B" checkout -B trunk origin/trunk >/dev/null
 echo "remote-change" >>"$CLONE_B/README.txt"
 git -C "$CLONE_B" add README.txt
@@ -668,13 +668,13 @@ echo "[vigorous-e2e] gc/doctor/skill"
 json_assert "$TMP_ROOT/skill-doctor.json" 'payload.get("ok") is True and isinstance(payload.get("cli", {}).get("supported_task_commands"), list) and payload.get("installed_codex_skill", {}).get("unsupported_command_paths") == []' "skill doctor should expose CLI support and report no unsupported installed skill commands"
 
 echo "[vigorous-e2e] doctor fix"
-INDEX_HASH="$(python3 - "$REPO_A/.fugit/branches/trunk/index.json" <<'PY'
+INDEX_HASH="$(python3 - "$REPO_A/.tasknerve/branches/trunk/index.json" <<'PY'
 import json, sys
 index = json.load(open(sys.argv[1]))
 print(index["README.txt"]["hash"])
 PY
 )"
-rm -f "$REPO_A/.fugit/objects/$INDEX_HASH"
+rm -f "$REPO_A/.tasknerve/objects/$INDEX_HASH"
 "$BIN" --repo-root "$REPO_A" doctor --fix --json >"$TMP_ROOT/doctor-fix.json"
 json_assert "$TMP_ROOT/doctor-fix.json" 'payload.get("repair",{}).get("requested") is True and payload.get("repair",{}).get("repaired_count", 0) >= 1 and payload.get("summary",{}).get("pass") is True' "doctor --fix should repair missing timeline objects"
 
@@ -688,13 +688,13 @@ git -C "$REPO_C" commit -m "seed repo-c" >/dev/null
 echo "beta" >"$REPO_C/tracked.txt"
 "$BIN" --repo-root "$REPO_C" checkpoint --summary "beta" --json >"$TMP_ROOT/checkpoint-ok.json"
 json_assert "$TMP_ROOT/checkpoint-ok.json" 'payload.get("ok") is True and payload.get("event_id") is not None' "checkpoint --json should emit structured success payload"
-INDEX_HASH_C="$(python3 - "$REPO_C/.fugit/branches/trunk/index.json" <<'PY'
+INDEX_HASH_C="$(python3 - "$REPO_C/.tasknerve/branches/trunk/index.json" <<'PY'
 import json, sys
 index = json.load(open(sys.argv[1]))
 print(index["tracked.txt"]["hash"])
 PY
 )"
-rm -f "$REPO_C/.fugit/objects/$INDEX_HASH_C"
+rm -f "$REPO_C/.tasknerve/objects/$INDEX_HASH_C"
 echo "gamma" >"$REPO_C/tracked.txt"
 if "$BIN" --repo-root "$REPO_C" checkpoint --summary "gamma" --json >"$TMP_ROOT/checkpoint-error.json"; then
   echo "[vigorous-e2e] expected checkpoint --json failure when old object blob is missing" >&2
@@ -705,10 +705,10 @@ json_assert "$TMP_ROOT/checkpoint-error.json" 'payload.get("ok") is False and pa
 json_assert "$TMP_ROOT/checkpoint-preflight.json" 'payload.get("ready") is False and len(payload.get("missing_old_objects", [])) >= 1' "checkpoint --preflight should surface missing old objects without writing a new event"
 "$BIN" --repo-root "$REPO_C" checkpoint --summary "gamma repaired" --repair-missing-blobs --json >"$TMP_ROOT/checkpoint-repair-alias.json"
 json_assert "$TMP_ROOT/checkpoint-repair-alias.json" 'payload.get("ok") is True and payload.get("repair_mode") == "auto"' "checkpoint --repair-missing-blobs should act as an auto-repair alias"
-printf '{"broken":\n' >>"$REPO_C/.fugit/branches/trunk/events.jsonl"
+printf '{"broken":\n' >>"$REPO_C/.tasknerve/branches/trunk/events.jsonl"
 echo "delta" >>"$REPO_C/tracked.txt"
 "$BIN" --repo-root "$REPO_C" bridge sync-github --no-push --repair-journal >/dev/null
-BACKUP_COUNT="$(find "$REPO_C/.fugit/branches/trunk" -maxdepth 1 -name 'events.jsonl.bak.*' | wc -l | tr -d ' ')"
+BACKUP_COUNT="$(find "$REPO_C/.tasknerve/branches/trunk" -maxdepth 1 -name 'events.jsonl.bak.*' | wc -l | tr -d ' ')"
 if [[ "${BACKUP_COUNT:-0}" -lt 1 ]]; then
   echo "[vigorous-e2e] expected bridge sync --repair-journal to create a journal backup" >&2
   exit 1
@@ -766,171 +766,171 @@ if "result" not in resp:
 send({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})
 resp = recv()
 tools = resp.get("result", {}).get("tools", [])
-if not any(t.get("name") == "fugit_task_request" for t in tools):
-    raise RuntimeError("missing fugit_task_request in MCP tools")
-if not any(t.get("name") == "fugit_task_show" for t in tools):
-    raise RuntimeError("missing fugit_task_show in MCP tools")
-if not any(t.get("name") == "fugit_task_current" for t in tools):
-    raise RuntimeError("missing fugit_task_current in MCP tools")
-if not any(t.get("name") == "fugit_task_edit" for t in tools):
-    raise RuntimeError("missing fugit_task_edit in MCP tools")
-if not any(t.get("name") == "fugit_task_remove" for t in tools):
-    raise RuntimeError("missing fugit_task_remove in MCP tools")
-if not any(t.get("name") == "fugit_task_sync" for t in tools):
-    raise RuntimeError("missing fugit_task_sync in MCP tools")
-if not any(t.get("name") == "fugit_task_reopen" for t in tools):
-    raise RuntimeError("missing fugit_task_reopen in MCP tools")
-if not any(t.get("name") == "fugit_check_run" for t in tools):
-    raise RuntimeError("missing fugit_check_run in MCP tools")
-if not any(t.get("name") == "fugit_check_deprecate" for t in tools):
-    raise RuntimeError("missing fugit_check_deprecate in MCP tools")
-if not any(t.get("name") == "fugit_skill_doctor" for t in tools):
-    raise RuntimeError("missing fugit_skill_doctor in MCP tools")
+if not any(t.get("name") == "tasknerve_task_request" for t in tools):
+    raise RuntimeError("missing tasknerve_task_request in MCP tools")
+if not any(t.get("name") == "tasknerve_task_show" for t in tools):
+    raise RuntimeError("missing tasknerve_task_show in MCP tools")
+if not any(t.get("name") == "tasknerve_task_current" for t in tools):
+    raise RuntimeError("missing tasknerve_task_current in MCP tools")
+if not any(t.get("name") == "tasknerve_task_edit" for t in tools):
+    raise RuntimeError("missing tasknerve_task_edit in MCP tools")
+if not any(t.get("name") == "tasknerve_task_remove" for t in tools):
+    raise RuntimeError("missing tasknerve_task_remove in MCP tools")
+if not any(t.get("name") == "tasknerve_task_sync" for t in tools):
+    raise RuntimeError("missing tasknerve_task_sync in MCP tools")
+if not any(t.get("name") == "tasknerve_task_reopen" for t in tools):
+    raise RuntimeError("missing tasknerve_task_reopen in MCP tools")
+if not any(t.get("name") == "tasknerve_check_run" for t in tools):
+    raise RuntimeError("missing tasknerve_check_run in MCP tools")
+if not any(t.get("name") == "tasknerve_check_deprecate" for t in tools):
+    raise RuntimeError("missing tasknerve_check_deprecate in MCP tools")
+if not any(t.get("name") == "tasknerve_skill_doctor" for t in tools):
+    raise RuntimeError("missing tasknerve_skill_doctor in MCP tools")
 
 send({
     "jsonrpc":"2.0",
     "id":3,
     "method":"tools/call",
-    "params":{"name":"fugit_status","arguments":{"limit":5}}
+    "params":{"name":"tasknerve_status","arguments":{"limit":5}}
 })
 resp = recv()
 if "result" not in resp:
-    raise RuntimeError(f"fugit_status MCP call failed: {resp}")
+    raise RuntimeError(f"tasknerve_status MCP call failed: {resp}")
 
 send({
     "jsonrpc":"2.0",
     "id":31,
     "method":"tools/call",
-    "params":{"name":"fugit_task_list","arguments":{"limit":2,"fields":["task_id","title"]}}
+    "params":{"name":"tasknerve_task_list","arguments":{"limit":2,"fields":["task_id","title"]}}
 })
 resp = recv()
 listed = resp.get("result", {}).get("structuredContent", [])
 if "result" not in resp or not listed or set(listed[0].keys()) != {"task_id","title"}:
-    raise RuntimeError(f"fugit_task_list MCP compact call failed: {resp}")
+    raise RuntimeError(f"tasknerve_task_list MCP compact call failed: {resp}")
 
 send({
     "jsonrpc":"2.0",
     "id":4,
     "method":"tools/call",
-    "params":{"name":"fugit_task_add","arguments":{"title":"mcp task","priority":3}}
+    "params":{"name":"tasknerve_task_add","arguments":{"title":"mcp task","priority":3}}
 })
 resp = recv()
 if "result" not in resp:
-    raise RuntimeError(f"fugit_task_add MCP call failed: {resp}")
+    raise RuntimeError(f"tasknerve_task_add MCP call failed: {resp}")
 mcp_task = resp["result"].get("structuredContent", {})
 mcp_task_id = mcp_task.get("task_id")
 if not mcp_task_id:
-    raise RuntimeError(f"fugit_task_add MCP call returned no task id: {resp}")
+    raise RuntimeError(f"tasknerve_task_add MCP call returned no task id: {resp}")
 
 send({
     "jsonrpc":"2.0",
     "id":5,
     "method":"tools/call",
-    "params":{"name":"fugit_task_edit","arguments":{"task_id":mcp_task_id,"detail":"mcp edited","tags":["mcp","edited"]}}
+    "params":{"name":"tasknerve_task_edit","arguments":{"task_id":mcp_task_id,"detail":"mcp edited","tags":["mcp","edited"]}}
 })
 resp = recv()
 edited = resp.get("result", {}).get("structuredContent", {})
 if "result" not in resp or edited.get("detail") != "mcp edited":
-    raise RuntimeError(f"fugit_task_edit MCP call failed: {resp}")
+    raise RuntimeError(f"tasknerve_task_edit MCP call failed: {resp}")
 
 send({
     "jsonrpc":"2.0",
     "id":6,
     "method":"tools/call",
-    "params":{"name":"fugit_task_request","arguments":{"agent":"agent.preview","no_claim":True,"max":2}}
+    "params":{"name":"tasknerve_task_request","arguments":{"agent":"agent.preview","no_claim":True,"max":2}}
 })
 resp = recv()
 preview = resp.get("result", {}).get("structuredContent", {})
 if "result" not in resp or preview.get("assigned_count", 0) < 1 or not isinstance(preview.get("tasks"), list):
-    raise RuntimeError(f"fugit_task_request preview MCP call failed: {resp}")
+    raise RuntimeError(f"tasknerve_task_request preview MCP call failed: {resp}")
 
 send({
     "jsonrpc":"2.0",
     "id":7,
     "method":"tools/call",
-    "params":{"name":"fugit_task_show","arguments":{"task_id":mcp_task_id}}
+    "params":{"name":"tasknerve_task_show","arguments":{"task_id":mcp_task_id}}
 })
 resp = recv()
 shown = resp.get("result", {}).get("structuredContent", {})
 if "result" not in resp or shown.get("task_id") != mcp_task_id:
-    raise RuntimeError(f"fugit_task_show MCP call failed: {resp}")
+    raise RuntimeError(f"tasknerve_task_show MCP call failed: {resp}")
 
 send({
     "jsonrpc":"2.0",
     "id":75,
     "method":"tools/call",
-    "params":{"name":"fugit_task_request","arguments":{"agent":"agent.targeted","task_id":mcp_task_id,"no_claim":True}}}
+    "params":{"name":"tasknerve_task_request","arguments":{"agent":"agent.targeted","task_id":mcp_task_id,"no_claim":True}}}
 )
 resp = recv()
 targeted = resp.get("result", {}).get("structuredContent", {})
 if "result" not in resp or targeted.get("task", {}).get("task_id") != mcp_task_id:
-    raise RuntimeError(f"fugit_task_request targeted MCP call failed: {resp}")
+    raise RuntimeError(f"tasknerve_task_request targeted MCP call failed: {resp}")
 
 send({
     "jsonrpc":"2.0",
     "id":74,
     "method":"tools/call",
-    "params":{"name":"fugit_task_current","arguments":{"agent":"agent.runner"}}}
+    "params":{"name":"tasknerve_task_current","arguments":{"agent":"agent.runner"}}}
 )
 resp = recv()
 current_payload = resp.get("result", {}).get("structuredContent", {})
 if "result" not in resp or current_payload.get("found") is not True:
-    raise RuntimeError(f"fugit_task_current MCP call failed: {resp}")
+    raise RuntimeError(f"tasknerve_task_current MCP call failed: {resp}")
 
 send({
     "jsonrpc":"2.0",
     "id":71,
     "method":"tools/call",
-    "params":{"name":"fugit_task_sync","arguments":{"markdown":"- [ ] `MCP-01` Add mcp synced task","agent":"agent.mcp"}}}
+    "params":{"name":"tasknerve_task_sync","arguments":{"markdown":"- [ ] `MCP-01` Add mcp synced task","agent":"agent.mcp"}}}
 )
 resp = recv()
 sync_payload = resp.get("result", {}).get("structuredContent", {})
 if "result" not in resp or not sync_payload.get("created"):
-    raise RuntimeError(f"fugit_task_sync MCP call failed: {resp}")
+    raise RuntimeError(f"tasknerve_task_sync MCP call failed: {resp}")
 sync_task_id = sync_payload["created"][0]["task_id"]
 
 send({
     "jsonrpc":"2.0",
     "id":72,
     "method":"tools/call",
-    "params":{"name":"fugit_task_done","arguments":{"task_id":sync_task_id,"agent":"agent.mcp","summary":"done via mcp","regressions":["test -f README.txt"]}}}
+    "params":{"name":"tasknerve_task_done","arguments":{"task_id":sync_task_id,"agent":"agent.mcp","summary":"done via mcp","regressions":["test -f README.txt"]}}}
 )
 resp = recv()
 if "result" not in resp:
-    raise RuntimeError(f"fugit_task_done MCP call failed: {resp}")
+    raise RuntimeError(f"tasknerve_task_done MCP call failed: {resp}")
 
 send({
     "jsonrpc":"2.0",
     "id":721,
     "method":"tools/call",
-    "params":{"name":"fugit_check_run","arguments":{}}
+    "params":{"name":"tasknerve_check_run","arguments":{}}
 })
 resp = recv()
 quality_payload = resp.get("result", {}).get("structuredContent", {})
 if "result" not in resp or quality_payload.get("ok") is not True:
-    raise RuntimeError(f"fugit_check_run MCP call failed: {resp}")
+    raise RuntimeError(f"tasknerve_check_run MCP call failed: {resp}")
 
 send({
     "jsonrpc":"2.0",
     "id":73,
     "method":"tools/call",
-    "params":{"name":"fugit_task_reopen","arguments":{"task_id":sync_task_id,"agent":"agent.mcp"}}}
+    "params":{"name":"tasknerve_task_reopen","arguments":{"task_id":sync_task_id,"agent":"agent.mcp"}}}
 )
 resp = recv()
 reopened = resp.get("result", {}).get("structuredContent", {})
 if "result" not in resp or reopened.get("status") != "open":
-    raise RuntimeError(f"fugit_task_reopen MCP call failed: {resp}")
+    raise RuntimeError(f"tasknerve_task_reopen MCP call failed: {resp}")
 
 send({
     "jsonrpc":"2.0",
     "id":8,
     "method":"tools/call",
-    "params":{"name":"fugit_task_remove","arguments":{"task_id":mcp_task_id}}
+    "params":{"name":"tasknerve_task_remove","arguments":{"task_id":mcp_task_id}}
 })
 resp = recv()
 removed = resp.get("result", {}).get("structuredContent", {})
 if "result" not in resp or removed.get("task_id") != mcp_task_id:
-    raise RuntimeError(f"fugit_task_remove MCP call failed: {resp}")
+    raise RuntimeError(f"tasknerve_task_remove MCP call failed: {resp}")
 
 proc.terminate()
 proc.wait(timeout=5)

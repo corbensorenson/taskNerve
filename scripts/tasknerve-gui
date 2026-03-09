@@ -3,40 +3,40 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-fugit GUI launcher
+tasknerve GUI launcher
 
 Usage:
-  fugit-gui [options]
+  tasknerve-gui [options]
 
 Options:
-  --repo-root <path>   Repo root context for the GUI server (default: $FUGIT_GUI_ROOT or $HOME)
+  --repo-root <path>   Repo root context for the GUI server (default: $TASKNERVE_GUI_ROOT or $HOME)
   --project <name>     Open a specific registered project instead of the most recent one
-  --host <host>        Bind host for the GUI server (default: $FUGIT_GUI_HOST or 127.0.0.1)
-  --port <port>        Bind port for the GUI server (default: $FUGIT_GUI_PORT or 0 for auto)
+  --host <host>        Bind host for the GUI server (default: $TASKNERVE_GUI_HOST or 127.0.0.1)
+  --port <port>        Bind port for the GUI server (default: $TASKNERVE_GUI_PORT or 0 for auto)
   --no-open            Start the GUI server without opening a browser tab
   -h, --help           Show this help
 USAGE
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_BIN="$SCRIPT_DIR/fugit"
-FUGIT_BIN="${FUGIT_BIN:-}"
-GUI_ROOT="${FUGIT_GUI_ROOT:-${HOME:-.}}"
-GUI_PROJECT="${FUGIT_GUI_PROJECT:-}"
-GUI_HOST="${FUGIT_GUI_HOST:-127.0.0.1}"
-GUI_PORT="${FUGIT_GUI_PORT:-0}"
+DEFAULT_BIN="$SCRIPT_DIR/tasknerve"
+TASKNERVE_BIN="${TASKNERVE_BIN:-}"
+GUI_ROOT="${TASKNERVE_GUI_ROOT:-${HOME:-.}}"
+GUI_PROJECT="${TASKNERVE_GUI_PROJECT:-}"
+GUI_HOST="${TASKNERVE_GUI_HOST:-127.0.0.1}"
+GUI_PORT="${TASKNERVE_GUI_PORT:-0}"
 NO_OPEN=0
 
-if [[ -z "$FUGIT_BIN" ]]; then
+if [[ -z "$TASKNERVE_BIN" ]]; then
   if [[ -x "$DEFAULT_BIN" ]]; then
-    FUGIT_BIN="$DEFAULT_BIN"
+    TASKNERVE_BIN="$DEFAULT_BIN"
   else
-    FUGIT_BIN="$(command -v fugit || true)"
+    TASKNERVE_BIN="$(command -v tasknerve || true)"
   fi
 fi
 
-if [[ -z "$FUGIT_BIN" ]]; then
-  echo "fugit-gui could not find the fugit binary. Reinstall fugit or set FUGIT_BIN." >&2
+if [[ -z "$TASKNERVE_BIN" ]]; then
+  echo "tasknerve-gui could not find the tasknerve binary. Reinstall tasknerve or set TASKNERVE_BIN." >&2
   exit 1
 fi
 
@@ -74,7 +74,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-"$FUGIT_BIN" project discover >/dev/null 2>&1 || true
+"$TASKNERVE_BIN" project discover >/dev/null 2>&1 || true
 
 ARGS=(--repo-root "$GUI_ROOT" task gui --background --host "$GUI_HOST" --port "$GUI_PORT")
 if [[ -n "$GUI_PROJECT" ]]; then
@@ -84,4 +84,4 @@ if [[ "$NO_OPEN" -eq 1 ]]; then
   ARGS+=(--no-open)
 fi
 
-exec "$FUGIT_BIN" "${ARGS[@]}"
+exec "$TASKNERVE_BIN" "${ARGS[@]}"

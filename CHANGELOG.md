@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Renamed package to `fugit-alpha` (CLI command remains `fugit`).
+- Renamed the project to TaskNerve and standardized the CLI/package on `tasknerve`.
 - Added cross-platform installers: macOS, Linux, Windows.
 - Added shared Unix installer engine with optional skill install.
 - Added skill distribution via CLI and MCP tools.
@@ -10,7 +10,7 @@
 - Added pull autostash flow.
 - Added burst performance controls for local and push paths.
 - Added persistent multi-agent task queue with dependency-aware ordering, validated dependencies, edit/remove operations, and work stealing (`task add|edit|remove|import|list|request|claim|done|release` + MCP tools).
-- Added live task-board GUI with CLI launch (`task gui`), browser-side create/edit/remove controls, and MCP launch tool (`fugit_task_gui_launch`).
+- Added live task-board GUI with CLI launch (`task gui`), browser-side create/edit/remove controls, and MCP launch tool (`tasknerve_task_gui_launch`).
 - Added `task show`, request focus filters, richer completion metadata on `task done`, and `--version` for faster agent-side capability detection.
 - Added compact queue inspection with `task list --jsonl --fields ...` and preview scheduling with `task request --no-claim --max N --json`.
 - Added explicit recoverability repair UX: `doctor --fix` and `checkpoint --repair auto|strict|lossy`.
@@ -28,18 +28,18 @@
 - Added default-on background bridge auto-sync after `task done`, with task-note commit subjects, `bridge auto-sync show|set`, and manual detached `bridge sync-github --background`.
 - Added default-on quality gates: `check add|list|run|deprecate|policy` manages registered regression/benchmark checks, local repos can gate sync on them, and GitHub-backed repos can gate sync on GitHub Actions instead.
 - Added GitHub-CI-backed verification as the default for GitHub remotes, with `check policy set --backend ...`, `bridge sync-github --skip-remote-verification`, `check run` following the active backend, and deterministic CI-failure task creation from GitHub Actions results.
-- Added GitHub issue monitoring with `bridge issue-monitor show|set`, `bridge sync-github-issues`, low-task deterministic issue-to-task sync under `.fugit:github_issues`, and automatic reviewer follow-up when a reviewer provider is configured.
-- Added `skill doctor --json` compatibility reporting for installed-skill/CLI drift, plus native backlog search filters on `task list` (also aliased as `task search`) so agents can inspect the queue without probing `--help` or reading `.fugit/tasks.json` directly.
+- Added GitHub issue monitoring with `bridge issue-monitor show|set`, `bridge sync-github-issues`, low-task deterministic issue-to-task sync under `.tasknerve:github_issues`, and automatic reviewer follow-up when a reviewer provider is configured.
+- Added `skill doctor --json` compatibility reporting for installed-skill/CLI drift, plus native backlog search filters on `task list` (also aliased as `task search`) so agents can inspect the queue without probing `--help` or reading `.tasknerve/tasks.json` directly.
 - Added reusable saved queue views (`task view save|list|show|remove`, plus `task list|request|start --view ...`) and deterministic comment-to-task sync via `task sync-comments` for TODO/FIXME-style backlog harvesting without model calls.
-- Added a git-build fingerprint to `fugit --version` and `skill doctor --json` so agents can distinguish different local installs even when the package version is unchanged.
-- Added `fugit version --json`, richer PATH-resolution reporting in `skill doctor --json`, explicit `task list --format ...` render modes, and a dedicated `task advance` close-and-continue command.
-- Added tracked developer auto-refresh hooks plus `scripts/install-dev-hooks.sh` so local `fugit` installs and the bundled skill can stay current automatically as the fugit repo changes.
-- Added a built-in updater: `update show|check|apply|policy`, a managed updater checkout under `FUGIT_HOME`, MCP update tools, default-on daily auto-checks, and optional auto-apply.
+- Added a git-build fingerprint to `tasknerve --version` and `skill doctor --json` so agents can distinguish different local installs even when the package version is unchanged.
+- Added `tasknerve version --json`, richer PATH-resolution reporting in `skill doctor --json`, explicit `task list --format ...` render modes, and a dedicated `task advance` close-and-continue command.
+- Added tracked developer auto-refresh hooks plus `scripts/install-dev-hooks.sh` so local `tasknerve` installs and the bundled skill can stay current automatically as the tasknerve repo changes.
+- Added a built-in updater: `update show|check|apply|policy`, a managed updater checkout under `TASKNERVE_HOME`, MCP update tools, default-on daily auto-checks, and optional auto-apply.
 - Added targeted task pickup with `task request --task-id <task_id>`, including MCP support, so agents can request a specific queue item after inspecting the backlog.
-- Added project discovery with recent-activity ordering, `task gui --background --port 0`, and an installed `fugit-gui` desktop launcher (`~/Applications/Fugit GUI.app` on macOS, `.desktop` entry on Linux).
+- Added project discovery with recent-activity ordering, `task gui --background --port 0`, and an installed `tasknerve-gui` desktop launcher (`~/Applications/TaskNerve GUI.app` on macOS, `.desktop` entry on Linux).
 - Added advisor automation with provider discovery/assignment, distinct reviewer vs task-manager model selection, safe command-wrapper support for Codex/Claude/local runners, low-task background queueing from `task request`, GUI controls, and MCP tools.
-- Added a repo-owned advisor workflow contract (`FUGIT_WORKFLOW.md`), `advisor workflow init|show|validate|sync-policy`, advisor run report inspection/rerun, workflow-aware GUI advisor detail panes, and MCP tools for workflow/run operations.
-- Improved the Unix installer to print the installed version and warn when `PATH` still resolves to a different `fugit` binary.
+- Added a repo-owned advisor workflow contract (`TASKNERVE_WORKFLOW.md`), `advisor workflow init|show|validate|sync-policy`, advisor run report inspection/rerun, workflow-aware GUI advisor detail panes, and MCP tools for workflow/run operations.
+- Improved the Unix installer to print the installed version and warn when `PATH` still resolves to a different `tasknerve` binary.
 - Added multi-project registry (`project add|list|use|remove`) and GUI project switching to keep task streams isolated across repos.
 - Hardened release validation script to run dependency advisory checks with `cargo-audit` when available.
 - Fixed the public release-check installer smoke path so it no longer writes temporary `/tmp` binaries into real shell startup files.
@@ -49,5 +49,5 @@
 - Integrated task lifecycle operations with timeline events (`task add|edit|claim|done|release|remove`).
 - Extended task GUI with a per-project timeline explorer (branch selection + paged scrollable history).
 - Added vigorous end-to-end validation script (`scripts/vigorous-e2e.sh`) covering CLI, GUI API, bridge, and MCP flows.
-- Expanded README to turnkey setup paths (agent-assisted + manual), Git-to-fugit migration, and Codex/Claude integration guidance.
+- Expanded README to turnkey setup paths (agent-assisted + manual), Git-to-tasknerve migration, and Codex/Claude integration guidance.
 - Added governance document clarifying maintainer-led upstream control while preserving MIT fork/contribution rights.

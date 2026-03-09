@@ -33,13 +33,13 @@ fn main() {
         None => pkg_version.clone(),
     };
 
-    println!("cargo:rustc-env=FUGIT_BUILD_VERSION={build_version}");
+    println!("cargo:rustc-env=TASKNERVE_BUILD_VERSION={build_version}");
     println!(
-        "cargo:rustc-env=FUGIT_BUILD_GIT_SHA={}",
+        "cargo:rustc-env=TASKNERVE_BUILD_GIT_SHA={}",
         git_sha.unwrap_or_default()
     );
     println!(
-        "cargo:rustc-env=FUGIT_BUILD_GIT_DIRTY={}",
+        "cargo:rustc-env=TASKNERVE_BUILD_GIT_DIRTY={}",
         if git_dirty { "true" } else { "false" }
     );
 }

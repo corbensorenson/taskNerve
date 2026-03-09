@@ -23,56 +23,57 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-const TIMELINE_ROOT_DIR: &str = ".fugit";
+const TIMELINE_ROOT_DIR: &str = ".tasknerve";
 const SCHEMA_CONFIG: &str = "timeline.config.v1";
 const SCHEMA_BRANCHES: &str = "timeline.branches.v1";
 const SCHEMA_FILE_RECORD: &str = "timeline.file_record.v1";
 const SCHEMA_EVENT: &str = "timeline.event.v1";
 const SCHEMA_LOCKS: &str = "timeline.locks.v1";
 const SCHEMA_TASKS: &str = "timeline.tasks.v1";
-const SCHEMA_CHECKS: &str = "fugit.checks.v1";
-const SCHEMA_CHECK_RUNS: &str = "fugit.check_runs.v1";
-const SCHEMA_PROJECTS: &str = "fugit.projects.v1";
-const SCHEMA_TASK_VIEWS: &str = "fugit.task_views.v1";
+const SCHEMA_CHECKS: &str = "tasknerve.checks.v1";
+const SCHEMA_CHECK_RUNS: &str = "tasknerve.check_runs.v1";
+const SCHEMA_PROJECTS: &str = "tasknerve.projects.v1";
+const SCHEMA_TASK_VIEWS: &str = "tasknerve.task_views.v1";
 const SCHEMA_BRIDGE_AUTH: &str = "timeline.bridge_auth.v1";
 const SCHEMA_BRIDGE_AUTO_SYNC: &str = "timeline.bridge_auto_sync.v1";
 const SCHEMA_BRIDGE_AUTO_SYNC_LOCK: &str = "timeline.bridge_auto_sync_lock.v1";
-const SCHEMA_ADVISOR_STATE: &str = "fugit.advisor.v1";
-const SCHEMA_ADVISOR_RUN: &str = "fugit.advisor_run.v1";
-const SCHEMA_ADVISOR_WORKFLOW: &str = "fugit.advisor_workflow.v1";
-const SCHEMA_ADVISOR_WORKER_STATE: &str = "fugit.advisor_worker_state.v1";
-const SCHEMA_ADVISOR_WORKER_LOCK: &str = "fugit.advisor_worker_lock.v1";
-const SCHEMA_GITHUB_ISSUE_MONITOR: &str = "fugit.github_issue_monitor.v1";
-const SCHEMA_UPDATE_STATE: &str = "fugit.update_state.v1";
+const SCHEMA_ADVISOR_STATE: &str = "tasknerve.advisor.v1";
+const SCHEMA_ADVISOR_RUN: &str = "tasknerve.advisor_run.v1";
+const SCHEMA_ADVISOR_WORKFLOW: &str = "tasknerve.advisor_workflow.v1";
+const SCHEMA_ADVISOR_WORKER_STATE: &str = "tasknerve.advisor_worker_state.v1";
+const SCHEMA_ADVISOR_WORKER_LOCK: &str = "tasknerve.advisor_worker_lock.v1";
+const SCHEMA_GITHUB_ISSUE_MONITOR: &str = "tasknerve.github_issue_monitor.v1";
+const SCHEMA_UPDATE_STATE: &str = "tasknerve.update_state.v1";
 const BACKEND_MODE_GIT_BRIDGE: &str = "git_bridge";
-const BACKEND_MODE_FUGIT_CLOUD: &str = "fugit_cloud";
+const BACKEND_MODE_TASKNERVE_CLOUD: &str = "tasknerve_cloud";
 const QUALITY_CHECK_BACKEND_LOCAL: &str = "local";
 const QUALITY_CHECK_BACKEND_GITHUB_CI: &str = "github_ci";
-const AUTO_REPLENISH_SOURCE_PLAN: &str = ".fugit:auto_replenish";
-const GITHUB_CI_FAILURE_SOURCE_PLAN: &str = ".fugit:github_ci_failures";
-const GITHUB_ISSUE_SOURCE_PLAN: &str = ".fugit:github_issues";
-const CODE_COMMENT_SOURCE_PLAN: &str = ".fugit:code_comments";
-const ADVISOR_AUTO_PLAN_FILE: &str = ".fugit/advisor/auto_backlog.tsv";
-const ADVISOR_WORKFLOW_FILE: &str = "FUGIT_WORKFLOW.md";
-const SYSTEM_AGENT_ID: &str = "fugit.system";
+const AUTO_REPLENISH_SOURCE_PLAN: &str = ".tasknerve:auto_replenish";
+const GITHUB_CI_FAILURE_SOURCE_PLAN: &str = ".tasknerve:github_ci_failures";
+const GITHUB_ISSUE_SOURCE_PLAN: &str = ".tasknerve:github_issues";
+const CODE_COMMENT_SOURCE_PLAN: &str = ".tasknerve:code_comments";
+const ADVISOR_AUTO_PLAN_FILE: &str = ".tasknerve/advisor/auto_backlog.tsv";
+const ADVISOR_WORKFLOW_FILE: &str = "TASKNERVE_WORKFLOW.md";
+const SYSTEM_AGENT_ID: &str = "tasknerve.system";
 const AUTO_BRIDGE_SYNC_STALE_MINUTES: i64 = 30;
 const ADVISOR_WORKER_STALE_MINUTES: i64 = 45;
 const TASK_GUI_MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const COMMENT_SYNC_MAX_FILE_BYTES: u64 = 512 * 1024;
-const FUGIT_SKILL_ID: &str = "fugit";
-const FUGIT_SKILL_MD: &str = include_str!("../skills/fugit/SKILL.md");
-const FUGIT_SKILL_OPENAI_YAML: &str = include_str!("../skills/fugit/agents/openai.yaml");
-const FUGIT_SKILL_REF_WORKFLOW_PROFILES: &str =
-    include_str!("../skills/fugit/references/workflow-profiles.md");
-const FUGIT_SKILL_REF_RECOVERY_PLAYBOOKS: &str =
-    include_str!("../skills/fugit/references/recovery-playbooks.md");
-const DEFAULT_ADVISOR_WORKFLOW_TEMPLATE: &str = include_str!("../templates/FUGIT_WORKFLOW.md");
-const DEFAULT_UPDATE_REPO_URL: &str = "https://github.com/corbensorenson/fugit-alpha.git";
+const SKILL_ID: &str = "tasknerve";
+const SKILL_MD: &str = include_str!("../skills/tasknerve/SKILL.md");
+const SKILL_OPENAI_YAML: &str = include_str!("../skills/tasknerve/agents/openai.yaml");
+const SKILL_REF_WORKFLOW_PROFILES: &str =
+    include_str!("../skills/tasknerve/references/workflow-profiles.md");
+const SKILL_REF_RECOVERY_PLAYBOOKS: &str =
+    include_str!("../skills/tasknerve/references/recovery-playbooks.md");
+const DEFAULT_ADVISOR_WORKFLOW_TEMPLATE: &str = include_str!("../templates/TASKNERVE_WORKFLOW.md");
+const DEFAULT_UPDATE_REPO_URL: &str = "https://github.com/corbensorenson/tasknerve.git";
 const DEFAULT_UPDATE_BRANCH: &str = "main";
+const PRODUCT_NAME: &str = "tasknerve";
 
 const IGNORE_ROOT_ENTRIES: &[&str] = &[
     ".git",
-    ".fugit",
+    ".tasknerve",
     ".tmp",
     "node_modules",
     "target",
@@ -93,8 +94,7 @@ const COMMENT_BLOCK_C_STYLE: &[(&str, &str)] = &[("/*", "*/")];
 const COMMENT_BLOCK_HTML: &[(&str, &str)] = &[("<!--", "-->")];
 
 #[derive(Debug, Parser)]
-#[command(name = "fugit")]
-#[command(version = env!("FUGIT_BUILD_VERSION"))]
+#[command(version = env!("TASKNERVE_BUILD_VERSION"))]
 #[command(about = "Timeline-first versioning with GitHub bridge for multi-agent work")]
 struct Cli {
     #[arg(long, global = true, default_value = ".")]
@@ -349,7 +349,7 @@ enum BackendAction {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum BackendModeArg {
     GitBridge,
-    FugitCloud,
+    TaskNerveCloud,
 }
 
 #[derive(Debug, Parser)]
@@ -456,7 +456,7 @@ enum BridgeAuthAction {
         username: Option<String>,
         #[arg(long)]
         token: Option<String>,
-        #[arg(long, default_value = "FUGIT_GIT_TOKEN")]
+        #[arg(long, default_value = "TASKNERVE_GIT_TOKEN")]
         token_env: String,
         #[arg(long)]
         helper: Option<String>,
@@ -976,7 +976,7 @@ impl CheckBackendArg {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct FugitCheck {
+struct TaskNerveCheck {
     check_id: String,
     name: String,
     command: String,
@@ -1005,7 +1005,7 @@ struct FugitCheck {
 struct CheckState {
     schema_version: String,
     updated_at_utc: String,
-    checks: Vec<FugitCheck>,
+    checks: Vec<TaskNerveCheck>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1036,7 +1036,7 @@ struct CheckRunRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct FugitTask {
+struct TaskNerveTask {
     task_id: String,
     title: String,
     detail: Option<String>,
@@ -1092,7 +1092,7 @@ struct FugitTask {
 struct TaskState {
     schema_version: String,
     updated_at_utc: String,
-    tasks: Vec<FugitTask>,
+    tasks: Vec<TaskNerveTask>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2784,7 +2784,7 @@ fn cmd_init(repo_root: &Path, args: InitArgs) -> Result<()> {
     write_pretty_json(&timeline_branches_path(repo_root), &branches)?;
 
     println!(
-        "[fugit] initialized repo=. root=.fugit active_branch={} bridge={}/{}",
+        "[tasknerve] initialized repo=. root=.tasknerve active_branch={} bridge={}/{}",
         branches.active_branch, config.default_bridge_remote, config.default_bridge_branch
     );
     Ok(())
@@ -2863,8 +2863,8 @@ fn cmd_doctor(repo_root: &Path, args: DoctorArgs) -> Result<()> {
         })
         .unwrap_or(false);
 
-    let fugit_root = timeline_root(repo_root);
-    let write_test_dir = fugit_root.join(".doctor");
+    let tasknerve_root = timeline_root(repo_root);
+    let write_test_dir = tasknerve_root.join(".doctor");
     let write_test_file = write_test_dir.join("write_test.tmp");
     let writable = fs::create_dir_all(&write_test_dir)
         .and_then(|_| fs::write(&write_test_file, b"ok"))
@@ -2894,7 +2894,7 @@ fn cmd_doctor(repo_root: &Path, args: DoctorArgs) -> Result<()> {
         .collect::<Vec<_>>();
 
     let report = json!({
-        "schema_version": "fugit.doctor_report.v1",
+        "schema_version": "tasknerve.doctor_report.v1",
         "generated_at_utc": now_utc(),
         "repo_root": ".",
         "checks": {
@@ -2921,7 +2921,7 @@ fn cmd_doctor(repo_root: &Path, args: DoctorArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         println!(
-            "[fugit-doctor] initialized={} writable={} git_available={} git_work_tree={} object_integrity={} missing_objects={} pass={}",
+            "[tasknerve-doctor] initialized={} writable={} git_available={} git_work_tree={} object_integrity={} missing_objects={} pass={}",
             timeline_initialized,
             writable,
             git_available,
@@ -2940,18 +2940,18 @@ fn cmd_doctor(repo_root: &Path, args: DoctorArgs) -> Result<()> {
         );
         if !timeline_initialized {
             println!(
-                "[fugit-doctor] hint: run `fugit --repo-root {} init --branch trunk`",
+                "[tasknerve-doctor] hint: run `tasknerve --repo-root {} init --branch trunk`",
                 repo_root.display()
             );
         } else if !timeline_object_integrity {
             println!(
-                "[fugit-doctor] hint: run `fugit --repo-root {} doctor --fix` to attempt safe Git-backed object rehydration",
+                "[tasknerve-doctor] hint: run `tasknerve --repo-root {} doctor --fix` to attempt safe Git-backed object rehydration",
                 repo_root.display()
             );
         }
         if args.fix {
             println!(
-                "[fugit-doctor] repair requested repaired_missing_objects={} remaining_missing_objects={}",
+                "[tasknerve-doctor] repair requested repaired_missing_objects={} remaining_missing_objects={}",
                 report["repair"]["repaired_count"].as_u64().unwrap_or(0),
                 report["repair"]["remaining_missing_count"]
                     .as_u64()
@@ -2969,26 +2969,26 @@ fn cmd_skill(args: SkillArgs) -> Result<()> {
             include_openai_yaml,
         } => {
             if json {
-                let bundle = fugit_skill_bundle(true, include_openai_yaml);
+                let bundle = tasknerve_skill_bundle(true, include_openai_yaml);
                 println!("{}", serde_json::to_string_pretty(&bundle)?);
             } else {
-                println!("{}", FUGIT_SKILL_MD.trim_end());
+                println!("{}", SKILL_MD.trim_end());
                 if include_openai_yaml {
                     println!("\n---\n");
-                    println!("{}", FUGIT_SKILL_OPENAI_YAML.trim_end());
+                    println!("{}", SKILL_OPENAI_YAML.trim_end());
                 }
             }
         }
         SkillAction::InstallCodex { overwrite } => {
-            let install_path = install_fugit_skill_to_codex(overwrite)?;
+            let install_path = install_tasknerve_skill_to_codex(overwrite)?;
             println!(
-                "[fugit-skill] installed skill={} path={}",
-                FUGIT_SKILL_ID,
+                "[tasknerve-skill] installed skill={} path={}",
+                SKILL_ID,
                 install_path.display()
             );
         }
         SkillAction::Doctor { json } => {
-            let report = fugit_skill_doctor_report();
+            let report = tasknerve_skill_doctor_report();
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
@@ -3002,8 +3002,8 @@ fn cmd_skill(args: SkillArgs) -> Result<()> {
                     .cloned()
                     .unwrap_or_default();
                 println!(
-                    "[fugit-skill] skill={} ok={} checks={}",
-                    FUGIT_SKILL_ID,
+                    "[tasknerve-skill] skill={} ok={} checks={}",
+                    SKILL_ID,
                     ok,
                     checks.len()
                 );
@@ -3043,7 +3043,7 @@ fn cmd_skill(args: SkillArgs) -> Result<()> {
                     .unwrap_or(false)
                 {
                     println!(
-                        "- warning: PATH resolves a different fugit binary than the current executable"
+                        "- warning: PATH resolves a different tasknerve binary than the current executable"
                     );
                 }
                 if let Some(recommended_fix) = report
@@ -3070,7 +3070,7 @@ fn cmd_skill(args: SkillArgs) -> Result<()> {
 }
 
 fn cmd_version(args: VersionArgs) -> Result<()> {
-    let mut payload = fugit_version_report();
+    let mut payload = tasknerve_version_report();
     if let Some(object) = payload.as_object_mut() {
         object.insert(
             "update".to_string(),
@@ -3082,7 +3082,12 @@ fn cmd_version(args: VersionArgs) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else {
-        println!("{}", payload["version"].as_str().unwrap_or("fugit"));
+        println!(
+            "{}",
+            payload["version"]
+                .as_str()
+                .unwrap_or(PRODUCT_NAME)
+        );
     }
     Ok(())
 }
@@ -3096,7 +3101,7 @@ fn cmd_update(args: UpdateArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!(
-                    "[fugit-update] status={} update_available={} installed_sha={} latest_sha={}",
+                    "[tasknerve-update] status={} update_available={} installed_sha={} latest_sha={}",
                     payload["status"].as_str().unwrap_or("unknown"),
                     payload["update_available"].as_bool().unwrap_or(false),
                     payload["installed_git_sha"].as_str().unwrap_or(""),
@@ -3114,7 +3119,7 @@ fn cmd_update(args: UpdateArgs) -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(&payload)?);
                     } else {
                         println!(
-                            "[fugit-update] checked status={} update_available={} latest_sha={}",
+                            "[tasknerve-update] checked status={} update_available={} latest_sha={}",
                             payload["status"].as_str().unwrap_or("unknown"),
                             payload["update_available"].as_bool().unwrap_or(false),
                             payload["latest_remote_sha"].as_str().unwrap_or("unknown"),
@@ -3125,7 +3130,7 @@ fn cmd_update(args: UpdateArgs) -> Result<()> {
                     write_update_state(&state)?;
                     if json {
                         return Err(JsonCommandError::new(json!({
-                            "schema_version": "fugit.update.check.error.v1",
+                            "schema_version": "tasknerve.update.check.error.v1",
                             "generated_at_utc": now_utc(),
                             "error": err.to_string(),
                             "update": update_state_payload(&state)
@@ -3146,7 +3151,7 @@ fn cmd_update(args: UpdateArgs) -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(&payload)?);
                     } else {
                         println!(
-                            "[fugit-update] apply status={} installed_sha={} latest_sha={}",
+                            "[tasknerve-update] apply status={} installed_sha={} latest_sha={}",
                             payload["status"].as_str().unwrap_or("unknown"),
                             payload["installed_git_sha"].as_str().unwrap_or(""),
                             payload["latest_remote_sha"].as_str().unwrap_or("unknown"),
@@ -3156,7 +3161,7 @@ fn cmd_update(args: UpdateArgs) -> Result<()> {
                 Err(err) => {
                     if json {
                         return Err(JsonCommandError::new(json!({
-                            "schema_version": "fugit.update.apply.error.v1",
+                            "schema_version": "tasknerve.update.apply.error.v1",
                             "generated_at_utc": now_utc(),
                             "error": err.to_string(),
                             "update": payload
@@ -3171,7 +3176,7 @@ fn cmd_update(args: UpdateArgs) -> Result<()> {
             UpdatePolicyAction::Show { json } => {
                 let state = load_update_state()?;
                 let payload = json!({
-                    "schema_version": "fugit.update.policy.v1",
+                    "schema_version": "tasknerve.update.policy.v1",
                     "generated_at_utc": now_utc(),
                     "policy": {
                         "auto_check_enabled": state.policy.auto_check_enabled,
@@ -3183,7 +3188,7 @@ fn cmd_update(args: UpdateArgs) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else {
                     println!(
-                        "[fugit-update-policy] auto_check_enabled={} auto_apply_enabled={} check_interval_hours={}",
+                        "[tasknerve-update-policy] auto_check_enabled={} auto_apply_enabled={} check_interval_hours={}",
                         payload["policy"]["auto_check_enabled"]
                             .as_bool()
                             .unwrap_or(false),
@@ -3218,7 +3223,7 @@ fn cmd_update(args: UpdateArgs) -> Result<()> {
                 state.updated_at_utc = now_utc();
                 write_update_state(&state)?;
                 let payload = json!({
-                    "schema_version": "fugit.update.policy.v1",
+                    "schema_version": "tasknerve.update.policy.v1",
                     "generated_at_utc": now_utc(),
                     "policy": {
                         "auto_check_enabled": state.policy.auto_check_enabled,
@@ -3230,7 +3235,7 @@ fn cmd_update(args: UpdateArgs) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else {
                     println!(
-                        "[fugit-update-policy] auto_check_enabled={} auto_apply_enabled={} check_interval_hours={}",
+                        "[tasknerve-update-policy] auto_check_enabled={} auto_apply_enabled={} check_interval_hours={}",
                         payload["policy"]["auto_check_enabled"]
                             .as_bool()
                             .unwrap_or(false),
@@ -3248,113 +3253,113 @@ fn cmd_update(args: UpdateArgs) -> Result<()> {
     Ok(())
 }
 
-fn fugit_skill_bundle(include_skill_body: bool, include_openai_yaml: bool) -> serde_json::Value {
+fn tasknerve_skill_bundle(include_skill_body: bool, include_openai_yaml: bool) -> serde_json::Value {
     let mut bundle = json!({
-        "schema_version": "fugit.skill.bundle.v1",
+        "schema_version": "tasknerve.skill.bundle.v1",
         "generated_at_utc": now_utc(),
-        "skill_id": FUGIT_SKILL_ID,
+        "skill_id": SKILL_ID,
         "delivery": {
             "cli": {
-                "show": "fugit skill show",
-                "show_json": "fugit skill show --json",
-                "install_codex": "fugit skill install-codex"
+                "show": "tasknerve skill show",
+                "show_json": "tasknerve skill show --json",
+                "install_codex": "tasknerve skill install-codex"
             },
             "mcp_tools": [
-                "fugit_status",
-                "fugit_checkpoint",
-                "fugit_log",
-                "fugit_checkout",
-                "fugit_lock_add",
-                "fugit_lock_list",
-                "fugit_task_show",
-                "fugit_task_current",
-                "fugit_task_add",
-                "fugit_task_edit",
-                "fugit_task_remove",
-                "fugit_task_approve",
-                "fugit_task_policy_show",
-                "fugit_task_policy_set",
-                "fugit_task_view_list",
-                "fugit_task_view_show",
-                "fugit_task_view_save",
-                "fugit_task_view_remove",
-                "fugit_task_sync",
-                "fugit_task_sync_comments",
-                "fugit_task_import",
-                "fugit_task_list",
-                "fugit_task_request",
-                "fugit_task_start",
-                "fugit_task_claim",
-                "fugit_task_done",
-                "fugit_task_advance",
-                "fugit_task_progress",
-                "fugit_task_note",
-                "fugit_task_reopen",
-                "fugit_task_release",
-                "fugit_task_cancel",
-                "fugit_task_heartbeat",
-                "fugit_check_list",
-                "fugit_check_add",
-                "fugit_check_deprecate",
-                "fugit_check_run",
-                "fugit_check_policy_show",
-                "fugit_check_policy_set",
-                "fugit_bridge_issue_monitor_show",
-                "fugit_bridge_issue_monitor_set",
-                "fugit_bridge_sync_github_issues",
-                "fugit_advisor_show",
-                "fugit_advisor_runs",
-                "fugit_advisor_workflow_show",
-                "fugit_advisor_workflow_sync_policy",
-                "fugit_advisor_run_show",
-                "fugit_advisor_run_rerun",
-                "fugit_advisor_provider_list",
-                "fugit_advisor_provider_assign",
-                "fugit_advisor_policy_show",
-                "fugit_advisor_policy_set",
-                "fugit_advisor_review",
-                "fugit_advisor_research",
-                "fugit_skill_bundle",
-                "fugit_skill_doctor",
-                "fugit_skill_install_codex",
-                "fugit_update_show",
-                "fugit_update_check",
-                "fugit_update_apply",
-                "fugit_update_policy_show",
-                "fugit_update_policy_set",
-                "fugit_task_gui_launch",
-                "fugit_project_list",
-                "fugit_project_add",
-                "fugit_project_use",
-                "fugit_project_remove",
-                "fugit_gc"
+                "tasknerve_status",
+                "tasknerve_checkpoint",
+                "tasknerve_log",
+                "tasknerve_checkout",
+                "tasknerve_lock_add",
+                "tasknerve_lock_list",
+                "tasknerve_task_show",
+                "tasknerve_task_current",
+                "tasknerve_task_add",
+                "tasknerve_task_edit",
+                "tasknerve_task_remove",
+                "tasknerve_task_approve",
+                "tasknerve_task_policy_show",
+                "tasknerve_task_policy_set",
+                "tasknerve_task_view_list",
+                "tasknerve_task_view_show",
+                "tasknerve_task_view_save",
+                "tasknerve_task_view_remove",
+                "tasknerve_task_sync",
+                "tasknerve_task_sync_comments",
+                "tasknerve_task_import",
+                "tasknerve_task_list",
+                "tasknerve_task_request",
+                "tasknerve_task_start",
+                "tasknerve_task_claim",
+                "tasknerve_task_done",
+                "tasknerve_task_advance",
+                "tasknerve_task_progress",
+                "tasknerve_task_note",
+                "tasknerve_task_reopen",
+                "tasknerve_task_release",
+                "tasknerve_task_cancel",
+                "tasknerve_task_heartbeat",
+                "tasknerve_check_list",
+                "tasknerve_check_add",
+                "tasknerve_check_deprecate",
+                "tasknerve_check_run",
+                "tasknerve_check_policy_show",
+                "tasknerve_check_policy_set",
+                "tasknerve_bridge_issue_monitor_show",
+                "tasknerve_bridge_issue_monitor_set",
+                "tasknerve_bridge_sync_github_issues",
+                "tasknerve_advisor_show",
+                "tasknerve_advisor_runs",
+                "tasknerve_advisor_workflow_show",
+                "tasknerve_advisor_workflow_sync_policy",
+                "tasknerve_advisor_run_show",
+                "tasknerve_advisor_run_rerun",
+                "tasknerve_advisor_provider_list",
+                "tasknerve_advisor_provider_assign",
+                "tasknerve_advisor_policy_show",
+                "tasknerve_advisor_policy_set",
+                "tasknerve_advisor_review",
+                "tasknerve_advisor_research",
+                "tasknerve_skill_bundle",
+                "tasknerve_skill_doctor",
+                "tasknerve_skill_install_codex",
+                "tasknerve_update_show",
+                "tasknerve_update_check",
+                "tasknerve_update_apply",
+                "tasknerve_update_policy_show",
+                "tasknerve_update_policy_set",
+                "tasknerve_task_gui_launch",
+                "tasknerve_project_list",
+                "tasknerve_project_add",
+                "tasknerve_project_use",
+                "tasknerve_project_remove",
+                "tasknerve_gc"
             ]
         },
         "references": [
             {
-                "path": "skills/fugit/references/workflow-profiles.md",
+                "path": "skills/tasknerve/references/workflow-profiles.md",
                 "title": "Workflow Profiles"
             },
             {
-                "path": "skills/fugit/references/recovery-playbooks.md",
+                "path": "skills/tasknerve/references/recovery-playbooks.md",
                 "title": "Recovery Playbooks"
             }
         ]
     });
 
     if include_skill_body && let Some(map) = bundle.as_object_mut() {
-        map.insert("skill_md".to_string(), json!(FUGIT_SKILL_MD));
+        map.insert("skill_md".to_string(), json!(SKILL_MD));
         map.insert(
             "reference_workflow_profiles_md".to_string(),
-            json!(FUGIT_SKILL_REF_WORKFLOW_PROFILES),
+            json!(SKILL_REF_WORKFLOW_PROFILES),
         );
         map.insert(
             "reference_recovery_playbooks_md".to_string(),
-            json!(FUGIT_SKILL_REF_RECOVERY_PLAYBOOKS),
+            json!(SKILL_REF_RECOVERY_PLAYBOOKS),
         );
     }
     if include_openai_yaml && let Some(map) = bundle.as_object_mut() {
-        map.insert("openai_yaml".to_string(), json!(FUGIT_SKILL_OPENAI_YAML));
+        map.insert("openai_yaml".to_string(), json!(SKILL_OPENAI_YAML));
     }
 
     bundle
@@ -3530,18 +3535,18 @@ fn extract_skill_command_paths(skill_body: &str) -> BTreeSet<String> {
     let mut paths = BTreeSet::<String>::new();
 
     for line in skill_body.lines() {
-        if !line.contains("fugit") {
+        if !line.contains(PRODUCT_NAME) {
             continue;
         }
         let tokens = line
             .split_whitespace()
             .filter_map(normalize_skill_token)
             .collect::<Vec<_>>();
-        let Some(fugit_index) = tokens.iter().position(|token| token == "fugit") else {
+        let Some(command_index) = tokens.iter().position(|token| token == PRODUCT_NAME) else {
             continue;
         };
-        let after_fugit = &tokens[fugit_index + 1..];
-        let Some((top_index, top_command)) = after_fugit
+        let after_command = &tokens[command_index + 1..];
+        let Some((top_index, top_command)) = after_command
             .iter()
             .enumerate()
             .find_map(|(idx, token)| top_level.contains(token.as_str()).then_some((idx, token)))
@@ -3550,7 +3555,7 @@ fn extract_skill_command_paths(skill_body: &str) -> BTreeSet<String> {
         };
         paths.insert(top_command.clone());
         if nested.contains_key(top_command.as_str())
-            && let Some(subcommand) = after_fugit[top_index + 1..]
+            && let Some(subcommand) = after_command[top_index + 1..]
                 .iter()
                 .find(|token| !token.starts_with('-'))
         {
@@ -3569,15 +3574,24 @@ fn unsupported_skill_command_paths(skill_body: &str) -> Vec<String> {
         .collect()
 }
 
+fn current_cli_program_name() -> String {
+    std::env::args_os()
+        .next()
+        .and_then(|path| PathBuf::from(path).file_stem().map(|stem| stem.to_os_string()))
+        .and_then(|stem| stem.into_string().ok())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| PRODUCT_NAME.to_string())
+}
+
 #[derive(Debug, Clone, Serialize)]
-struct FugitPathCandidate {
+struct TaskNervePathCandidate {
     path: String,
     version: Option<String>,
     is_current_executable: bool,
     is_first_path_match: bool,
 }
 
-fn detect_fugit_path_candidates() -> Vec<FugitPathCandidate> {
+fn detect_tasknerve_path_candidates() -> Vec<TaskNervePathCandidate> {
     let current_exe = std::env::current_exe().ok();
     let mut seen = BTreeSet::<PathBuf>::new();
     let mut candidates = Vec::<PathBuf>::new();
@@ -3588,7 +3602,7 @@ fn detect_fugit_path_candidates() -> Vec<FugitPathCandidate> {
     }
     if let Some(path_env) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path_env) {
-            let candidate = dir.join("fugit");
+            let candidate = dir.join(PRODUCT_NAME);
             if candidate.is_file() && seen.insert(candidate.clone()) {
                 candidates.push(candidate);
             }
@@ -3596,7 +3610,7 @@ fn detect_fugit_path_candidates() -> Vec<FugitPathCandidate> {
     }
     let first_path_match = std::env::var_os("PATH").and_then(|path_env| {
         std::env::split_paths(&path_env)
-            .map(|dir| dir.join("fugit"))
+            .map(|dir| dir.join(PRODUCT_NAME))
             .find(|candidate| candidate.is_file())
     });
     candidates
@@ -3610,7 +3624,7 @@ fn detect_fugit_path_candidates() -> Vec<FugitPathCandidate> {
                 .and_then(|output| String::from_utf8(output.stdout).ok())
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty());
-            FugitPathCandidate {
+            TaskNervePathCandidate {
                 path: path.display().to_string(),
                 version,
                 is_current_executable: current_exe.as_ref() == Some(&path),
@@ -3620,11 +3634,11 @@ fn detect_fugit_path_candidates() -> Vec<FugitPathCandidate> {
         .collect()
 }
 
-fn fugit_version_report() -> serde_json::Value {
+fn tasknerve_version_report() -> serde_json::Value {
     let current_exe = std::env::current_exe()
         .ok()
         .map(|path| path.display().to_string());
-    let candidates = detect_fugit_path_candidates();
+    let candidates = detect_tasknerve_path_candidates();
     let first_path_match = candidates
         .iter()
         .find(|candidate| candidate.is_first_path_match)
@@ -3635,12 +3649,12 @@ fn fugit_version_report() -> serde_json::Value {
         .map(|(current, first)| current != first)
         .unwrap_or(false);
     json!({
-        "schema_version": "fugit.version.v1",
+        "schema_version": "tasknerve.version.v1",
         "generated_at_utc": now_utc(),
-        "version": format!("fugit {}", env!("FUGIT_BUILD_VERSION")),
+        "version": format!("{} {}", current_cli_program_name(), env!("TASKNERVE_BUILD_VERSION")),
         "package_version": env!("CARGO_PKG_VERSION"),
-        "git_sha": env!("FUGIT_BUILD_GIT_SHA"),
-        "git_dirty": env!("FUGIT_BUILD_GIT_DIRTY") == "true",
+        "git_sha": env!("TASKNERVE_BUILD_GIT_SHA"),
+        "git_dirty": env!("TASKNERVE_BUILD_GIT_DIRTY") == "true",
         "executable": current_exe,
         "path_resolution": {
             "first_path_match": first_path_match,
@@ -3651,21 +3665,21 @@ fn fugit_version_report() -> serde_json::Value {
 }
 
 fn configured_update_repo_url() -> String {
-    std::env::var("FUGIT_UPDATE_REPO_URL")
+    std::env::var("TASKNERVE_UPDATE_REPO_URL")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_UPDATE_REPO_URL.to_string())
 }
 
 fn configured_update_branch() -> String {
-    std::env::var("FUGIT_UPDATE_BRANCH")
+    std::env::var("TASKNERVE_UPDATE_BRANCH")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_UPDATE_BRANCH.to_string())
 }
 
 fn default_update_state() -> UpdateState {
-    let version_report = fugit_version_report();
+    let version_report = tasknerve_version_report();
     UpdateState {
         schema_version: SCHEMA_UPDATE_STATE.to_string(),
         updated_at_utc: now_utc(),
@@ -3679,7 +3693,7 @@ fn default_update_state() -> UpdateState {
         status: "idle".to_string(),
         installed_version: version_report["version"]
             .as_str()
-            .unwrap_or("fugit")
+            .unwrap_or(PRODUCT_NAME)
             .to_string(),
         installed_git_sha: version_report["git_sha"].as_str().unwrap_or("").to_string(),
         executable: version_report["executable"]
@@ -3701,17 +3715,17 @@ fn default_update_state() -> UpdateState {
 }
 
 fn load_update_state() -> Result<UpdateState> {
-    let path = fugit_update_state_path()?;
+    let path = tasknerve_update_state_path()?;
     let mut state = load_json_optional::<UpdateState>(&path)?.unwrap_or_else(default_update_state);
     if state.schema_version.trim().is_empty() {
         state.schema_version = SCHEMA_UPDATE_STATE.to_string();
     }
     state.repo_url = configured_update_repo_url();
     state.branch = configured_update_branch();
-    let version_report = fugit_version_report();
+    let version_report = tasknerve_version_report();
     state.installed_version = version_report["version"]
         .as_str()
-        .unwrap_or("fugit")
+        .unwrap_or(PRODUCT_NAME)
         .to_string();
     state.installed_git_sha = version_report["git_sha"].as_str().unwrap_or("").to_string();
     state.executable = version_report["executable"]
@@ -3724,7 +3738,7 @@ fn load_update_state() -> Result<UpdateState> {
 }
 
 fn write_update_state(state: &UpdateState) -> Result<()> {
-    write_pretty_json(&fugit_update_state_path()?, state)
+    write_pretty_json(&tasknerve_update_state_path()?, state)
 }
 
 fn update_check_due(state: &UpdateState, now: DateTime<Utc>) -> bool {
@@ -3746,7 +3760,7 @@ fn fetch_update_remote_sha(repo_url: &str, branch: &str) -> Result<String> {
     let output = ProcessCommand::new("git")
         .args(["ls-remote", repo_url, &ref_name])
         .output()
-        .with_context(|| "failed running git ls-remote for fugit update check")?;
+        .with_context(|| "failed running git ls-remote for tasknerve update check")?;
     if !output.status.success() {
         bail!(
             "git ls-remote failed: {}",
@@ -3790,7 +3804,7 @@ fn refresh_update_state(state: &mut UpdateState) -> Result<()> {
 }
 
 fn preferred_update_install_dir() -> Option<PathBuf> {
-    let candidates = detect_fugit_path_candidates();
+    let candidates = detect_tasknerve_path_candidates();
     candidates
         .iter()
         .find(|candidate| candidate.is_first_path_match)
@@ -3810,9 +3824,9 @@ fn preferred_update_install_dir() -> Option<PathBuf> {
 fn preferred_update_install_binary_path() -> Option<PathBuf> {
     let install_dir = preferred_update_install_dir()?;
     if cfg!(windows) {
-        Some(install_dir.join("fugit.exe"))
+        Some(install_dir.join("tasknerve.exe"))
     } else {
-        Some(install_dir.join("fugit"))
+        Some(install_dir.join("tasknerve"))
     }
 }
 
@@ -3846,7 +3860,7 @@ fn refresh_installed_identity_from_binary(state: &mut UpdateState) {
 }
 
 fn ensure_update_checkout(state: &UpdateState) -> Result<PathBuf> {
-    let checkout_root = fugit_update_checkout_root()?;
+    let checkout_root = tasknerve_update_checkout_root()?;
     if !checkout_root.join(".git").exists() {
         if let Some(parent) = checkout_root.parent() {
             fs::create_dir_all(parent)
@@ -3863,7 +3877,7 @@ fn ensure_update_checkout(state: &UpdateState) -> Result<PathBuf> {
                 checkout_root_string.as_str(),
             ])
             .status()
-            .with_context(|| "failed cloning fugit updater checkout")?;
+            .with_context(|| "failed cloning tasknerve updater checkout")?;
         if !status.success() {
             bail!("failed cloning managed updater checkout");
         }
@@ -3905,9 +3919,14 @@ fn ensure_update_checkout(state: &UpdateState) -> Result<PathBuf> {
 }
 
 fn run_update_install_script(checkout_root: &Path) -> Result<()> {
-    let timeout_seconds = std::env::var("FUGIT_UPDATE_INSTALL_TIMEOUT_SECONDS")
+    let timeout_seconds = std::env::var("TASKNERVE_UPDATE_INSTALL_TIMEOUT_SECONDS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
+        .or_else(|| {
+            std::env::var("TASKNERVE_UPDATE_INSTALL_TIMEOUT_SECONDS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+        })
         .unwrap_or(300);
     let install_dir = preferred_update_install_dir();
     let install_script = if cfg!(windows) {
@@ -3941,7 +3960,7 @@ cmd += ["--no-path-update", "--with-skill", "--overwrite-skill"]
 try:
     result = subprocess.run(cmd, timeout=timeout)
 except subprocess.TimeoutExpired:
-    print(f"fugit update install timed out after {timeout}s", file=sys.stderr)
+    print(f"tasknerve update install timed out after {timeout}s", file=sys.stderr)
     sys.exit(124)
 sys.exit(result.returncode)
 "#,
@@ -3954,7 +3973,7 @@ sys.exit(result.returncode)
         .status()
         .with_context(|| "failed running updater install command")?;
     if !output.success() {
-        bail!("fugit update install command failed");
+        bail!("tasknerve update install command failed");
     }
     Ok(())
 }
@@ -4017,7 +4036,7 @@ fn apply_update(state: &mut UpdateState, force: bool) -> Result<()> {
 
 fn update_state_payload(state: &UpdateState) -> serde_json::Value {
     json!({
-        "schema_version": "fugit.update.payload.v1",
+        "schema_version": "tasknerve.update.payload.v1",
         "generated_at_utc": now_utc(),
         "repo_url": state.repo_url,
         "branch": state.branch,
@@ -4044,8 +4063,9 @@ fn update_state_payload(state: &UpdateState) -> serde_json::Value {
 }
 
 fn auto_update_is_disabled() -> bool {
-    std::env::var("FUGIT_DISABLE_AUTO_UPDATE")
+    std::env::var("TASKNERVE_DISABLE_AUTO_UPDATE")
         .ok()
+        .or_else(|| std::env::var("TASKNERVE_DISABLE_AUTO_UPDATE").ok())
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false)
         || std::env::var("CI").is_ok()
@@ -4078,13 +4098,13 @@ fn maybe_run_auto_update_maintenance() {
     }
 }
 
-fn fugit_skill_doctor_report() -> serde_json::Value {
-    let version_report = fugit_version_report();
+fn tasknerve_skill_doctor_report() -> serde_json::Value {
+    let version_report = tasknerve_version_report();
     let update_state = load_update_state().ok();
     let codex_home = resolve_codex_home().ok();
     let skill_root = codex_home
         .as_ref()
-        .map(|path| path.join("skills").join(FUGIT_SKILL_ID));
+        .map(|path| path.join("skills").join(SKILL_ID));
     let installed_skill_path = skill_root.as_ref().map(|path| path.join("SKILL.md"));
     let installed_openai_yaml_path = skill_root
         .as_ref()
@@ -4103,74 +4123,74 @@ fn fugit_skill_doctor_report() -> serde_json::Value {
     let checks = vec![
         json!({
             "name": "frontmatter_present",
-            "pass": FUGIT_SKILL_MD.trim_start().starts_with("---"),
+            "pass": SKILL_MD.trim_start().starts_with("---"),
             "detail": "SKILL.md starts with YAML frontmatter."
         }),
         json!({
             "name": "skill_name_matches",
-            "pass": FUGIT_SKILL_MD.contains("\nname: fugit\n"),
-            "detail": "SKILL.md frontmatter name matches fugit."
+            "pass": SKILL_MD.contains("\nname: tasknerve\n"),
+            "detail": "SKILL.md frontmatter name matches tasknerve."
         }),
         json!({
             "name": "skill_description_present",
-            "pass": FUGIT_SKILL_MD.contains("\ndescription: "),
+            "pass": SKILL_MD.contains("\ndescription: "),
             "detail": "SKILL.md frontmatter description exists."
         }),
         json!({
             "name": "openai_yaml_id_matches",
-            "pass": FUGIT_SKILL_OPENAI_YAML.contains("\n  id: fugit\n") || FUGIT_SKILL_OPENAI_YAML.contains("\nid: fugit\n"),
-            "detail": "agents/openai.yaml includes id: fugit."
+            "pass": SKILL_OPENAI_YAML.contains("\n  id: tasknerve\n") || SKILL_OPENAI_YAML.contains("\nid: tasknerve\n"),
+            "detail": "agents/openai.yaml includes id: tasknerve."
         }),
         json!({
             "name": "workflow_section_present",
-            "pass": FUGIT_SKILL_MD.contains("## Workflow"),
+            "pass": SKILL_MD.contains("## Workflow"),
             "detail": "SKILL.md includes a workflow section."
         }),
         json!({
             "name": "task_contract_present",
-            "pass": FUGIT_SKILL_MD.contains("## Task System Contract") && FUGIT_SKILL_MD.contains("task request"),
+            "pass": SKILL_MD.contains("## Task System Contract") && SKILL_MD.contains("task request"),
             "detail": "SKILL.md includes explicit task-system operating contract."
         }),
         json!({
             "name": "task_import_guidance_present",
-            "pass": FUGIT_SKILL_MD.contains("task import"),
+            "pass": SKILL_MD.contains("task import"),
             "detail": "SKILL.md includes bulk task import guidance."
         }),
         json!({
             "name": "project_registry_guidance_present",
-            "pass": FUGIT_SKILL_MD.contains("fugit project add"),
+            "pass": SKILL_MD.contains("tasknerve project add"),
             "detail": "SKILL.md includes multi-project registry guidance."
         }),
         json!({
             "name": "openai_yaml_multi_project_present",
-            "pass": FUGIT_SKILL_OPENAI_YAML.contains("multi-project"),
+            "pass": SKILL_OPENAI_YAML.contains("multi-project"),
             "detail": "agents/openai.yaml mentions multi-project behavior."
         }),
         json!({
             "name": "references_present",
-            "pass": !FUGIT_SKILL_REF_WORKFLOW_PROFILES.trim().is_empty() && !FUGIT_SKILL_REF_RECOVERY_PLAYBOOKS.trim().is_empty(),
+            "pass": !SKILL_REF_WORKFLOW_PROFILES.trim().is_empty() && !SKILL_REF_RECOVERY_PLAYBOOKS.trim().is_empty(),
             "detail": "Bundled reference files are embedded and non-empty."
         }),
         json!({
             "name": "installed_codex_skill_matches_embedded",
             "pass": installed_skill
                 .as_deref()
-                .map(|value| value == FUGIT_SKILL_MD)
+                .map(|value| value == SKILL_MD)
                 .unwrap_or(true),
             "detail": if installed_skill.is_some() {
-                "Installed Codex SKILL.md matches the running fugit binary's bundled skill.".to_string()
+                "Installed Codex SKILL.md matches the running tasknerve binary's bundled skill.".to_string()
             } else {
-                "No Codex-installed SKILL.md was found; install one with `fugit skill install-codex --overwrite` if this machine should use the local fugit skill.".to_string()
+                "No Codex-installed SKILL.md was found; install one with `tasknerve skill install-codex --overwrite` if this machine should use the local tasknerve skill.".to_string()
             }
         }),
         json!({
             "name": "installed_openai_yaml_matches_embedded",
             "pass": installed_openai_yaml
                 .as_deref()
-                .map(|value| value == FUGIT_SKILL_OPENAI_YAML)
+                .map(|value| value == SKILL_OPENAI_YAML)
                 .unwrap_or(true),
             "detail": if installed_openai_yaml.is_some() {
-                "Installed agents/openai.yaml matches the running fugit binary's bundled agent profile.".to_string()
+                "Installed agents/openai.yaml matches the running tasknerve binary's bundled agent profile.".to_string()
             } else {
                 "No installed agents/openai.yaml was found under the local Codex skill path.".to_string()
             }
@@ -4180,13 +4200,13 @@ fn fugit_skill_doctor_report() -> serde_json::Value {
             "pass": installed_skill.is_none() || unsupported_installed_commands.is_empty(),
             "detail": if unsupported_installed_commands.is_empty() {
                 if installed_skill.is_some() {
-                    "Installed skill only references command paths supported by this fugit binary.".to_string()
+                    "Installed skill only references command paths supported by this tasknerve binary.".to_string()
                 } else {
                     "No installed skill was found, so there are no external skill command paths to validate.".to_string()
                 }
             } else {
                 format!(
-                    "Installed skill references command paths this fugit binary does not support: {}",
+                    "Installed skill references command paths this tasknerve binary does not support: {}",
                     unsupported_installed_commands.join(", ")
                 )
             }
@@ -4200,7 +4220,7 @@ fn fugit_skill_doctor_report() -> serde_json::Value {
     });
     let recommended_fix = if !unsupported_installed_commands.is_empty() {
         Some(
-            "Reinstall fugit from the canonical repo, then run `fugit skill install-codex --overwrite` and refresh your shell PATH/hash."
+            "Reinstall tasknerve from the canonical repo, then run `tasknerve skill install-codex --overwrite` and refresh your shell PATH/hash."
                 .to_string(),
         )
     } else if version_report["path_resolution"]["current_executable_shadowed"]
@@ -4208,19 +4228,19 @@ fn fugit_skill_doctor_report() -> serde_json::Value {
         .unwrap_or(false)
     {
         Some(
-            "PATH resolves a different fugit binary than the one currently running; reinstall from the canonical repo, then refresh shell PATH/hash so agents do not hit a stale build."
+            "PATH resolves a different tasknerve binary than the one currently running; reinstall from the canonical repo, then refresh shell PATH/hash so agents do not hit a stale build."
                 .to_string(),
         )
     } else if installed_skill.is_none() || installed_openai_yaml.is_none() {
         Some(
-            "If this machine uses Codex locally, run `fugit skill install-codex --overwrite` to align the installed skill with the running CLI."
+            "If this machine uses Codex locally, run `tasknerve skill install-codex --overwrite` to align the installed skill with the running CLI."
                 .to_string(),
         )
-    } else if installed_skill.as_deref() != Some(FUGIT_SKILL_MD)
-        || installed_openai_yaml.as_deref() != Some(FUGIT_SKILL_OPENAI_YAML)
+    } else if installed_skill.as_deref() != Some(SKILL_MD)
+        || installed_openai_yaml.as_deref() != Some(SKILL_OPENAI_YAML)
     {
         Some(
-            "Run `fugit skill install-codex --overwrite` to realign the installed skill bundle with this fugit binary."
+            "Run `tasknerve skill install-codex --overwrite` to realign the installed skill bundle with this tasknerve binary."
                 .to_string(),
         )
     } else if update_state
@@ -4229,7 +4249,7 @@ fn fugit_skill_doctor_report() -> serde_json::Value {
         .unwrap_or(false)
     {
         Some(
-            "A newer fugit build is available; review it with `fugit update check --json` and apply it with `fugit update apply` when approved, or enable unattended upkeep with `fugit update policy set --auto-apply-enabled true`."
+            "A newer tasknerve build is available; review it with `tasknerve update check --json` and apply it with `tasknerve update apply` when approved, or enable unattended upkeep with `tasknerve update policy set --auto-apply-enabled true`."
                 .to_string(),
         )
     } else {
@@ -4237,9 +4257,9 @@ fn fugit_skill_doctor_report() -> serde_json::Value {
     };
 
     json!({
-        "schema_version": "fugit.skill.doctor.v2",
+        "schema_version": "tasknerve.skill.doctor.v2",
         "generated_at_utc": now_utc(),
-        "skill_id": FUGIT_SKILL_ID,
+        "skill_id": SKILL_ID,
         "ok": ok,
         "checks": checks,
         "cli": {
@@ -4257,8 +4277,8 @@ fn fugit_skill_doctor_report() -> serde_json::Value {
             "skill_path": installed_skill_path.map(|path| path.display().to_string()),
             "openai_yaml_path": installed_openai_yaml_path.map(|path| path.display().to_string()),
             "present": installed_skill.is_some(),
-            "matches_embedded_skill_md": installed_skill.as_deref() == Some(FUGIT_SKILL_MD),
-            "matches_embedded_openai_yaml": installed_openai_yaml.as_deref() == Some(FUGIT_SKILL_OPENAI_YAML),
+            "matches_embedded_skill_md": installed_skill.as_deref() == Some(SKILL_MD),
+            "matches_embedded_openai_yaml": installed_openai_yaml.as_deref() == Some(SKILL_OPENAI_YAML),
             "unsupported_command_paths": unsupported_installed_commands
         },
         "summary": {
@@ -4268,27 +4288,39 @@ fn fugit_skill_doctor_report() -> serde_json::Value {
     })
 }
 
-fn install_fugit_skill_to_codex(overwrite: bool) -> Result<PathBuf> {
-    let codex_home = resolve_codex_home()?;
-    let skill_root = codex_home.join("skills").join(FUGIT_SKILL_ID);
+fn install_named_skill_to_codex(
+    codex_home: &Path,
+    skill_id: &str,
+    skill_md: &str,
+    openai_yaml: &str,
+    workflow_profiles: &str,
+    recovery_playbooks: &str,
+    overwrite: bool,
+) -> Result<PathBuf> {
+    let skill_root = codex_home.join("skills").join(skill_id);
     let skill_path = skill_root.join("SKILL.md");
     let agents_path = skill_root.join("agents").join("openai.yaml");
     let ref_workflow_path = skill_root.join("references").join("workflow-profiles.md");
     let ref_recovery_path = skill_root.join("references").join("recovery-playbooks.md");
 
-    write_text_file_with_overwrite(&skill_path, FUGIT_SKILL_MD, overwrite)?;
-    write_text_file_with_overwrite(&agents_path, FUGIT_SKILL_OPENAI_YAML, overwrite)?;
-    write_text_file_with_overwrite(
-        &ref_workflow_path,
-        FUGIT_SKILL_REF_WORKFLOW_PROFILES,
-        overwrite,
-    )?;
-    write_text_file_with_overwrite(
-        &ref_recovery_path,
-        FUGIT_SKILL_REF_RECOVERY_PLAYBOOKS,
-        overwrite,
-    )?;
+    write_text_file_with_overwrite(&skill_path, skill_md, overwrite)?;
+    write_text_file_with_overwrite(&agents_path, openai_yaml, overwrite)?;
+    write_text_file_with_overwrite(&ref_workflow_path, workflow_profiles, overwrite)?;
+    write_text_file_with_overwrite(&ref_recovery_path, recovery_playbooks, overwrite)?;
     Ok(skill_root)
+}
+
+fn install_tasknerve_skill_to_codex(overwrite: bool) -> Result<PathBuf> {
+    let codex_home = resolve_codex_home()?;
+    install_named_skill_to_codex(
+        &codex_home,
+        SKILL_ID,
+        SKILL_MD,
+        SKILL_OPENAI_YAML,
+        SKILL_REF_WORKFLOW_PROFILES,
+        SKILL_REF_RECOVERY_PLAYBOOKS,
+        overwrite,
+    )
 }
 
 fn resolve_codex_home() -> Result<PathBuf> {
@@ -4357,7 +4389,7 @@ fn cmd_status(repo_root: &Path, args: StatusArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&summary)?);
     } else {
         println!(
-            "[fugit] branch={} tracked={} changed={} (+{} ~{} -{}) hash_jobs={}",
+            "[tasknerve] branch={} tracked={} changed={} (+{} ~{} -{}) hash_jobs={}",
             summary["branch"].as_str().unwrap_or("unknown"),
             summary["tracked_file_count"].as_u64().unwrap_or(0),
             summary["changed_file_count"].as_u64().unwrap_or(0),
@@ -4403,7 +4435,7 @@ fn checkpoint_json_error(
 ) -> anyhow::Error {
     JsonCommandError {
         payload: json!({
-            "schema_version": "fugit.checkpoint.v1",
+            "schema_version": "tasknerve.checkpoint.v1",
             "generated_at_utc": now_utc(),
             "ok": false,
             "repo_root": repo_root.display().to_string(),
@@ -4449,19 +4481,19 @@ fn render_checkpoint_missing_blob_rows(
 
 fn checkpoint_suggested_commands(repo_root: &Path, summary: &str) -> Vec<String> {
     vec![
-        format!("fugit --repo-root {} doctor --fix", repo_root.display()),
+        format!("tasknerve --repo-root {} doctor --fix", repo_root.display()),
         format!(
-            "fugit --repo-root {} checkpoint --summary {:?} --repair auto",
+            "tasknerve --repo-root {} checkpoint --summary {:?} --repair auto",
             repo_root.display(),
             summary
         ),
         format!(
-            "fugit --repo-root {} checkpoint --summary {:?} --repair-missing-blobs",
+            "tasknerve --repo-root {} checkpoint --summary {:?} --repair-missing-blobs",
             repo_root.display(),
             summary
         ),
         format!(
-            "fugit --repo-root {} checkpoint --summary {:?} --repair lossy",
+            "tasknerve --repo-root {} checkpoint --summary {:?} --repair lossy",
             repo_root.display(),
             summary
         ),
@@ -4534,9 +4566,9 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
                     message,
                     Vec::new(),
                     vec![
-                        "fugit lock list".to_string(),
+                        "tasknerve lock list".to_string(),
                         format!(
-                            "fugit --repo-root {} checkpoint --summary {:?} --ignore-locks",
+                            "tasknerve --repo-root {} checkpoint --summary {:?} --ignore-locks",
                             repo_root.display(),
                             args.summary.trim()
                         ),
@@ -4551,7 +4583,7 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
     if args.preflight {
         let ready = missing_old_objects.is_empty();
         let payload = json!({
-            "schema_version": "fugit.checkpoint.preflight.v1",
+            "schema_version": "tasknerve.checkpoint.preflight.v1",
             "generated_at_utc": now_utc(),
             "ok": true,
             "ready": ready,
@@ -4573,7 +4605,7 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&payload)?);
         } else {
             println!(
-                "[fugit-checkpoint-preflight] ready={} branch={} changed={} missing_old_objects={} repair_mode={}",
+                "[tasknerve-checkpoint-preflight] ready={} branch={} changed={} missing_old_objects={} repair_mode={}",
                 payload["ready"].as_bool().unwrap_or(false),
                 payload["branch"].as_str().unwrap_or("unknown"),
                 payload["metrics"]["changed_file_count"]
@@ -4604,7 +4636,7 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
                 .collect::<Vec<_>>()
                 .join("\n");
             let message = format!(
-                "checkpoint would lose recoverability because old object blobs are missing:\n{}\nRecreate the baseline snapshot first (for new repos, run `fugit init` before edits).\nTry `fugit doctor --fix` for safe Git-backed repair, rerun with `--repair auto` or `--repair-missing-blobs` to auto-heal during checkpoint, or use `--repair lossy` only when those blobs are irrecoverable.",
+                "checkpoint would lose recoverability because old object blobs are missing:\n{}\nRecreate the baseline snapshot first (for new repos, run `tasknerve init` before edits).\nTry `tasknerve doctor --fix` for safe Git-backed repair, rerun with `--repair auto` or `--repair-missing-blobs` to auto-heal during checkpoint, or use `--repair lossy` only when those blobs are irrecoverable.",
                 rendered_missing,
             );
             if args.json {
@@ -4623,14 +4655,14 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
         }
         if !args.json {
             println!(
-                "[fugit] warning=lossy_repair missing_old_objects={} historical_checkout_before_this_checkpoint_may_fail repair_mode=lossy",
+                "[tasknerve] warning=lossy_repair missing_old_objects={} historical_checkout_before_this_checkpoint_may_fail repair_mode=lossy",
                 missing_old_objects.len(),
             );
         }
     }
     if !repaired_old_objects.is_empty() && !args.json {
         println!(
-            "[fugit] repaired_missing_old_objects={} source=git_history repair_mode={}",
+            "[tasknerve] repaired_missing_old_objects={} source=git_history repair_mode={}",
             repaired_old_objects.len(),
             checkpoint_repair_mode_label(repair_mode)
         );
@@ -4721,7 +4753,7 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
-                "schema_version": "fugit.checkpoint.v1",
+                "schema_version": "tasknerve.checkpoint.v1",
                 "generated_at_utc": now_utc(),
                 "ok": true,
                 "repo_root": repo_root.display().to_string(),
@@ -4746,7 +4778,7 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
         );
     } else {
         println!(
-            "[fugit] checkpoint={} branch={} changed={} summary={} hash_jobs={} object_jobs={}",
+            "[tasknerve] checkpoint={} branch={} changed={} summary={} hash_jobs={} object_jobs={}",
             event_id,
             active_branch,
             event.metrics.changed_file_count,
@@ -4767,7 +4799,7 @@ fn cmd_log(repo_root: &Path, args: LogArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&events)?);
     } else {
         println!(
-            "[fugit] branch={} events={} (showing up to {})",
+            "[tasknerve] branch={} events={} (showing up to {})",
             active_branch,
             events.len(),
             args.limit
@@ -4861,7 +4893,7 @@ fn cmd_branch(repo_root: &Path, args: BranchArgs) -> Result<()> {
             write_pretty_json(&timeline_branches_path(repo_root), &branches)?;
 
             println!(
-                "[fugit] branch created={} from={} switched={}",
+                "[tasknerve] branch created={} from={} switched={}",
                 name,
                 active,
                 if switch { "true" } else { "false" }
@@ -4873,7 +4905,7 @@ fn cmd_branch(repo_root: &Path, args: BranchArgs) -> Result<()> {
             }
             branches.active_branch = name.clone();
             write_pretty_json(&timeline_branches_path(repo_root), &branches)?;
-            println!("[fugit] active branch={}", name);
+            println!("[tasknerve] active branch={}", name);
         }
     }
 
@@ -4893,7 +4925,7 @@ fn cmd_backend(repo_root: &Path, args: BackendArgs) -> Result<()> {
     match args.action {
         BackendAction::Show { json } => {
             let summary = json!({
-                "schema_version": "fugit.backend.summary.v1",
+                "schema_version": "tasknerve.backend.summary.v1",
                 "generated_at_utc": now_utc(),
                 "active_branch": branches.active_branch,
                 "backend_mode": config.backend_mode,
@@ -4907,7 +4939,7 @@ fn cmd_backend(repo_root: &Path, args: BackendArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&summary)?);
             } else {
                 println!(
-                    "[fugit-backend] mode={} bridge={}/{} storage_namespace={} billing_account_id={}",
+                    "[tasknerve-backend] mode={} bridge={}/{} storage_namespace={} billing_account_id={}",
                     summary["backend_mode"].as_str().unwrap_or("unknown"),
                     summary["default_bridge_remote"]
                         .as_str()
@@ -4928,7 +4960,7 @@ fn cmd_backend(repo_root: &Path, args: BackendArgs) -> Result<()> {
         } => {
             config.backend_mode = match mode {
                 BackendModeArg::GitBridge => BACKEND_MODE_GIT_BRIDGE.to_string(),
-                BackendModeArg::FugitCloud => BACKEND_MODE_FUGIT_CLOUD.to_string(),
+                BackendModeArg::TaskNerveCloud => BACKEND_MODE_TASKNERVE_CLOUD.to_string(),
             };
 
             if let Some(remote) = bridge_remote
@@ -4962,7 +4994,7 @@ fn cmd_backend(repo_root: &Path, args: BackendArgs) -> Result<()> {
             config.updated_at_utc = now_utc();
             write_pretty_json(&timeline_config_path(repo_root), &config)?;
             println!(
-                "[fugit-backend] updated mode={} bridge={}/{} storage_namespace={} billing_account_id={}",
+                "[tasknerve-backend] updated mode={} bridge={}/{} storage_namespace={} billing_account_id={}",
                 config.backend_mode,
                 config.default_bridge_remote,
                 config.default_bridge_branch,
@@ -4996,7 +5028,7 @@ fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
                 }
             } else {
                 println!(
-                    "[fugit-bridge] branch={} events={} (last {})",
+                    "[tasknerve-bridge] branch={} events={} (last {})",
                     branches.active_branch,
                     events.len(),
                     limit
@@ -5021,7 +5053,7 @@ fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else {
                     println!(
-                        "[fugit-bridge-auto-sync] enabled={} on_task_done={} status={} pending={} remote={} branch={} verification_backend={} verification_status={} failure_tasks={}",
+                        "[tasknerve-bridge-auto-sync] enabled={} on_task_done={} status={} pending={} remote={} branch={} verification_backend={} verification_status={} failure_tasks={}",
                         payload["enabled"].as_bool().unwrap_or(true),
                         payload["on_task_done"].as_bool().unwrap_or(true),
                         payload["status"].as_str().unwrap_or("unknown"),
@@ -5086,7 +5118,7 @@ fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else {
                     println!(
-                        "[fugit-bridge-auto-sync] enabled={} on_task_done={} event_count={} no_push={}",
+                        "[tasknerve-bridge-auto-sync] enabled={} on_task_done={} event_count={} no_push={}",
                         payload["enabled"].as_bool().unwrap_or(true),
                         payload["on_task_done"].as_bool().unwrap_or(true),
                         payload["event_count"].as_u64().unwrap_or(0),
@@ -5103,7 +5135,7 @@ fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else {
                     println!(
-                        "[fugit-github-issues] enabled={} status={} low_task_threshold={} cooldown_minutes={} max_issues={} created={} updated={} reopened={}",
+                        "[tasknerve-github-issues] enabled={} status={} low_task_threshold={} cooldown_minutes={} max_issues={} created={} updated={} reopened={}",
                         payload["enabled"].as_bool().unwrap_or(false),
                         payload["status"].as_str().unwrap_or("unknown"),
                         payload["low_task_threshold"].as_u64().unwrap_or(0),
@@ -5169,7 +5201,7 @@ fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else {
                     println!(
-                        "[fugit-github-issues] enabled={} low_task_threshold={} cooldown_minutes={} max_issues={}",
+                        "[tasknerve-github-issues] enabled={} low_task_threshold={} cooldown_minutes={} max_issues={}",
                         payload["enabled"].as_bool().unwrap_or(false),
                         payload["low_task_threshold"].as_u64().unwrap_or(0),
                         payload["cooldown_minutes"].as_i64().unwrap_or(0),
@@ -5211,7 +5243,7 @@ fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
             if background {
                 let payload = queue_bridge_auto_sync_background(repo_root, &config, &options)?;
                 println!(
-                    "[fugit-bridge] background_sync queued={} already_running={} remote={} branch={} trigger={}",
+                    "[tasknerve-bridge] background_sync queued={} already_running={} remote={} branch={} trigger={}",
                     payload["queued"].as_bool().unwrap_or(false),
                     payload["already_running"].as_bool().unwrap_or(false),
                     payload["remote"].as_str().unwrap_or("origin"),
@@ -5260,14 +5292,14 @@ fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
                     );
                 } else if !report["committed"].as_bool().unwrap_or(false) {
                     println!(
-                        "[fugit-bridge] {}",
+                        "[tasknerve-bridge] {}",
                         report["message"]
                             .as_str()
                             .unwrap_or("no staged changes after git add -A; skipping commit/push")
                     );
                 } else if report["pushed"].as_bool().unwrap_or(false) {
                     println!(
-                        "[fugit-bridge] committed+pushed remote={} branch={} verification_backend={} verification_status={}",
+                        "[tasknerve-bridge] committed+pushed remote={} branch={} verification_backend={} verification_status={}",
                         report["remote"].as_str().unwrap_or("origin"),
                         report["branch"].as_str().unwrap_or("trunk"),
                         report["verification_backend"].as_str().unwrap_or("local"),
@@ -5277,7 +5309,7 @@ fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
                     );
                 } else {
                     println!(
-                        "[fugit-bridge] committed locally (push skipped): remote={} branch={} verification_backend={}",
+                        "[tasknerve-bridge] committed locally (push skipped): remote={} branch={} verification_backend={}",
                         report["remote"].as_str().unwrap_or("origin"),
                         report["branch"].as_str().unwrap_or("trunk"),
                         report["verification_backend"].as_str().unwrap_or("local")
@@ -5307,7 +5339,7 @@ fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!(
-                    "[fugit-github-issues] status={} remote={} created={} updated={} reopened={} skipped={}",
+                    "[tasknerve-github-issues] status={} remote={} created={} updated={} reopened={} skipped={}",
                     payload["status"].as_str().unwrap_or("unknown"),
                     payload["remote"].as_str().unwrap_or("origin"),
                     payload["created_count"].as_u64().unwrap_or(0),
@@ -5340,7 +5372,7 @@ fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
                     .arg("push")
                     .arg("--include-untracked")
                     .arg("-m")
-                    .arg(format!("fugit-autostash-{}", now_utc()));
+                    .arg(format!("tasknerve-autostash-{}", now_utc()));
                 run_process(stash_cmd, "failed creating autostash before pull")?;
                 created_autostash = true;
             }
@@ -5368,7 +5400,7 @@ fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
             }
 
             println!(
-                "[fugit-bridge] pulled remote={} branch={} ff_only={} rebase={} autostash={}",
+                "[tasknerve-bridge] pulled remote={} branch={} ff_only={} rebase={} autostash={}",
                 remote, branch, ff_only, rebase, created_autostash
             );
         }
@@ -5402,7 +5434,7 @@ fn cmd_bridge_auth(repo_root: &Path, config: &TimelineConfig, args: BridgeAuthAr
                 .unwrap_or_else(|| "unset".to_string());
             let has_credential = cred.as_ref().and_then(|row| row.password.clone()).is_some();
             let summary = json!({
-                "schema_version": "fugit.bridge_auth.status.v1",
+                "schema_version": "tasknerve.bridge_auth.status.v1",
                 "generated_at_utc": now_utc(),
                 "remote": remote_name,
                 "remote_url": remote_url,
@@ -5415,7 +5447,7 @@ fn cmd_bridge_auth(repo_root: &Path, config: &TimelineConfig, args: BridgeAuthAr
                 println!("{}", serde_json::to_string_pretty(&summary)?);
             } else {
                 println!(
-                    "[fugit-bridge-auth] remote={} host={} helper={} username={} credential_present={}",
+                    "[tasknerve-bridge-auth] remote={} host={} helper={} username={} credential_present={}",
                     summary["remote"].as_str().unwrap_or("origin"),
                     summary["host"].as_str().unwrap_or("github.com"),
                     summary["credential_helper"].as_str().unwrap_or("unset"),
@@ -5469,17 +5501,17 @@ fn cmd_bridge_auth(repo_root: &Path, config: &TimelineConfig, args: BridgeAuthAr
             write_pretty_json(&timeline_bridge_auth_path(repo_root), &state)?;
 
             println!(
-                "[fugit-bridge-auth] login complete host={} username={} helper={} verified_remote_access={}",
+                "[tasknerve-bridge-auth] login complete host={} username={} helper={} verified_remote_access={}",
                 resolved_host, username, helper, access_verified
             );
             if used_store_fallback {
                 println!(
-                    "[fugit-bridge-auth] note: credential.helper was unset; defaulted to 'store'. Switch to a secure helper (manager-core/osxkeychain/libsecret/wincred) for long-term use."
+                    "[tasknerve-bridge-auth] note: credential.helper was unset; defaulted to 'store'. Switch to a secure helper (manager-core/osxkeychain/libsecret/wincred) for long-term use."
                 );
             }
             if !access_verified {
                 println!(
-                    "[fugit-bridge-auth] note: remote access verification skipped/failed (non-HTTPS remote or insufficient token scope)"
+                    "[tasknerve-bridge-auth] note: remote access verification skipped/failed (non-HTTPS remote or insufficient token scope)"
                 );
             }
         }
@@ -5505,7 +5537,7 @@ fn cmd_bridge_auth(repo_root: &Path, config: &TimelineConfig, args: BridgeAuthAr
                 let _ = fs::remove_file(auth_path);
             }
             println!(
-                "[fugit-bridge-auth] logout complete host={} username={}",
+                "[tasknerve-bridge-auth] logout complete host={} username={}",
                 resolved_host, username
             );
         }
@@ -5852,7 +5884,11 @@ fn github_api_base_url_for_host(host: &str) -> String {
 }
 
 fn resolve_github_api_token(repo_root: &Path, host: &str) -> Result<Option<String>> {
-    for key in ["FUGIT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] {
+    for key in [
+        "TASKNERVE_GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+    ] {
         if let Ok(value) = std::env::var(key) {
             let trimmed = value.trim();
             if !trimmed.is_empty() {
@@ -5891,7 +5927,7 @@ fn github_api_get_json(
         .arg("-H")
         .arg("Accept: application/vnd.github+json")
         .arg("-H")
-        .arg("User-Agent: fugit-alpha")
+        .arg("User-Agent: tasknerve")
         .arg("-H")
         .arg("X-GitHub-Api-Version: 2022-11-28")
         .arg(&url);
@@ -6542,7 +6578,7 @@ fn verify_github_ci_for_commit(
         let (status, payload) = github_api_get_json(&api_base_url, &path, api_token.as_deref())?;
         if !(200..300).contains(&status) {
             return Ok(json!({
-                "schema_version": "fugit.check.run.v2",
+                "schema_version": "tasknerve.check.run.v2",
                 "generated_at_utc": now_utc(),
                 "backend": QUALITY_CHECK_BACKEND_GITHUB_CI,
                 "ok": false,
@@ -6576,7 +6612,7 @@ fn verify_github_ci_for_commit(
                 let first_url = current_runs.iter().find_map(|run| run.html_url.clone());
                 if failing_runs.is_empty() {
                     return Ok(json!({
-                        "schema_version": "fugit.check.run.v2",
+                        "schema_version": "tasknerve.check.run.v2",
                         "generated_at_utc": now_utc(),
                         "backend": QUALITY_CHECK_BACKEND_GITHUB_CI,
                         "ok": true,
@@ -6610,7 +6646,7 @@ fn verify_github_ci_for_commit(
                     &failing_runs,
                 )?;
                 return Ok(json!({
-                    "schema_version": "fugit.check.run.v2",
+                    "schema_version": "tasknerve.check.run.v2",
                     "generated_at_utc": now_utc(),
                     "backend": QUALITY_CHECK_BACKEND_GITHUB_CI,
                     "ok": false,
@@ -6646,7 +6682,7 @@ fn verify_github_ci_for_commit(
             };
             let ok = status == "no_runs_allowed";
             return Ok(json!({
-                "schema_version": "fugit.check.run.v2",
+                "schema_version": "tasknerve.check.run.v2",
                 "generated_at_utc": now_utc(),
                 "backend": QUALITY_CHECK_BACKEND_GITHUB_CI,
                 "ok": ok,
@@ -6763,14 +6799,14 @@ fn cmd_checkout(repo_root: &Path, args: CheckoutArgs) -> Result<()> {
     }
     if !repaired_target_objects.is_empty() {
         println!(
-            "[fugit-checkout] repaired_missing_objects={} source=git_history",
+            "[tasknerve-checkout] repaired_missing_objects={} source=git_history",
             repaired_target_objects.len()
         );
     }
 
     if args.dry_run {
         println!(
-            "[fugit-checkout] dry-run branch={} event={} planned_changes={} (+{} ~{} -{})",
+            "[tasknerve-checkout] dry-run branch={} event={} planned_changes={} (+{} ~{} -{})",
             source_branch,
             target_event_id.as_deref().unwrap_or("head"),
             planned.len(),
@@ -6844,7 +6880,7 @@ fn cmd_checkout(repo_root: &Path, args: CheckoutArgs) -> Result<()> {
     }
 
     println!(
-        "[fugit-checkout] restored branch={} event={} changed_paths={} move_head={}",
+        "[tasknerve-checkout] restored branch={} event={} changed_paths={} move_head={}",
         source_branch,
         target_event_id.as_deref().unwrap_or("head"),
         planned.len(),
@@ -6906,7 +6942,7 @@ fn cmd_gc(repo_root: &Path, args: GcArgs) -> Result<()> {
     }
 
     let report = json!({
-        "schema_version": "fugit.gc.report.v1",
+        "schema_version": "tasknerve.gc.report.v1",
         "generated_at_utc": now_utc(),
         "dry_run": args.dry_run,
         "total_objects": total_objects,
@@ -6921,7 +6957,7 @@ fn cmd_gc(repo_root: &Path, args: GcArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         println!(
-            "[fugit-gc] dry_run={} total_objects={} pruned_objects={} reclaimed_bytes={}",
+            "[tasknerve-gc] dry_run={} total_objects={} pruned_objects={} reclaimed_bytes={}",
             args.dry_run, total_objects, pruned_objects, pruned_bytes
         );
     }
@@ -6962,7 +6998,7 @@ fn cmd_check(repo_root: &Path, args: CheckArgs) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&rows)?);
             } else {
-                println!("[fugit-check] count={}", rows.len());
+                println!("[tasknerve-check] count={}", rows.len());
                 for check in rows {
                     println!(
                         "- {} [{}] {} task_id={} status={}",
@@ -6995,7 +7031,7 @@ fn cmd_check(repo_root: &Path, args: CheckArgs) -> Result<()> {
                 validate_check_task_id(repo_root, task_id)?;
             }
             let now = now_utc();
-            let check = FugitCheck {
+            let check = TaskNerveCheck {
                 check_id: format!("chk_{}", Uuid::new_v4().simple()),
                 name: normalize_check_name(name, kind, task_id.as_deref()),
                 command,
@@ -7020,7 +7056,7 @@ fn cmd_check(repo_root: &Path, args: CheckArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&check)?);
             } else {
                 println!(
-                    "[fugit-check] added {} [{}] task_id={}",
+                    "[tasknerve-check] added {} [{}] task_id={}",
                     check.check_id,
                     check_kind_label(check.kind),
                     check.task_id.as_deref().unwrap_or("none")
@@ -7060,7 +7096,7 @@ fn cmd_check(repo_root: &Path, args: CheckArgs) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&state.checks[index])?);
             } else {
-                println!("[fugit-check] deprecated {}", state.checks[index].check_id);
+                println!("[tasknerve-check] deprecated {}", state.checks[index].check_id);
             }
         }
         CheckAction::Run {
@@ -7116,7 +7152,7 @@ fn cmd_check(repo_root: &Path, args: CheckArgs) -> Result<()> {
                         payload
                     }
                     None => json!({
-                        "schema_version": "fugit.check.run.v2",
+                        "schema_version": "tasknerve.check.run.v2",
                         "generated_at_utc": now_utc(),
                         "backend": QUALITY_CHECK_BACKEND_GITHUB_CI,
                         "ok": false,
@@ -7147,7 +7183,7 @@ fn cmd_check(repo_root: &Path, args: CheckArgs) -> Result<()> {
                 }
             } else {
                 println!(
-                    "[fugit-check] backend={} status={} selected={} passed={} failed={} workflow_runs={}",
+                    "[tasknerve-check] backend={} status={} selected={} passed={} failed={} workflow_runs={}",
                     payload["backend"].as_str().unwrap_or("local"),
                     payload["status"].as_str().unwrap_or("unknown"),
                     payload["selected_count"].as_u64().unwrap_or(0),
@@ -7167,7 +7203,7 @@ fn cmd_check(repo_root: &Path, args: CheckArgs) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else {
                     println!(
-                        "[fugit-check-policy] enabled={} backend={} require_on_task_done={} run_before_sync={} active={} deprecated={} github_timeout_minutes={} github_poll_seconds={} github_require_checks={} github_auto_task_on_failure={} github_failure_task_priority={}",
+                        "[tasknerve-check-policy] enabled={} backend={} require_on_task_done={} run_before_sync={} active={} deprecated={} github_timeout_minutes={} github_poll_seconds={} github_require_checks={} github_auto_task_on_failure={} github_failure_task_priority={}",
                         payload["enabled"].as_bool().unwrap_or(false),
                         payload["backend"].as_str().unwrap_or("local"),
                         payload["require_on_task_done"].as_bool().unwrap_or(false),
@@ -7223,7 +7259,7 @@ fn cmd_check(repo_root: &Path, args: CheckArgs) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else {
                     println!(
-                        "[fugit-check-policy] enabled={} backend={} require_on_task_done={} run_before_sync={} github_timeout_minutes={} github_poll_seconds={} github_require_checks={} github_auto_task_on_failure={} github_failure_task_priority={}",
+                        "[tasknerve-check-policy] enabled={} backend={} require_on_task_done={} run_before_sync={} github_timeout_minutes={} github_poll_seconds={} github_require_checks={} github_auto_task_on_failure={} github_failure_task_priority={}",
                         payload["enabled"].as_bool().unwrap_or(false),
                         payload["backend"].as_str().unwrap_or("local"),
                         payload["require_on_task_done"].as_bool().unwrap_or(false),
@@ -7260,7 +7296,7 @@ fn cmd_lock(repo_root: &Path, args: LockArgs) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&state.locks)?);
             } else {
-                println!("[fugit-lock] active={}", state.locks.len());
+                println!("[tasknerve-lock] active={}", state.locks.len());
                 for lock in &state.locks {
                     println!(
                         "{} pattern={} agent={} expires={}",
@@ -7297,7 +7333,7 @@ fn cmd_lock(repo_root: &Path, args: LockArgs) -> Result<()> {
                 expires_at_utc,
             });
             write_pretty_json(&timeline_locks_path(repo_root), &state)?;
-            println!("[fugit-lock] added {}", lock_id);
+            println!("[tasknerve-lock] added {}", lock_id);
         }
         LockAction::Remove { lock_id } => {
             let before = state.locks.len();
@@ -7306,7 +7342,7 @@ fn cmd_lock(repo_root: &Path, args: LockArgs) -> Result<()> {
                 bail!("lock not found: {}", lock_id);
             }
             write_pretty_json(&timeline_locks_path(repo_root), &state)?;
-            println!("[fugit-lock] removed {}", lock_id);
+            println!("[tasknerve-lock] removed {}", lock_id);
         }
     }
     Ok(())
@@ -7345,7 +7381,7 @@ fn cmd_project(args: ProjectArgs) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&rows)?);
             } else {
-                println!("[fugit-project] registered={}", rows.len());
+                println!("[tasknerve-project] registered={}", rows.len());
                 for row in rows {
                     let marker = if row["is_default"].as_bool().unwrap_or(false) {
                         "*"
@@ -7375,14 +7411,14 @@ fn cmd_project(args: ProjectArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!(
-                    "[fugit-project] discovery roots={} created={} updated={}",
+                    "[tasknerve-project] discovery roots={} created={} updated={}",
                     payload["roots"].as_array().map(Vec::len).unwrap_or(0),
                     payload["created"].as_array().map(Vec::len).unwrap_or(0),
                     payload["updated"].as_array().map(Vec::len).unwrap_or(0)
                 );
                 if let Some(selected) = payload["selected_project"].as_object() {
                     println!(
-                        "[fugit-project] selected name={} repo_root={}",
+                        "[tasknerve-project] selected name={} repo_root={}",
                         selected
                             .get("name")
                             .and_then(serde_json::Value::as_str)
@@ -7432,7 +7468,7 @@ fn cmd_project(args: ProjectArgs) -> Result<()> {
             registry.updated_at_utc = now;
             write_project_registry(&registry)?;
             let payload = json!({
-                "schema_version": "fugit.project.add.v1",
+                "schema_version": "tasknerve.project.add.v1",
                 "generated_at_utc": now_utc(),
                 "name": normalized_name,
                 "repo_root": canonical_root.display().to_string(),
@@ -7443,7 +7479,7 @@ fn cmd_project(args: ProjectArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!(
-                    "[fugit-project] upserted name={} repo_root={}",
+                    "[tasknerve-project] upserted name={} repo_root={}",
                     payload["name"].as_str().unwrap_or("unknown"),
                     payload["repo_root"].as_str().unwrap_or("unknown")
                 );
@@ -7470,7 +7506,7 @@ fn cmd_project(args: ProjectArgs) -> Result<()> {
             registry.updated_at_utc = now_utc();
             write_project_registry(&registry)?;
             let payload = json!({
-                "schema_version": "fugit.project.remove.v1",
+                "schema_version": "tasknerve.project.remove.v1",
                 "generated_at_utc": now_utc(),
                 "name": normalized_name,
                 "default_project": registry.default_project
@@ -7478,7 +7514,7 @@ fn cmd_project(args: ProjectArgs) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
-                println!("[fugit-project] removed name={}", normalized_name);
+                println!("[tasknerve-project] removed name={}", normalized_name);
             }
         }
         ProjectAction::Use { name, json } => {
@@ -7509,14 +7545,14 @@ fn cmd_project(args: ProjectArgs) -> Result<()> {
             registry.updated_at_utc = now;
             write_project_registry(&registry)?;
             let payload = json!({
-                "schema_version": "fugit.project.use.v1",
+                "schema_version": "tasknerve.project.use.v1",
                 "generated_at_utc": now_utc(),
                 "default_project": registry.default_project
             });
             if json {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
-                println!("[fugit-project] default project set to {}", normalized_name);
+                println!("[tasknerve-project] default project set to {}", normalized_name);
             }
         }
     }
@@ -7721,7 +7757,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     .as_deref()
                     .map(|name| format!(" view={name}"))
                     .unwrap_or_default();
-                println!("[fugit-task]{} count={}", view_note, rows.len());
+                println!("[tasknerve-task]{} count={}", view_note, rows.len());
                 for row in rows {
                     let task_id = row
                         .get("task_id")
@@ -7793,7 +7829,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 if json {
                     println!("{}", serde_json::to_string_pretty(&view)?);
                 } else {
-                    println!("[fugit-task-view] saved {}", view.name);
+                    println!("[tasknerve-task-view] saved {}", view.name);
                 }
             }
             TaskViewAction::List { json } => {
@@ -7802,7 +7838,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 if json {
                     println!("{}", serde_json::to_string_pretty(&state)?);
                 } else {
-                    println!("[fugit-task-view] count={}", state.views.len());
+                    println!("[tasknerve-task-view] count={}", state.views.len());
                     for view in state.views {
                         println!(
                             "{} ready_only={} mine={} tags={} description={}",
@@ -7828,7 +7864,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 if json {
                     println!("{}", serde_json::to_string_pretty(&removed)?);
                 } else {
-                    println!("[fugit-task-view] removed {}", removed.name);
+                    println!("[tasknerve-task-view] removed {}", removed.name);
                 }
             }
         },
@@ -7843,7 +7879,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!(
-                    "[fugit-task-status] agent={} current={} mine={} ready_open={} blocked_open={} date_gated_open={} next={}",
+                    "[tasknerve-task-status] agent={} current={} mine={} ready_open={} blocked_open={} date_gated_open={} next={}",
                     payload["agent_id"].as_str().unwrap_or("unknown"),
                     payload["current"]["task_id"].as_str().unwrap_or("none"),
                     payload["counts"]["mine_claimed"].as_u64().unwrap_or(0),
@@ -7934,7 +7970,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     task_current_payload(repo_root, &state, &agent_id, json || include_context);
                 if current["found"].as_bool().unwrap_or(false) {
                     let payload = json!({
-                        "schema_version": "fugit.task.start.v1",
+                        "schema_version": "tasknerve.task.start.v1",
                         "generated_at_utc": now_utc(),
                         "agent_id": agent_id,
                         "start_mode": "resume_current",
@@ -7962,7 +7998,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(&payload)?);
                     } else {
                         println!(
-                            "[fugit-task] start=resume_current claimed=false task_id={} title={}",
+                            "[tasknerve-task] start=resume_current claimed=false task_id={} title={}",
                             payload["task"]["task_id"].as_str().unwrap_or("unknown"),
                             payload["task"]["title"].as_str().unwrap_or("untitled")
                         );
@@ -7991,7 +8027,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 },
             )?;
             if let Some(object) = payload.as_object_mut() {
-                object.insert("schema_version".to_string(), json!("fugit.task.start.v1"));
+                object.insert("schema_version".to_string(), json!("tasknerve.task.start.v1"));
                 object.insert("start_mode".to_string(), json!("request_next"));
                 if let Some(view) = resolved_view.as_ref() {
                     object.insert("view".to_string(), json!(view.name));
@@ -8015,7 +8051,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else if let Some(task) = payload.get("task").and_then(|row| row.as_object()) {
                 println!(
-                    "[fugit-task] current agent={} task_id={} title={}",
+                    "[tasknerve-task] current agent={} task_id={} title={}",
                     payload["agent_id"].as_str().unwrap_or("unknown"),
                     task.get("task_id")
                         .and_then(serde_json::Value::as_str)
@@ -8026,7 +8062,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 );
             } else {
                 println!(
-                    "[fugit-task] no claimed task for agent={}",
+                    "[tasknerve-task] no claimed task for agent={}",
                     payload["agent_id"].as_str().unwrap_or("unknown")
                 );
             }
@@ -8057,7 +8093,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&task)?);
             } else {
                 println!(
-                    "[fugit-task] added {} priority={} tags={}",
+                    "[tasknerve-task] added {} priority={} tags={}",
                     task.task_id,
                     task.priority,
                     task.tags.join(",")
@@ -8096,7 +8132,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&task)?);
             } else {
-                println!("[fugit-task] edited {} by {}", task.task_id, agent_id);
+                println!("[tasknerve-task] edited {} by {}", task.task_id, agent_id);
             }
         }
         TaskAction::Remove {
@@ -8113,7 +8149,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&task)?);
             } else {
-                println!("[fugit-task] removed {} by {}", task.task_id, agent_id);
+                println!("[tasknerve-task] removed {} by {}", task.task_id, agent_id);
             }
         }
         TaskAction::Approve {
@@ -8134,7 +8170,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 append_task_timeline_event(repo_root, task, &agent_id, "edit", None)?;
             }
             let payload = json!({
-                "schema_version": "fugit.task.approve.v1",
+                "schema_version": "tasknerve.task.approve.v1",
                 "generated_at_utc": now_utc(),
                 "agent_id": agent_id,
                 "approved_count": approved.len(),
@@ -8144,7 +8180,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!(
-                    "[fugit-task] approved {} task(s) by {}",
+                    "[tasknerve-task] approved {} task(s) by {}",
                     payload["approved_count"].as_u64().unwrap_or(0),
                     payload["agent_id"].as_str().unwrap_or("unknown")
                 );
@@ -8163,7 +8199,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(&payload)?);
                     } else {
                         println!(
-                            "[fugit-task-policy] auto_replenish={} confirmation={} configured_agents={} pending_confirmation={}",
+                            "[tasknerve-task-policy] auto_replenish={} confirmation={} configured_agents={} pending_confirmation={}",
                             payload["auto_replenish_enabled"].as_bool().unwrap_or(true),
                             payload["auto_replenish_confirmation"]
                                 .as_bool()
@@ -8210,7 +8246,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(&payload)?);
                     } else {
                         println!(
-                            "[fugit-task-policy] updated_by={} auto_replenish={} confirmation={} configured_agents={} policy_synced_tasks={}",
+                            "[tasknerve-task-policy] updated_by={} auto_replenish={} confirmation={} configured_agents={} policy_synced_tasks={}",
                             agent_id,
                             payload["auto_replenish_enabled"].as_bool().unwrap_or(true),
                             payload["auto_replenish_confirmation"]
@@ -8299,7 +8335,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 for task in &report.removed {
                     append_task_timeline_event(
                         repo_root,
-                        &FugitTask {
+                        &TaskNerveTask {
                             task_id: task.task_id.clone(),
                             title: task.title.clone(),
                             detail: None,
@@ -8344,7 +8380,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!(
-                    "[fugit-task] sync plan={} created={} updated={} reopened={} removed={} blocked={} dry_run={}",
+                    "[tasknerve-task] sync plan={} created={} updated={} reopened={} removed={} blocked={} dry_run={}",
                     report.plan,
                     report.created.len(),
                     report.updated.len(),
@@ -8402,7 +8438,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             let fallback_agent = agent.unwrap_or_else(default_agent_id);
             let mut pending = rows;
             let mut imported_records = Vec::<serde_json::Value>::new();
-            let mut imported_tasks = Vec::<FugitTask>::new();
+            let mut imported_tasks = Vec::<TaskNerveTask>::new();
             let mut key_to_task_id = BTreeMap::<String, String>::new();
 
             while !pending.is_empty() {
@@ -8423,7 +8459,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                         let created_by_agent_id =
                             row.agent.clone().unwrap_or_else(|| fallback_agent.clone());
                         let now = now_utc();
-                        let task = FugitTask {
+                        let task = TaskNerveTask {
                             task_id: format!("task_{}", Uuid::new_v4().simple()),
                             title: row.title.clone(),
                             detail: row.detail.clone(),
@@ -8505,7 +8541,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             }
 
             let payload = json!({
-                "schema_version": "fugit.task.import.v1",
+                "schema_version": "tasknerve.task.import.v1",
                 "generated_at_utc": now_utc(),
                 "file": resolved_file.display().to_string(),
                 "plan": plan_source,
@@ -8522,7 +8558,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!(
-                    "[fugit-task] imported {} tasks from {} (dry_run={})",
+                    "[tasknerve-task] imported {} tasks from {} (dry_run={})",
                     payload["imported_count"].as_u64().unwrap_or(0),
                     payload["file"].as_str().unwrap_or("unknown"),
                     dry_run
@@ -8639,7 +8675,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 for task in &report.sync.removed {
                     append_task_timeline_event(
                         repo_root,
-                        &FugitTask {
+                        &TaskNerveTask {
                             task_id: task.task_id.clone(),
                             title: task.title.clone(),
                             detail: None,
@@ -8683,7 +8719,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!(
-                    "[fugit-task] sync-comments markers={} scanned_files={} matched={} created={} updated={} reopened={} removed={} dry_run={}",
+                    "[tasknerve-task] sync-comments markers={} scanned_files={} matched={} created={} updated={} reopened={} removed={} dry_run={}",
                     report.markers.join(","),
                     report.scanned_files,
                     report.matched_comments,
@@ -8733,7 +8769,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else {
                     println!(
-                        "[fugit-task] extended claim {} by {}",
+                        "[tasknerve-task] extended claim {} by {}",
                         state.tasks[task_index].task_id, agent_id
                     );
                 }
@@ -8747,7 +8783,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             }
             if task_is_manually_blocked(task) {
                 bail!(
-                    "task {} is blocked; clear it first with `fugit task update {} --clear-blocked --agent {}`",
+                    "task {} is blocked; clear it first with `tasknerve task update {} --clear-blocked --agent {}`",
                     task.task_id,
                     task.task_id,
                     agent_id
@@ -8779,7 +8815,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!(
-                    "[fugit-task] claimed {} by {}",
+                    "[tasknerve-task] claimed {} by {}",
                     state.tasks[task_index].task_id, agent_id
                 );
             }
@@ -8824,7 +8860,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             let benchmark_commands = normalize_string_list(benchmarks);
             let existing_active_checks =
                 task_active_check_count(&check_state, &state.tasks[task_index].task_id);
-            let mut created_checks = Vec::<FugitCheck>::new();
+            let mut created_checks = Vec::<TaskNerveCheck>::new();
             if matches!(done_state, TaskDoneStateArg::Done) {
                 if config.quality_checks_enabled
                     && config.quality_checks_require_on_task_done
@@ -8835,7 +8871,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     && benchmark_commands.is_empty()
                 {
                     bail!(
-                        "task {} requires at least one regression or benchmark check; use --regression/--benchmark, add one with `fugit check add --task-id {}` first, or opt out with `fugit check policy set --require-on-task-done false`",
+                        "task {} requires at least one regression or benchmark check; use --regression/--benchmark, add one with `tasknerve check add --task-id {}` first, or opt out with `tasknerve check policy set --require-on-task-done false`",
                         state.tasks[task_index].task_id,
                         state.tasks[task_index].task_id
                     );
@@ -8843,7 +8879,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 for command in regression_commands {
                     let normalized_command = normalize_check_command(command)?;
                     let now = now_utc();
-                    let check = FugitCheck {
+                    let check = TaskNerveCheck {
                         check_id: format!("chk_{}", Uuid::new_v4().simple()),
                         name: format!("regression {}", state.tasks[task_index].task_id),
                         command: normalized_command,
@@ -8866,7 +8902,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 for command in benchmark_commands {
                     let normalized_command = normalize_check_command(command)?;
                     let now = now_utc();
-                    let check = FugitCheck {
+                    let check = TaskNerveCheck {
                         check_id: format!("chk_{}", Uuid::new_v4().simple()),
                         name: format!("benchmark {}", state.tasks[task_index].task_id),
                         command: normalized_command,
@@ -9067,7 +9103,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     .map(|(idx, _)| state.tasks[idx].task_id.as_str())
                     .unwrap_or("none");
                 println!(
-                    "[fugit-task] state={} task_id={} by={} quality_checks_added={} auto_bridge_sync={} next_task={}",
+                    "[tasknerve-task] state={} task_id={} by={} quality_checks_added={} auto_bridge_sync={} next_task={}",
                     if matches!(done_state, TaskDoneStateArg::Blocked) {
                         "blocked"
                     } else {
@@ -9157,7 +9193,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!(
-                    "[fugit-task] progress task_id={} progress_count={} last_note={}",
+                    "[tasknerve-task] progress task_id={} progress_count={} last_note={}",
                     payload["task_id"].as_str().unwrap_or("unknown"),
                     payload["progress_count"].as_u64().unwrap_or(0),
                     payload["last_progress_note"].as_str().unwrap_or("")
@@ -9212,7 +9248,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!(
-                    "[fugit-task] note task_id={} progress_count={} artifact_count={} last_note={} last_artifact={}",
+                    "[tasknerve-task] note task_id={} progress_count={} artifact_count={} last_note={} last_artifact={}",
                     payload["task_id"].as_str().unwrap_or("unknown"),
                     payload["progress_count"].as_u64().unwrap_or(0),
                     payload["artifact_count"].as_u64().unwrap_or(0),
@@ -9235,7 +9271,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&task)?);
             } else {
-                println!("[fugit-task] reopened {} by {}", task.task_id, agent_id);
+                println!("[tasknerve-task] reopened {} by {}", task.task_id, agent_id);
             }
         }
         TaskAction::Release {
@@ -9316,7 +9352,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 );
             } else {
                 println!(
-                    "[fugit-task] state={} task_id={}",
+                    "[tasknerve-task] state={} task_id={}",
                     if matches!(release_state, TaskReleaseStateArg::Blocked) {
                         "blocked"
                     } else {
@@ -9347,7 +9383,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     ))?
                 );
             } else {
-                println!("[fugit-task] canceled {} by {}", task.task_id, agent_id);
+                println!("[tasknerve-task] canceled {} by {}", task.task_id, agent_id);
             }
         }
         TaskAction::Heartbeat {
@@ -9390,7 +9426,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!(
-                    "[fugit-task] heartbeat task_id={} ttl_remaining={} progress_count={} artifact_count={}",
+                    "[tasknerve-task] heartbeat task_id={} ttl_remaining={} progress_count={} artifact_count={}",
                     payload["task_id"].as_str().unwrap_or("unknown"),
                     payload["claim_ttl_remaining_seconds"]
                         .as_i64()
@@ -9423,7 +9459,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                         opened_browser = true;
                     } else {
                         eprintln!(
-                            "[fugit-task-gui] warning: launched server but failed opening browser"
+                            "[tasknerve-task-gui] warning: launched server but failed opening browser"
                         );
                     }
                 }
@@ -9431,7 +9467,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&json!({
-                            "schema_version": "fugit.task.gui.launch.v1",
+                            "schema_version": "tasknerve.task.gui.launch.v1",
                             "generated_at_utc": now_utc(),
                             "background": true,
                             "url": url,
@@ -9442,7 +9478,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                         }))?
                     );
                 } else {
-                    println!("[fugit-task-gui] launched background server at {}", url);
+                    println!("[tasknerve-task-gui] launched background server at {}", url);
                 }
             } else {
                 let listener = bind_task_gui_listener(&host, port)?;
@@ -9455,12 +9491,12 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     selected_project.as_deref(),
                 );
                 println!(
-                    "[fugit-task-gui] serving live task board at {} (Ctrl+C to stop)",
+                    "[tasknerve-task-gui] serving live task board at {} (Ctrl+C to stop)",
                     url
                 );
                 if open_browser && let Err(err) = open_url_in_browser(&url) {
                     eprintln!(
-                        "[fugit-task-gui] warning: failed opening browser automatically: {}",
+                        "[tasknerve-task-gui] warning: failed opening browser automatically: {}",
                         err
                     );
                 }
@@ -9480,7 +9516,7 @@ fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!(
-                    "[fugit-advisor] enabled={} providers={} reviewer={} task_manager={} recent_runs={}",
+                    "[tasknerve-advisor] enabled={} providers={} reviewer={} task_manager={} recent_runs={}",
                     payload["policy"]["enabled"].as_bool().unwrap_or(false),
                     payload["providers"]
                         .as_array()
@@ -9504,7 +9540,7 @@ fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&runs)?);
             } else {
-                println!("[fugit-advisor] recent_runs={}", runs.len());
+                println!("[tasknerve-advisor] recent_runs={}", runs.len());
                 for run in runs {
                     println!(
                         "- {} [{}] {} provider={} tasks={} findings={} trigger={}",
@@ -9538,7 +9574,7 @@ fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
                 if json {
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else {
-                    println!("[fugit-advisor-workflow] wrote {}", workflow_path.display());
+                    println!("[tasknerve-advisor-workflow] wrote {}", workflow_path.display());
                 }
             }
             AdvisorWorkflowAction::Show { path, json } => {
@@ -9547,7 +9583,7 @@ fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else if payload.valid {
                     println!(
-                        "[fugit-advisor-workflow] path={} exists={} defaults={} reviewer_goal={} task_manager_goal={}",
+                        "[tasknerve-advisor-workflow] path={} exists={} defaults={} reviewer_goal={} task_manager_goal={}",
                         payload.path,
                         payload.exists,
                         payload.using_defaults,
@@ -9556,7 +9592,7 @@ fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
                     );
                 } else {
                     println!(
-                        "[fugit-advisor-workflow] invalid path={} error={}",
+                        "[tasknerve-advisor-workflow] invalid path={} error={}",
                         payload.path,
                         payload.error.as_deref().unwrap_or("unknown")
                     );
@@ -9568,7 +9604,7 @@ fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else if payload.valid {
                     println!(
-                        "[fugit-advisor-workflow] valid path={} exists={} instructions={}chars",
+                        "[tasknerve-advisor-workflow] valid path={} exists={} instructions={}chars",
                         payload.path,
                         payload.exists,
                         payload.instructions_markdown.len()
@@ -9587,7 +9623,7 @@ fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else {
                     println!(
-                        "[fugit-advisor-workflow] synced_policy changed={} path={}",
+                        "[tasknerve-advisor-workflow] synced_policy changed={} path={}",
                         payload["changed"].as_bool().unwrap_or(false),
                         payload["workflow"]["path"].as_str().unwrap_or("unknown")
                     );
@@ -9601,7 +9637,7 @@ fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else {
                     println!(
-                        "[fugit-advisor-run] run_id={} role={} summary={}",
+                        "[tasknerve-advisor-run] run_id={} role={} summary={}",
                         run_id,
                         payload["role"].as_str().unwrap_or("unknown"),
                         payload["output"]["summary"]
@@ -9623,7 +9659,7 @@ fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(&payload)?);
                     } else {
                         println!(
-                            "[fugit-advisor-run] queued_rerun run_id={} role={} status={}",
+                            "[tasknerve-advisor-run] queued_rerun run_id={} role={} status={}",
                             run_id,
                             advisor_role_label(options.role),
                             payload["status"].as_str().unwrap_or("queued")
@@ -9634,7 +9670,7 @@ fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
                     if json {
                         println!("{}", serde_json::to_string_pretty(&run)?);
                     } else {
-                        println!("[fugit-advisor-run] reran {} -> {}", run_id, run.run_id);
+                        println!("[tasknerve-advisor-run] reran {} -> {}", run_id, run.run_id);
                     }
                 }
             }
@@ -9644,7 +9680,7 @@ fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
             match action {
                 AdvisorProviderAction::Discover { json } => {
                     let payload = json!({
-                        "schema_version": "fugit.advisor.provider.discover.v1",
+                        "schema_version": "tasknerve.advisor.provider.discover.v1",
                         "generated_at_utc": now_utc(),
                         "providers": discover_builtin_advisor_providers(),
                     });
@@ -9652,7 +9688,7 @@ fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(&payload)?);
                     } else {
                         println!(
-                            "[fugit-advisor] discovered_providers={}",
+                            "[tasknerve-advisor] discovered_providers={}",
                             payload["providers"]
                                 .as_array()
                                 .map(|rows| rows.len())
@@ -9666,7 +9702,7 @@ fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(&payload)?);
                     } else {
                         println!(
-                            "[fugit-advisor] providers={}",
+                            "[tasknerve-advisor] providers={}",
                             payload.as_array().map(|rows| rows.len()).unwrap_or(0)
                         );
                         if let Some(rows) = payload.as_array() {
@@ -9824,7 +9860,7 @@ fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(&payload)?);
                     } else {
                         println!(
-                            "[fugit-advisor] role={} provider={} model={}",
+                            "[tasknerve-advisor] role={} provider={} model={}",
                             advisor_role_label(role),
                             payload[advisor_role_json_key(role)]["provider_id"]
                                 .as_str()
@@ -9841,7 +9877,7 @@ fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
                     if json {
                         println!("{}", serde_json::to_string_pretty(&provider)?);
                     } else {
-                        println!("[fugit-advisor] removed {}", provider.provider_id);
+                        println!("[tasknerve-advisor] removed {}", provider.provider_id);
                     }
                 }
             }
@@ -9855,7 +9891,7 @@ fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(&payload)?);
                     } else {
                         println!(
-                            "[fugit-advisor-policy] enabled={} auto_task_generation={} auto_review={} low_task_threshold={} require_confirmation={} allow_online_research={}",
+                            "[tasknerve-advisor-policy] enabled={} auto_task_generation={} auto_review={} low_task_threshold={} require_confirmation={} allow_online_research={}",
                             payload["enabled"].as_bool().unwrap_or(false),
                             payload["auto_task_generation"].as_bool().unwrap_or(false),
                             payload["auto_review"].as_bool().unwrap_or(false),
@@ -9893,7 +9929,7 @@ fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(&payload)?);
                     } else {
                         println!(
-                            "[fugit-advisor-policy] enabled={} auto_task_generation={} auto_review={} low_task_threshold={}",
+                            "[tasknerve-advisor-policy] enabled={} auto_task_generation={} auto_review={} low_task_threshold={}",
                             payload["enabled"].as_bool().unwrap_or(false),
                             payload["auto_task_generation"].as_bool().unwrap_or(false),
                             payload["auto_review"].as_bool().unwrap_or(false),
@@ -9933,7 +9969,7 @@ fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else {
                     println!(
-                        "[fugit-advisor] queued role={} status={} trigger={}",
+                        "[tasknerve-advisor] queued role={} status={} trigger={}",
                         advisor_role_label(options.role),
                         payload["status"].as_str().unwrap_or("queued"),
                         payload["trigger"].as_str().unwrap_or("manual_review")
@@ -9947,7 +9983,7 @@ fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&run)?);
                 } else {
                     println!(
-                        "[fugit-advisor] {} provider={} findings={} tasks={} summary={}",
+                        "[tasknerve-advisor] {} provider={} findings={} tasks={} summary={}",
                         run.run_id,
                         run.provider_name,
                         run.findings_count,
@@ -9987,7 +10023,7 @@ fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else {
                     println!(
-                        "[fugit-advisor] queued role={} status={} trigger={}",
+                        "[tasknerve-advisor] queued role={} status={} trigger={}",
                         advisor_role_label(options.role),
                         payload["status"].as_str().unwrap_or("queued"),
                         payload["trigger"].as_str().unwrap_or("manual_research")
@@ -10001,7 +10037,7 @@ fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&run)?);
                 } else {
                     println!(
-                        "[fugit-advisor] {} provider={} synced_tasks={} summary={}",
+                        "[tasknerve-advisor] {} provider={} synced_tasks={} summary={}",
                         run.run_id, run.provider_name, run.synced_task_count, run.summary
                     );
                 }
@@ -10013,7 +10049,7 @@ fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
 
 fn append_task_timeline_event(
     repo_root: &Path,
-    task: &FugitTask,
+    task: &TaskNerveTask,
     agent_id: &str,
     action: &str,
     dispatch_kind: Option<TaskDispatchKind>,
@@ -10064,7 +10100,7 @@ fn append_task_timeline_event(
 
 fn task_timeline_summary(
     action: &str,
-    task: &FugitTask,
+    task: &TaskNerveTask,
     dispatch_kind: Option<TaskDispatchKind>,
 ) -> String {
     let title = task.title.trim();
@@ -10097,7 +10133,7 @@ fn task_timeline_summary(
 
 fn task_timeline_tags(
     action: &str,
-    task: &FugitTask,
+    task: &TaskNerveTask,
     dispatch_kind: Option<TaskDispatchKind>,
 ) -> Vec<String> {
     let mut tags = vec![
@@ -10122,7 +10158,7 @@ fn task_timeline_tags(
 
 fn append_check_timeline_event(
     repo_root: &Path,
-    check: &FugitCheck,
+    check: &TaskNerveCheck,
     agent_id: &str,
     action: &str,
 ) -> Result<()> {
@@ -10335,11 +10371,11 @@ fn serve_task_gui(
                 if let Err(err) =
                     handle_task_gui_connection(&mut stream, repo_root, default_project)
                 {
-                    eprintln!("[fugit-task-gui] request error: {}", err);
+                    eprintln!("[tasknerve-task-gui] request error: {}", err);
                 }
             }
             Err(err) => {
-                eprintln!("[fugit-task-gui] incoming connection error: {}", err);
+                eprintln!("[tasknerve-task-gui] incoming connection error: {}", err);
             }
         }
     }
@@ -11255,7 +11291,7 @@ fn task_gui_payload(repo_root: &Path, project_selector: Option<&str>) -> Result<
         .map(|idx| task_to_json_payload(&state.tasks[idx], &status_map))
         .collect::<Vec<_>>();
     Ok(json!({
-        "schema_version": "fugit.task.gui.snapshot.v1",
+        "schema_version": "tasknerve.task.gui.snapshot.v1",
         "generated_at_utc": now_utc(),
         "selected_project": {
             "key": selected.key,
@@ -11282,7 +11318,7 @@ fn task_gui_timeline_payload(
     let timeline_initialized = timeline_is_initialized(&selected_repo);
     if !timeline_initialized {
         return Ok(json!({
-            "schema_version": "fugit.task.gui.timeline.v1",
+            "schema_version": "tasknerve.task.gui.timeline.v1",
             "generated_at_utc": now_utc(),
             "selected_project": {
                 "key": selected.key,
@@ -11354,7 +11390,7 @@ fn task_gui_timeline_payload(
         .collect::<Vec<_>>();
 
     Ok(json!({
-        "schema_version": "fugit.task.gui.timeline.v1",
+        "schema_version": "tasknerve.task.gui.timeline.v1",
         "generated_at_utc": now_utc(),
         "selected_project": {
             "key": selected.key,
@@ -11409,7 +11445,7 @@ fn task_gui_html() -> &'static str {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>fugit task board</title>
+  <title>tasknerve task board</title>
   <style>
     :root {
       color-scheme: light;
@@ -11779,7 +11815,7 @@ fn task_gui_html() -> &'static str {
 <body>
   <header>
     <div class="head-row">
-      <h1>fugit task board</h1>
+      <h1>tasknerve task board</h1>
       <div class="head-controls">
         <input id="agentInput" class="agent-input" placeholder="agent id (optional)">
         <label>
@@ -11832,7 +11868,7 @@ fn task_gui_html() -> &'static str {
       </form>
       <div class="meta" id="actionMeta">Task changes apply immediately and timeline events refresh after each mutation.</div>
       <div class="grid" id="tasks"></div>
-      <div class="empty" id="empty" style="display:none;">No tasks yet. Create one here or import a backlog with <code>fugit task import --file /path/to/tasks.tsv</code>.</div>
+      <div class="empty" id="empty" style="display:none;">No tasks yet. Create one here or import a backlog with <code>tasknerve task import --file /path/to/tasks.tsv</code>.</div>
     </section>
     <section class="panel">
       <div class="panel-stack">
@@ -11917,7 +11953,7 @@ fn task_gui_html() -> &'static str {
     let timelineRows = [];
     let timelineLoading = false;
     const TIMELINE_PAGE_SIZE = 120;
-    const EDITOR_STORAGE_KEY = "fugit.task.gui.agent";
+    const EDITOR_STORAGE_KEY = "tasknerve.task.gui.agent";
 
     const escapeHtml = (value) => String(value ?? "")
       .replace(/&/g, "&amp;")
@@ -12669,7 +12705,7 @@ fn run_mcp_stdio(repo_root: &Path) -> Result<()> {
                 id,
                 json!({
                     "protocolVersion": "2024-11-05",
-                    "serverInfo": { "name": "fugit", "version": "0.2.0" },
+                    "serverInfo": { "name": "tasknerve", "version": "0.2.0" },
                     "capabilities": { "tools": { "listChanged": false } }
                 }),
             ),
@@ -12693,7 +12729,7 @@ fn run_mcp_stdio(repo_root: &Path) -> Result<()> {
 fn mcp_tools_manifest() -> Vec<serde_json::Value> {
     vec![
         json!({
-            "name": "fugit_status",
+            "name": "tasknerve_status",
             "description": "Get timeline status summary for the repository.",
             "inputSchema": {
                 "type": "object",
@@ -12708,7 +12744,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_checkpoint",
+            "name": "tasknerve_checkpoint",
             "description": "Create a timeline checkpoint with summary/agent/tags.",
             "inputSchema": {
                 "type": "object",
@@ -12731,7 +12767,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_log",
+            "name": "tasknerve_log",
             "description": "Read timeline events.",
             "inputSchema": {
                 "type": "object",
@@ -12742,7 +12778,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_checkout",
+            "name": "tasknerve_checkout",
             "description": "Materialize a target event or branch head into working tree.",
             "inputSchema": {
                 "type": "object",
@@ -12759,7 +12795,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_lock_add",
+            "name": "tasknerve_lock_add",
             "description": "Add a lock pattern for multi-agent coordination.",
             "inputSchema": {
                 "type": "object",
@@ -12772,12 +12808,12 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_lock_list",
+            "name": "tasknerve_lock_list",
             "description": "List active lock entries.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
-            "name": "fugit_task_show",
+            "name": "tasknerve_task_show",
             "description": "Read a single task by id.",
             "inputSchema": {
                 "type": "object",
@@ -12789,7 +12825,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_current",
+            "name": "tasknerve_task_current",
             "description": "Return the current claimed task or tasks for an agent.",
             "inputSchema": {
                 "type": "object",
@@ -12800,7 +12836,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_status",
+            "name": "tasknerve_task_status",
             "description": "Return a compact queue and ownership summary for an agent.",
             "inputSchema": {
                 "type": "object",
@@ -12810,7 +12846,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_add",
+            "name": "tasknerve_task_add",
             "description": "Create a persistent task in the shared queue.",
             "inputSchema": {
                 "type": "object",
@@ -12826,7 +12862,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_edit",
+            "name": "tasknerve_task_edit",
             "description": "Edit task metadata by replacing selected fields.",
             "inputSchema": {
                 "type": "object",
@@ -12848,7 +12884,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_remove",
+            "name": "tasknerve_task_remove",
             "description": "Remove a task that is no longer needed.",
             "inputSchema": {
                 "type": "object",
@@ -12860,7 +12896,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_approve",
+            "name": "tasknerve_task_approve",
             "description": "Approve one pending task or all pending auto-replenish tasks awaiting confirmation.",
             "inputSchema": {
                 "type": "object",
@@ -12872,7 +12908,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_policy_show",
+            "name": "tasknerve_task_policy_show",
             "description": "Inspect task auto-replenish policy and confirmation state.",
             "inputSchema": {
                 "type": "object",
@@ -12880,7 +12916,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_policy_set",
+            "name": "tasknerve_task_policy_set",
             "description": "Update task auto-replenish policy and configured replenish agents.",
             "inputSchema": {
                 "type": "object",
@@ -12894,7 +12930,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_view_list",
+            "name": "tasknerve_task_view_list",
             "description": "List saved task views for the repository.",
             "inputSchema": {
                 "type": "object",
@@ -12902,7 +12938,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_view_show",
+            "name": "tasknerve_task_view_show",
             "description": "Read a saved task view by name.",
             "inputSchema": {
                 "type": "object",
@@ -12913,7 +12949,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_view_save",
+            "name": "tasknerve_task_view_save",
             "description": "Create or update a reusable saved task view.",
             "inputSchema": {
                 "type": "object",
@@ -12937,7 +12973,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_view_remove",
+            "name": "tasknerve_task_view_remove",
             "description": "Delete a saved task view.",
             "inputSchema": {
                 "type": "object",
@@ -12948,7 +12984,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_sync",
+            "name": "tasknerve_task_sync",
             "description": "Reconcile a markdown/TSV plan file or markdown payload with the task queue.",
             "inputSchema": {
                 "type": "object",
@@ -12964,7 +13000,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_sync_comments",
+            "name": "tasknerve_task_sync_comments",
             "description": "Scan supported source files for TODO/FIXME-style comments and sync them into managed backlog tasks.",
             "inputSchema": {
                 "type": "object",
@@ -12978,7 +13014,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_import",
+            "name": "tasknerve_task_import",
             "description": "Bulk import tasks into the persistent queue from a TSV file, TSV content, or markdown checklist content.",
             "inputSchema": {
                 "type": "object",
@@ -12994,7 +13030,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_list",
+            "name": "tasknerve_task_list",
             "description": "List tasks from the persistent queue.",
             "inputSchema": {
                 "type": "object",
@@ -13015,7 +13051,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_request",
+            "name": "tasknerve_task_request",
             "description": "Request the next best task for an agent with dependency-aware ordering, work stealing, and auto-replenish fallback when the queue is exhausted.",
             "inputSchema": {
                 "type": "object",
@@ -13042,7 +13078,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_start",
+            "name": "tasknerve_task_start",
             "description": "Resume the agent's current claim if it exists, otherwise claim the next best task in one step.",
             "inputSchema": {
                 "type": "object",
@@ -13065,7 +13101,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_claim",
+            "name": "tasknerve_task_claim",
             "description": "Claim a specific task by id.",
             "inputSchema": {
                 "type": "object",
@@ -13080,7 +13116,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_done",
+            "name": "tasknerve_task_done",
             "description": "Mark a task as completed.",
             "inputSchema": {
                 "type": "object",
@@ -13103,7 +13139,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_advance",
+            "name": "tasknerve_task_advance",
             "description": "Mark a task as completed and immediately claim the next ready task for the same agent.",
             "inputSchema": {
                 "type": "object",
@@ -13125,7 +13161,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_progress",
+            "name": "tasknerve_task_progress",
             "description": "Append an execution progress note to a task without changing status.",
             "inputSchema": {
                 "type": "object",
@@ -13138,7 +13174,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_note",
+            "name": "tasknerve_task_note",
             "description": "Attach lightweight progress messages and/or artifact breadcrumbs to a task for handoff and resume.",
             "inputSchema": {
                 "type": "object",
@@ -13152,7 +13188,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_reopen",
+            "name": "tasknerve_task_reopen",
             "description": "Reopen a completed task and clear its completion metadata.",
             "inputSchema": {
                 "type": "object",
@@ -13164,7 +13200,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_release",
+            "name": "tasknerve_task_release",
             "description": "Release a claimed task back to open status.",
             "inputSchema": {
                 "type": "object",
@@ -13178,7 +13214,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_cancel",
+            "name": "tasknerve_task_cancel",
             "description": "Cancel a task with a reason and keep the cancellation on task history.",
             "inputSchema": {
                 "type": "object",
@@ -13191,7 +13227,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_heartbeat",
+            "name": "tasknerve_task_heartbeat",
             "description": "Extend a claimed task lease and optionally append a note or artifacts in one call.",
             "inputSchema": {
                 "type": "object",
@@ -13206,7 +13242,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_check_list",
+            "name": "tasknerve_check_list",
             "description": "List registered regression and benchmark checks.",
             "inputSchema": {
                 "type": "object",
@@ -13218,7 +13254,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_check_add",
+            "name": "tasknerve_check_add",
             "description": "Register a regression or benchmark check.",
             "inputSchema": {
                 "type": "object",
@@ -13233,7 +13269,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_check_deprecate",
+            "name": "tasknerve_check_deprecate",
             "description": "Deprecate a stale regression or benchmark check.",
             "inputSchema": {
                 "type": "object",
@@ -13246,7 +13282,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_check_run",
+            "name": "tasknerve_check_run",
             "description": "Run the active verification backend: local registered checks or GitHub CI for the current HEAD commit.",
             "inputSchema": {
                 "type": "object",
@@ -13259,12 +13295,12 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_check_policy_show",
+            "name": "tasknerve_check_policy_show",
             "description": "Inspect quality-gate policy for regression and benchmark checks.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
-            "name": "fugit_check_policy_set",
+            "name": "tasknerve_check_policy_set",
             "description": "Update quality-gate policy for task completion and pre-sync check runs.",
             "inputSchema": {
                 "type": "object",
@@ -13283,12 +13319,12 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_bridge_issue_monitor_show",
+            "name": "tasknerve_bridge_issue_monitor_show",
             "description": "Inspect GitHub issue monitor policy and recent sync status.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
-            "name": "fugit_bridge_issue_monitor_set",
+            "name": "tasknerve_bridge_issue_monitor_set",
             "description": "Update GitHub issue monitor policy.",
             "inputSchema": {
                 "type": "object",
@@ -13301,7 +13337,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_bridge_sync_github_issues",
+            "name": "tasknerve_bridge_sync_github_issues",
             "description": "Fetch open GitHub issues, screen them deterministically, and sync safe ones into the task queue.",
             "inputSchema": {
                 "type": "object",
@@ -13313,12 +13349,12 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_advisor_show",
+            "name": "tasknerve_advisor_show",
             "description": "Show advisor providers, role assignments, policy, worker state, and recent runs.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
-            "name": "fugit_advisor_runs",
+            "name": "tasknerve_advisor_runs",
             "description": "List recent advisor runs.",
             "inputSchema": {
                 "type": "object",
@@ -13328,17 +13364,17 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_advisor_workflow_show",
-            "description": "Inspect the repo-owned FUGIT_WORKFLOW.md advisor contract and effective defaults.",
+            "name": "tasknerve_advisor_workflow_show",
+            "description": "Inspect the repo-owned TASKNERVE_WORKFLOW.md advisor contract and effective defaults.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
-            "name": "fugit_advisor_workflow_sync_policy",
-            "description": "Apply advisor policy defaults from FUGIT_WORKFLOW.md into the live advisor state.",
+            "name": "tasknerve_advisor_workflow_sync_policy",
+            "description": "Apply advisor policy defaults from TASKNERVE_WORKFLOW.md into the live advisor state.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
-            "name": "fugit_advisor_run_show",
+            "name": "tasknerve_advisor_run_show",
             "description": "Load the full report for one advisor run.",
             "inputSchema": {
                 "type": "object",
@@ -13349,7 +13385,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_advisor_run_rerun",
+            "name": "tasknerve_advisor_run_rerun",
             "description": "Rerun a previous advisor run with the same role/provider/model/goal settings.",
             "inputSchema": {
                 "type": "object",
@@ -13361,12 +13397,12 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_advisor_provider_list",
+            "name": "tasknerve_advisor_provider_list",
             "description": "List configured and discovered advisor providers.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
-            "name": "fugit_advisor_provider_assign",
+            "name": "tasknerve_advisor_provider_assign",
             "description": "Assign an advisor provider and optional model override to reviewer or task_manager.",
             "inputSchema": {
                 "type": "object",
@@ -13381,12 +13417,12 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_advisor_policy_show",
+            "name": "tasknerve_advisor_policy_show",
             "description": "Inspect advisor low-task automation policy.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
-            "name": "fugit_advisor_policy_set",
+            "name": "tasknerve_advisor_policy_set",
             "description": "Update advisor automation policy and low-task thresholds.",
             "inputSchema": {
                 "type": "object",
@@ -13402,7 +13438,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_advisor_review",
+            "name": "tasknerve_advisor_review",
             "description": "Run or queue an advisor review pass with the configured reviewer model.",
             "inputSchema": {
                 "type": "object",
@@ -13417,7 +13453,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_advisor_research",
+            "name": "tasknerve_advisor_research",
             "description": "Run or queue a smart task-manager pass that syncs generated tasks into the backlog.",
             "inputSchema": {
                 "type": "object",
@@ -13432,18 +13468,18 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_update_show",
-            "description": "Show the current fugit updater state without forcing a remote check.",
+            "name": "tasknerve_update_show",
+            "description": "Show the current tasknerve updater state without forcing a remote check.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
-            "name": "fugit_update_check",
-            "description": "Check the canonical fugit repo for a newer main-branch build.",
+            "name": "tasknerve_update_check",
+            "description": "Check the canonical tasknerve repo for a newer main-branch build.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
-            "name": "fugit_update_apply",
-            "description": "Update fugit from the canonical repo checkout and reinstall the CLI plus bundled skill.",
+            "name": "tasknerve_update_apply",
+            "description": "Update tasknerve from the canonical repo checkout and reinstall the CLI plus bundled skill.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -13452,13 +13488,13 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_update_policy_show",
-            "description": "Show the global fugit update auto-check and auto-apply policy.",
+            "name": "tasknerve_update_policy_show",
+            "description": "Show the global tasknerve update auto-check and auto-apply policy.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
-            "name": "fugit_update_policy_set",
-            "description": "Set the global fugit update auto-check and auto-apply policy.",
+            "name": "tasknerve_update_policy_set",
+            "description": "Set the global tasknerve update auto-check and auto-apply policy.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -13469,7 +13505,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_task_gui_launch",
+            "name": "tasknerve_task_gui_launch",
             "description": "Launch the live task-board GUI in a separate window via background server.",
             "inputSchema": {
                 "type": "object",
@@ -13482,12 +13518,12 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_project_list",
+            "name": "tasknerve_project_list",
             "description": "List registered projects for multi-project coordination.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
-            "name": "fugit_project_add",
+            "name": "tasknerve_project_add",
             "description": "Register or update a project name -> repo_root mapping.",
             "inputSchema": {
                 "type": "object",
@@ -13500,7 +13536,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_project_use",
+            "name": "tasknerve_project_use",
             "description": "Set the default project for the task GUI.",
             "inputSchema": {
                 "type": "object",
@@ -13511,7 +13547,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_project_remove",
+            "name": "tasknerve_project_remove",
             "description": "Remove a project from the registry.",
             "inputSchema": {
                 "type": "object",
@@ -13522,8 +13558,8 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_gc",
-            "description": "Prune unreferenced object blobs from .fugit/objects.",
+            "name": "tasknerve_gc",
+            "description": "Prune unreferenced object blobs from .tasknerve/objects.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -13532,8 +13568,8 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_skill_bundle",
-            "description": "Return the fugit skill package for onboarding new agents (SKILL.md + optional openai.yaml).",
+            "name": "tasknerve_skill_bundle",
+            "description": "Return the tasknerve skill package for onboarding new agents (SKILL.md + optional openai.yaml).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -13543,16 +13579,16 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "fugit_skill_doctor",
-            "description": "Report whether the installed Codex skill matches the running fugit CLI and whether the skill references unsupported command paths.",
+            "name": "tasknerve_skill_doctor",
+            "description": "Report whether the installed Codex skill matches the running tasknerve CLI and whether the skill references unsupported command paths.",
             "inputSchema": {
                 "type": "object",
                 "properties": {}
             }
         }),
         json!({
-            "name": "fugit_skill_install_codex",
-            "description": "Install the bundled fugit skill into CODEX_HOME/skills/fugit for this machine.",
+            "name": "tasknerve_skill_install_codex",
+            "description": "Install the bundled tasknerve skill into CODEX_HOME/skills/tasknerve for this machine.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -13574,7 +13610,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
         .unwrap_or_else(|| json!({}));
 
     let result = match tool_name {
-        "fugit_status" => {
+        "tasknerve_status" => {
             let mut cli_args = vec!["status".to_string(), "--json".to_string()];
             if let Some(limit) = args.get("limit").and_then(serde_json::Value::as_u64) {
                 cli_args.push("--limit".to_string());
@@ -13614,11 +13650,11 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_checkpoint" => {
+        "tasknerve_checkpoint" => {
             let summary = args
                 .get("summary")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_checkpoint requires summary"))?;
+                .ok_or_else(|| anyhow!("tasknerve_checkpoint requires summary"))?;
             let mut cli_args = vec![
                 "checkpoint".to_string(),
                 "--summary".to_string(),
@@ -13701,7 +13737,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_log" => {
+        "tasknerve_log" => {
             let mut cli_args = vec!["log".to_string(), "--json".to_string()];
             if let Some(limit) = args.get("limit").and_then(serde_json::Value::as_u64) {
                 cli_args.push("--limit".to_string());
@@ -13713,7 +13749,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_checkout" => {
+        "tasknerve_checkout" => {
             let mut cli_args = vec!["checkout".to_string()];
             if let Some(event) = args.get("event").and_then(serde_json::Value::as_str) {
                 cli_args.push("--event".to_string());
@@ -13765,11 +13801,11 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             let text = run_self_cli_text(repo_root, &cli_args)?;
             json!({ "checkout": text.trim() })
         }
-        "fugit_lock_add" => {
+        "tasknerve_lock_add" => {
             let pattern = args
                 .get("pattern")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_lock_add requires pattern"))?;
+                .ok_or_else(|| anyhow!("tasknerve_lock_add requires pattern"))?;
             let mut cli_args = vec![
                 "lock".to_string(),
                 "add".to_string(),
@@ -13790,15 +13826,15 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 &["lock".to_string(), "list".to_string(), "--json".to_string()],
             )?
         }
-        "fugit_lock_list" => run_self_cli_json(
+        "tasknerve_lock_list" => run_self_cli_json(
             repo_root,
             &["lock".to_string(), "list".to_string(), "--json".to_string()],
         )?,
-        "fugit_task_show" => {
+        "tasknerve_task_show" => {
             let task_id = args
                 .get("task_id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_task_show requires task_id"))?;
+                .ok_or_else(|| anyhow!("tasknerve_task_show requires task_id"))?;
             let mut cli_args = vec![
                 "task".to_string(),
                 "show".to_string(),
@@ -13815,7 +13851,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_task_current" => {
+        "tasknerve_task_current" => {
             let mut cli_args = vec![
                 "task".to_string(),
                 "current".to_string(),
@@ -13834,11 +13870,11 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_task_add" => {
+        "tasknerve_task_add" => {
             let title = args
                 .get("title")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_task_add requires title"))?;
+                .ok_or_else(|| anyhow!("tasknerve_task_add requires title"))?;
             let mut cli_args = vec![
                 "task".to_string(),
                 "add".to_string(),
@@ -13876,11 +13912,11 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_task_edit" => {
+        "tasknerve_task_edit" => {
             let task_id = args
                 .get("task_id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_task_edit requires task_id"))?;
+                .ok_or_else(|| anyhow!("tasknerve_task_edit requires task_id"))?;
             let mut cli_args = vec![
                 "task".to_string(),
                 "edit".to_string(),
@@ -13957,11 +13993,11 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_task_remove" => {
+        "tasknerve_task_remove" => {
             let task_id = args
                 .get("task_id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_task_remove requires task_id"))?;
+                .ok_or_else(|| anyhow!("tasknerve_task_remove requires task_id"))?;
             let mut cli_args = vec![
                 "task".to_string(),
                 "remove".to_string(),
@@ -13975,7 +14011,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_task_approve" => {
+        "tasknerve_task_approve" => {
             let mut cli_args = vec![
                 "task".to_string(),
                 "approve".to_string(),
@@ -13998,7 +14034,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_task_policy_show" => {
+        "tasknerve_task_policy_show" => {
             let cli_args = vec![
                 "task".to_string(),
                 "policy".to_string(),
@@ -14007,7 +14043,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             ];
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_task_policy_set" => {
+        "tasknerve_task_policy_set" => {
             let mut cli_args = vec![
                 "task".to_string(),
                 "policy".to_string(),
@@ -14052,7 +14088,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_task_view_list" => run_self_cli_json(
+        "tasknerve_task_view_list" => run_self_cli_json(
             repo_root,
             &[
                 "task".to_string(),
@@ -14061,11 +14097,11 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 "--json".to_string(),
             ],
         )?,
-        "fugit_task_view_show" => {
+        "tasknerve_task_view_show" => {
             let name = args
                 .get("name")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_task_view_show requires name"))?;
+                .ok_or_else(|| anyhow!("tasknerve_task_view_show requires name"))?;
             run_self_cli_json(
                 repo_root,
                 &[
@@ -14078,11 +14114,11 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 ],
             )?
         }
-        "fugit_task_view_save" => {
+        "tasknerve_task_view_save" => {
             let name = args
                 .get("name")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_task_view_save requires name"))?;
+                .ok_or_else(|| anyhow!("tasknerve_task_view_save requires name"))?;
             let mut cli_args = vec![
                 "task".to_string(),
                 "view".to_string(),
@@ -14167,11 +14203,11 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_task_view_remove" => {
+        "tasknerve_task_view_remove" => {
             let name = args
                 .get("name")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_task_view_remove requires name"))?;
+                .ok_or_else(|| anyhow!("tasknerve_task_view_remove requires name"))?;
             run_self_cli_json(
                 repo_root,
                 &[
@@ -14184,7 +14220,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 ],
             )?
         }
-        "fugit_task_sync" => {
+        "tasknerve_task_sync" => {
             let mut cli_args = vec!["task".to_string(), "sync".to_string(), "--json".to_string()];
             let mut temp_file_to_remove: Option<PathBuf> = None;
             let mut inferred_format: Option<&str> = None;
@@ -14200,7 +14236,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 temp_file_to_remove = Some(temp_path.clone());
                 temp_path
             } else {
-                bail!("fugit_task_sync requires one of: plan, markdown");
+                bail!("tasknerve_task_sync requires one of: plan, markdown");
             };
 
             cli_args.push("--plan".to_string());
@@ -14245,7 +14281,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             sync_result?
         }
-        "fugit_task_sync_comments" => {
+        "tasknerve_task_sync_comments" => {
             let mut cli_args = vec![
                 "task".to_string(),
                 "sync-comments".to_string(),
@@ -14286,7 +14322,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_task_import" => {
+        "tasknerve_task_import" => {
             let mut cli_args = vec![
                 "task".to_string(),
                 "import".to_string(),
@@ -14311,7 +14347,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 temp_file_to_remove = Some(temp_path.clone());
                 temp_path
             } else {
-                bail!("fugit_task_import requires one of: file, tsv, markdown");
+                bail!("tasknerve_task_import requires one of: file, tsv, markdown");
             };
 
             cli_args.push("--file".to_string());
@@ -14350,7 +14386,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             import_result?
         }
-        "fugit_task_list" => {
+        "tasknerve_task_list" => {
             let mut cli_args = vec!["task".to_string(), "list".to_string(), "--json".to_string()];
             if let Some(view) = args.get("view").and_then(serde_json::Value::as_str) {
                 cli_args.push("--view".to_string());
@@ -14424,7 +14460,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_task_advance" => {
+        "tasknerve_task_advance" => {
             let mut cli_args = vec![
                 "task".to_string(),
                 "advance".to_string(),
@@ -14433,7 +14469,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             let task_id = args
                 .get("task_id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_task_advance requires task_id"))?;
+                .ok_or_else(|| anyhow!("tasknerve_task_advance requires task_id"))?;
             cli_args.push("--task-id".to_string());
             cli_args.push(task_id.to_string());
             if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
@@ -14511,7 +14547,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_task_status" => {
+        "tasknerve_task_status" => {
             let mut cli_args = vec![
                 "task".to_string(),
                 "status".to_string(),
@@ -14523,7 +14559,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_task_start" => {
+        "tasknerve_task_start" => {
             let mut cli_args = vec![
                 "task".to_string(),
                 "start".to_string(),
@@ -14609,7 +14645,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_task_request" => {
+        "tasknerve_task_request" => {
             let mut cli_args = vec![
                 "task".to_string(),
                 "request".to_string(),
@@ -14720,11 +14756,11 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_task_claim" => {
+        "tasknerve_task_claim" => {
             let task_id = args
                 .get("task_id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_task_claim requires task_id"))?;
+                .ok_or_else(|| anyhow!("tasknerve_task_claim requires task_id"))?;
             let mut cli_args = vec![
                 "task".to_string(),
                 "claim".to_string(),
@@ -14759,11 +14795,11 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_task_done" => {
+        "tasknerve_task_done" => {
             let task_id = args
                 .get("task_id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_task_done requires task_id"))?;
+                .ok_or_else(|| anyhow!("tasknerve_task_done requires task_id"))?;
             let mut cli_args = vec![
                 "task".to_string(),
                 "done".to_string(),
@@ -14853,15 +14889,15 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_task_progress" => {
+        "tasknerve_task_progress" => {
             let task_id = args
                 .get("task_id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_task_progress requires task_id"))?;
+                .ok_or_else(|| anyhow!("tasknerve_task_progress requires task_id"))?;
             let note = args
                 .get("note")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_task_progress requires note"))?;
+                .ok_or_else(|| anyhow!("tasknerve_task_progress requires note"))?;
             let mut cli_args = vec![
                 "task".to_string(),
                 "progress".to_string(),
@@ -14877,11 +14913,11 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_task_note" => {
+        "tasknerve_task_note" => {
             let task_id = args
                 .get("task_id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_task_note requires task_id"))?;
+                .ok_or_else(|| anyhow!("tasknerve_task_note requires task_id"))?;
             let mut cli_args = vec![
                 "task".to_string(),
                 "note".to_string(),
@@ -14909,7 +14945,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 }
             }
             if !has_entry {
-                bail!("fugit_task_note requires messages and/or artifacts");
+                bail!("tasknerve_task_note requires messages and/or artifacts");
             }
             if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
                 cli_args.push("--agent".to_string());
@@ -14917,11 +14953,11 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_task_reopen" => {
+        "tasknerve_task_reopen" => {
             let task_id = args
                 .get("task_id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_task_reopen requires task_id"))?;
+                .ok_or_else(|| anyhow!("tasknerve_task_reopen requires task_id"))?;
             let mut cli_args = vec![
                 "task".to_string(),
                 "reopen".to_string(),
@@ -14935,11 +14971,11 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_task_release" => {
+        "tasknerve_task_release" => {
             let task_id = args
                 .get("task_id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_task_release requires task_id"))?;
+                .ok_or_else(|| anyhow!("tasknerve_task_release requires task_id"))?;
             let mut cli_args = vec![
                 "task".to_string(),
                 "release".to_string(),
@@ -14961,15 +14997,15 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_task_cancel" => {
+        "tasknerve_task_cancel" => {
             let task_id = args
                 .get("task_id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_task_cancel requires task_id"))?;
+                .ok_or_else(|| anyhow!("tasknerve_task_cancel requires task_id"))?;
             let reason = args
                 .get("reason")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_task_cancel requires reason"))?;
+                .ok_or_else(|| anyhow!("tasknerve_task_cancel requires reason"))?;
             let mut cli_args = vec![
                 "task".to_string(),
                 "cancel".to_string(),
@@ -14985,11 +15021,11 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_task_heartbeat" => {
+        "tasknerve_task_heartbeat" => {
             let task_id = args
                 .get("task_id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_task_heartbeat requires task_id"))?;
+                .ok_or_else(|| anyhow!("tasknerve_task_heartbeat requires task_id"))?;
             let mut cli_args = vec![
                 "task".to_string(),
                 "heartbeat".to_string(),
@@ -15022,7 +15058,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_check_list" => {
+        "tasknerve_check_list" => {
             let mut cli_args = vec![
                 "check".to_string(),
                 "list".to_string(),
@@ -15045,15 +15081,15 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_check_add" => {
+        "tasknerve_check_add" => {
             let kind = args
                 .get("kind")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_check_add requires kind"))?;
+                .ok_or_else(|| anyhow!("tasknerve_check_add requires kind"))?;
             let command = args
                 .get("command")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_check_add requires command"))?;
+                .ok_or_else(|| anyhow!("tasknerve_check_add requires command"))?;
             let mut cli_args = vec![
                 "check".to_string(),
                 "add".to_string(),
@@ -15077,11 +15113,11 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_check_deprecate" => {
+        "tasknerve_check_deprecate" => {
             let check_id = args
                 .get("check_id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_check_deprecate requires check_id"))?;
+                .ok_or_else(|| anyhow!("tasknerve_check_deprecate requires check_id"))?;
             let mut cli_args = vec![
                 "check".to_string(),
                 "deprecate".to_string(),
@@ -15099,7 +15135,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_check_run" => {
+        "tasknerve_check_run" => {
             let mut cli_args = vec!["check".to_string(), "run".to_string(), "--json".to_string()];
             if let Some(task_id) = args.get("task_id").and_then(serde_json::Value::as_str) {
                 cli_args.push("--task-id".to_string());
@@ -15125,7 +15161,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_check_policy_show" => run_self_cli_json(
+        "tasknerve_check_policy_show" => run_self_cli_json(
             repo_root,
             &[
                 "check".to_string(),
@@ -15134,7 +15170,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 "--json".to_string(),
             ],
         )?,
-        "fugit_check_policy_set" => {
+        "tasknerve_check_policy_set" => {
             let mut cli_args = vec![
                 "check".to_string(),
                 "policy".to_string(),
@@ -15204,7 +15240,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_bridge_issue_monitor_show" => run_self_cli_json(
+        "tasknerve_bridge_issue_monitor_show" => run_self_cli_json(
             repo_root,
             &[
                 "bridge".to_string(),
@@ -15213,7 +15249,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 "--json".to_string(),
             ],
         )?,
-        "fugit_bridge_issue_monitor_set" => {
+        "tasknerve_bridge_issue_monitor_set" => {
             let mut cli_args = vec![
                 "bridge".to_string(),
                 "issue-monitor".to_string(),
@@ -15244,7 +15280,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_bridge_sync_github_issues" => {
+        "tasknerve_bridge_sync_github_issues" => {
             let mut cli_args = vec![
                 "bridge".to_string(),
                 "sync-github-issues".to_string(),
@@ -15267,7 +15303,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_advisor_show" => run_self_cli_json(
+        "tasknerve_advisor_show" => run_self_cli_json(
             repo_root,
             &[
                 "advisor".to_string(),
@@ -15275,7 +15311,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 "--json".to_string(),
             ],
         )?,
-        "fugit_advisor_runs" => {
+        "tasknerve_advisor_runs" => {
             let mut cli_args = vec![
                 "advisor".to_string(),
                 "runs".to_string(),
@@ -15287,7 +15323,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_advisor_workflow_show" => run_self_cli_json(
+        "tasknerve_advisor_workflow_show" => run_self_cli_json(
             repo_root,
             &[
                 "advisor".to_string(),
@@ -15296,7 +15332,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 "--json".to_string(),
             ],
         )?,
-        "fugit_advisor_workflow_sync_policy" => run_self_cli_json(
+        "tasknerve_advisor_workflow_sync_policy" => run_self_cli_json(
             repo_root,
             &[
                 "advisor".to_string(),
@@ -15305,11 +15341,11 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 "--json".to_string(),
             ],
         )?,
-        "fugit_advisor_run_show" => {
+        "tasknerve_advisor_run_show" => {
             let run_id = args
                 .get("run_id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_advisor_run_show requires run_id"))?;
+                .ok_or_else(|| anyhow!("tasknerve_advisor_run_show requires run_id"))?;
             run_self_cli_json(
                 repo_root,
                 &[
@@ -15322,11 +15358,11 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 ],
             )?
         }
-        "fugit_advisor_run_rerun" => {
+        "tasknerve_advisor_run_rerun" => {
             let run_id = args
                 .get("run_id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_advisor_run_rerun requires run_id"))?;
+                .ok_or_else(|| anyhow!("tasknerve_advisor_run_rerun requires run_id"))?;
             let mut cli_args = vec![
                 "advisor".to_string(),
                 "run".to_string(),
@@ -15344,7 +15380,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_advisor_provider_list" => run_self_cli_json(
+        "tasknerve_advisor_provider_list" => run_self_cli_json(
             repo_root,
             &[
                 "advisor".to_string(),
@@ -15353,11 +15389,11 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 "--json".to_string(),
             ],
         )?,
-        "fugit_advisor_provider_assign" => {
+        "tasknerve_advisor_provider_assign" => {
             let role = args
                 .get("role")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_advisor_provider_assign requires role"))?;
+                .ok_or_else(|| anyhow!("tasknerve_advisor_provider_assign requires role"))?;
             let mut cli_args = vec![
                 "advisor".to_string(),
                 "provider".to_string(),
@@ -15390,7 +15426,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_advisor_policy_show" => run_self_cli_json(
+        "tasknerve_advisor_policy_show" => run_self_cli_json(
             repo_root,
             &[
                 "advisor".to_string(),
@@ -15399,7 +15435,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 "--json".to_string(),
             ],
         )?,
-        "fugit_advisor_policy_set" => {
+        "tasknerve_advisor_policy_set" => {
             let mut cli_args = vec![
                 "advisor".to_string(),
                 "policy".to_string(),
@@ -15434,7 +15470,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_advisor_review" => {
+        "tasknerve_advisor_review" => {
             let mut cli_args = vec![
                 "advisor".to_string(),
                 "review".to_string(),
@@ -15475,7 +15511,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_advisor_research" => {
+        "tasknerve_advisor_research" => {
             let mut cli_args = vec![
                 "advisor".to_string(),
                 "research".to_string(),
@@ -15516,7 +15552,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_update_show" => run_self_cli_json(
+        "tasknerve_update_show" => run_self_cli_json(
             repo_root,
             &[
                 "update".to_string(),
@@ -15524,7 +15560,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 "--json".to_string(),
             ],
         )?,
-        "fugit_update_check" => run_self_cli_json(
+        "tasknerve_update_check" => run_self_cli_json(
             repo_root,
             &[
                 "update".to_string(),
@@ -15532,7 +15568,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 "--json".to_string(),
             ],
         )?,
-        "fugit_update_apply" => {
+        "tasknerve_update_apply" => {
             let mut cli_args = vec![
                 "update".to_string(),
                 "apply".to_string(),
@@ -15547,7 +15583,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_update_policy_show" => run_self_cli_json(
+        "tasknerve_update_policy_show" => run_self_cli_json(
             repo_root,
             &[
                 "update".to_string(),
@@ -15556,7 +15592,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 "--json".to_string(),
             ],
         )?,
-        "fugit_update_policy_set" => {
+        "tasknerve_update_policy_set" => {
             let mut cli_args = vec![
                 "update".to_string(),
                 "policy".to_string(),
@@ -15586,7 +15622,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_task_gui_launch" => {
+        "tasknerve_task_gui_launch" => {
             let mut cli_args = vec![
                 "task".to_string(),
                 "gui".to_string(),
@@ -15614,7 +15650,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_project_list" => run_self_cli_json(
+        "tasknerve_project_list" => run_self_cli_json(
             repo_root,
             &[
                 "project".to_string(),
@@ -15622,15 +15658,15 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 "--json".to_string(),
             ],
         )?,
-        "fugit_project_add" => {
+        "tasknerve_project_add" => {
             let name = args
                 .get("name")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_project_add requires name"))?;
+                .ok_or_else(|| anyhow!("tasknerve_project_add requires name"))?;
             let root = args
                 .get("repo_root")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_project_add requires repo_root"))?;
+                .ok_or_else(|| anyhow!("tasknerve_project_add requires repo_root"))?;
             let mut cli_args = vec![
                 "project".to_string(),
                 "add".to_string(),
@@ -15649,11 +15685,11 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_project_use" => {
+        "tasknerve_project_use" => {
             let name = args
                 .get("name")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_project_use requires name"))?;
+                .ok_or_else(|| anyhow!("tasknerve_project_use requires name"))?;
             run_self_cli_json(
                 repo_root,
                 &[
@@ -15665,11 +15701,11 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 ],
             )?
         }
-        "fugit_project_remove" => {
+        "tasknerve_project_remove" => {
             let name = args
                 .get("name")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow!("fugit_project_remove requires name"))?;
+                .ok_or_else(|| anyhow!("tasknerve_project_remove requires name"))?;
             run_self_cli_json(
                 repo_root,
                 &[
@@ -15681,7 +15717,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 ],
             )?
         }
-        "fugit_gc" => {
+        "tasknerve_gc" => {
             let mut cli_args = vec!["gc".to_string(), "--json".to_string()];
             if args
                 .get("dry_run")
@@ -15692,7 +15728,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
-        "fugit_skill_bundle" => {
+        "tasknerve_skill_bundle" => {
             let include_skill_body = args
                 .get("include_skill_body")
                 .and_then(serde_json::Value::as_bool)
@@ -15701,19 +15737,19 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 .get("include_openai_yaml")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(true);
-            fugit_skill_bundle(include_skill_body, include_openai_yaml)
+            tasknerve_skill_bundle(include_skill_body, include_openai_yaml)
         }
-        "fugit_skill_doctor" => fugit_skill_doctor_report(),
-        "fugit_skill_install_codex" => {
+        "tasknerve_skill_doctor" => tasknerve_skill_doctor_report(),
+        "tasknerve_skill_install_codex" => {
             let overwrite = args
                 .get("overwrite")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
-            let installed = install_fugit_skill_to_codex(overwrite)?;
+            let installed = install_tasknerve_skill_to_codex(overwrite)?;
             json!({
-                "schema_version": "fugit.skill.install.v1",
+                "schema_version": "tasknerve.skill.install.v1",
                 "generated_at_utc": now_utc(),
-                "skill_id": FUGIT_SKILL_ID,
+                "skill_id": SKILL_ID,
                 "installed_path": installed.display().to_string(),
                 "overwrite": overwrite
             })
@@ -15740,7 +15776,7 @@ fn run_self_cli_json(repo_root: &Path, args: &[String]) -> Result<serde_json::Va
     cmd.arg("--repo-root").arg(repo_root).args(args);
     let output = cmd.output().with_context(|| {
         format!(
-            "failed running fugit subprocess for args: {}",
+            "failed running tasknerve subprocess for args: {}",
             args.join(" ")
         )
     })?;
@@ -15751,7 +15787,7 @@ fn run_self_cli_json(repo_root: &Path, args: &[String]) -> Result<serde_json::Va
         }
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         bail!(
-            "fugit subprocess failed for args: {}\nstdout: {}\nstderr: {}",
+            "tasknerve subprocess failed for args: {}\nstdout: {}\nstderr: {}",
             args.join(" "),
             stdout.trim(),
             stderr.trim()
@@ -15760,7 +15796,7 @@ fn run_self_cli_json(repo_root: &Path, args: &[String]) -> Result<serde_json::Va
     let text = stdout;
     let parsed: serde_json::Value = serde_json::from_str(text.trim()).with_context(|| {
         format!(
-            "expected JSON output from fugit subprocess for args: {}",
+            "expected JSON output from tasknerve subprocess for args: {}",
             args.join(" ")
         )
     })?;
@@ -15774,7 +15810,7 @@ fn run_self_cli_text(repo_root: &Path, args: &[String]) -> Result<String> {
     cmd.arg("--repo-root").arg(repo_root).args(args);
     let output = cmd.output().with_context(|| {
         format!(
-            "failed running fugit subprocess for args: {}",
+            "failed running tasknerve subprocess for args: {}",
             args.join(" ")
         )
     })?;
@@ -15782,7 +15818,7 @@ fn run_self_cli_text(repo_root: &Path, args: &[String]) -> Result<String> {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         bail!(
-            "fugit subprocess failed for args: {}\nstdout: {}\nstderr: {}",
+            "tasknerve subprocess failed for args: {}\nstdout: {}\nstderr: {}",
             args.join(" "),
             stdout.trim(),
             stderr.trim()
@@ -15921,7 +15957,7 @@ fn perform_bridge_sync_github(
         let has_password = cred.as_ref().and_then(|row| row.password.clone()).is_some();
         if !has_password {
             bail!(
-                "missing credentials for remote host '{}'; run `fugit bridge auth login --remote {}` first",
+                "missing credentials for remote host '{}'; run `tasknerve bridge auth login --remote {}` first",
                 host,
                 options.remote
             );
@@ -15935,7 +15971,7 @@ fn perform_bridge_sync_github(
             .unwrap_or(false)
         {
             println!(
-                "[fugit-bridge] repaired_event_journal branch={} dropped_lines={} backup={}",
+                "[tasknerve-bridge] repaired_event_journal branch={} dropped_lines={} backup={}",
                 active_branch,
                 report
                     .get("dropped_count")
@@ -15968,7 +16004,7 @@ fn perform_bridge_sync_github(
             )?
         } else {
             json!({
-                "schema_version": "fugit.check.run.v2",
+                "schema_version": "tasknerve.check.run.v2",
                 "generated_at_utc": now_utc(),
                 "ok": true,
                 "backend": verification_backend.clone(),
@@ -15993,7 +16029,7 @@ fn perform_bridge_sync_github(
         && !pre_sync_quality_gate["ok"].as_bool().unwrap_or(false)
     {
         return Ok(json!({
-            "schema_version": "fugit.bridge.sync_github.v2",
+            "schema_version": "tasknerve.bridge.sync_github.v2",
             "generated_at_utc": now_utc(),
             "ok": false,
             "status": "blocked_by_quality_gate",
@@ -16028,7 +16064,7 @@ fn perform_bridge_sync_github(
 
     if staged_clean {
         return Ok(json!({
-            "schema_version": "fugit.bridge.sync_github.v2",
+            "schema_version": "tasknerve.bridge.sync_github.v2",
             "generated_at_utc": now_utc(),
             "ok": true,
             "status": "noop",
@@ -16081,7 +16117,7 @@ fn perform_bridge_sync_github(
     {
         if options.no_push {
             json!({
-                "schema_version": "fugit.check.run.v2",
+                "schema_version": "tasknerve.check.run.v2",
                 "generated_at_utc": now_utc(),
                 "backend": QUALITY_CHECK_BACKEND_GITHUB_CI,
                 "ok": true,
@@ -16101,7 +16137,7 @@ fn perform_bridge_sync_github(
             ) {
                 Ok(payload) => payload,
                 Err(err) => json!({
-                    "schema_version": "fugit.check.run.v2",
+                    "schema_version": "tasknerve.check.run.v2",
                     "generated_at_utc": now_utc(),
                     "backend": QUALITY_CHECK_BACKEND_GITHUB_CI,
                     "ok": false,
@@ -16114,7 +16150,7 @@ fn perform_bridge_sync_github(
             }
         } else {
             json!({
-                "schema_version": "fugit.check.run.v2",
+                "schema_version": "tasknerve.check.run.v2",
                 "generated_at_utc": now_utc(),
                 "backend": QUALITY_CHECK_BACKEND_GITHUB_CI,
                 "ok": false,
@@ -16142,7 +16178,7 @@ fn perform_bridge_sync_github(
     };
 
     Ok(json!({
-        "schema_version": "fugit.bridge.sync_github.v2",
+        "schema_version": "tasknerve.bridge.sync_github.v2",
         "generated_at_utc": now_utc(),
         "ok": sync_ok,
         "status": status,
@@ -16182,7 +16218,7 @@ fn queue_bridge_auto_sync_background(
             state.last_branch = Some(options.branch.clone());
             write_bridge_auto_sync_state(repo_root, &state)?;
             return Ok(json!({
-                "schema_version": "fugit.bridge.auto_sync.request.v1",
+                "schema_version": "tasknerve.bridge.auto_sync.request.v1",
                 "generated_at_utc": now_utc(),
                 "accepted": true,
                 "queued": true,
@@ -16272,7 +16308,7 @@ fn queue_bridge_auto_sync_background(
     }
 
     Ok(json!({
-        "schema_version": "fugit.bridge.auto_sync.request.v1",
+        "schema_version": "tasknerve.bridge.auto_sync.request.v1",
         "generated_at_utc": now_utc(),
         "accepted": true,
         "queued": true,
@@ -16441,7 +16477,7 @@ fn run_bridge_auto_sync_worker(
 fn maybe_queue_auto_bridge_sync_for_task_done(
     repo_root: &Path,
     config: &TimelineConfig,
-    task: &FugitTask,
+    task: &TaskNerveTask,
 ) -> serde_json::Value {
     let mut state = load_bridge_auto_sync_state(repo_root, config)
         .unwrap_or_else(|_| default_bridge_auto_sync_state(config));
@@ -16512,7 +16548,7 @@ fn advisor_role_json_key(role: AdvisorRoleArg) -> &'static str {
 }
 
 fn advisor_role_agent_id(role: AdvisorRoleArg) -> String {
-    format!("fugit.advisor.{}", advisor_role_label(role))
+    format!("tasknerve.advisor.{}", advisor_role_label(role))
 }
 
 fn default_advisor_policy() -> AdvisorPolicy {
@@ -16768,7 +16804,7 @@ fn sync_policy_from_advisor_workflow(
         write_advisor_state(repo_root, &state)?;
     }
     Ok(json!({
-        "schema_version": "fugit.advisor.workflow.sync_policy.v1",
+        "schema_version": "tasknerve.advisor.workflow.sync_policy.v1",
         "workflow": inspect_advisor_workflow(repo_root, override_path),
         "changed": changed,
         "policy": advisor_policy_payload(&state)
@@ -16781,7 +16817,7 @@ fn emit_advisor_provider_payload(provider: &AdvisorProvider, json: bool) -> Resu
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else {
         println!(
-            "[fugit-advisor] provider={} kind={} enabled={} model={}",
+            "[tasknerve-advisor] provider={} kind={} enabled={} model={}",
             payload["provider_id"].as_str().unwrap_or("unknown"),
             payload["kind"].as_str().unwrap_or("unknown"),
             payload["enabled"].as_bool().unwrap_or(false),
@@ -17184,7 +17220,7 @@ fn advisor_snapshot_payload(repo_root: &Path, limit: usize) -> Result<serde_json
     let task_manager_worker =
         load_advisor_worker_state(repo_root, AdvisorRoleArg::TaskManager, &state)?;
     Ok(json!({
-        "schema_version": "fugit.advisor.snapshot.v1",
+        "schema_version": "tasknerve.advisor.snapshot.v1",
         "generated_at_utc": now_utc(),
         "policy": advisor_policy_payload(&state),
         "providers": advisor_provider_list_payload(&state),
@@ -17428,7 +17464,7 @@ fn queue_advisor_background(
             worker.pending_plan_mode = options.plan_mode;
             write_advisor_worker_state(repo_root, &worker)?;
             return Ok(json!({
-                "schema_version": "fugit.advisor.queue.v1",
+                "schema_version": "tasknerve.advisor.queue.v1",
                 "generated_at_utc": now_utc(),
                 "role": advisor_role_label(options.role),
                 "queued": true,
@@ -17515,7 +17551,7 @@ fn queue_advisor_background(
     }
 
     Ok(json!({
-        "schema_version": "fugit.advisor.queue.v1",
+        "schema_version": "tasknerve.advisor.queue.v1",
         "generated_at_utc": now_utc(),
         "role": advisor_role_label(options.role),
         "queued": true,
@@ -17808,12 +17844,12 @@ fn build_advisor_prompt(
             "You may include suggested tasks in the JSON, but they will be treated as suggestions unless explicitly synced."
         }
         _ => {
-            "The tasks you output will be imported into the fugit backlog, so avoid duplicates and keep them concrete."
+            "The tasks you output will be imported into the tasknerve backlog, so avoid duplicates and keep them concrete."
         }
     };
     Ok((
         format!(
-            r#"You are fugit's {role}.
+            r#"You are tasknerve's {role}.
 
 Goal:
 {goal}
@@ -18337,7 +18373,7 @@ fn sync_advisor_generated_tasks(
     for task in &report.removed {
         append_task_timeline_event(
             repo_root,
-            &FugitTask {
+            &TaskNerveTask {
                 task_id: task.task_id.clone(),
                 title: task.title.clone(),
                 detail: None,
@@ -18410,8 +18446,7 @@ fn resolve_advisor_plan_path(
                     AdvisorRoleArg::Reviewer => "review".to_string(),
                     AdvisorRoleArg::TaskManager => "research".to_string(),
                 });
-            repo_root
-                .join(".fugit")
+            timeline_root(repo_root)
                 .join("advisor")
                 .join("plans")
                 .join(format!("{}.tsv", scope))
@@ -19234,7 +19269,7 @@ fn bridge_auto_sync_payload(
     state: &BridgeAutoSyncState,
 ) -> serde_json::Value {
     json!({
-        "schema_version": "fugit.bridge.auto_sync.v1",
+        "schema_version": "tasknerve.bridge.auto_sync.v1",
         "generated_at_utc": now_utc(),
         "enabled": config.auto_bridge_sync_enabled,
         "on_task_done": config.auto_bridge_sync_on_task_done,
@@ -19676,7 +19711,7 @@ fn check_kind_label(kind: CheckKind) -> &'static str {
     }
 }
 
-fn check_is_active(check: &FugitCheck) -> bool {
+fn check_is_active(check: &TaskNerveCheck) -> bool {
     check.deprecated_at_utc.is_none()
 }
 
@@ -19779,14 +19814,14 @@ fn normalize_string_list(values: Vec<String>) -> Vec<String> {
     dedupe_keep_order(values)
 }
 
-fn task_is_manually_blocked(task: &FugitTask) -> bool {
+fn task_is_manually_blocked(task: &TaskNerveTask) -> bool {
     task.blocked_reason
         .as_deref()
         .map(|reason| !reason.trim().is_empty())
         .unwrap_or(false)
 }
 
-fn task_claim_ttl_remaining_seconds(task: &FugitTask, now: DateTime<Utc>) -> Option<i64> {
+fn task_claim_ttl_remaining_seconds(task: &TaskNerveTask, now: DateTime<Utc>) -> Option<i64> {
     let expires_at = task
         .claim_expires_at_utc
         .as_deref()
@@ -19795,7 +19830,7 @@ fn task_claim_ttl_remaining_seconds(task: &FugitTask, now: DateTime<Utc>) -> Opt
     Some(remaining.max(0))
 }
 
-fn task_lifecycle_state(task: &FugitTask) -> &'static str {
+fn task_lifecycle_state(task: &TaskNerveTask) -> &'static str {
     if task.canceled_at_utc.is_some() {
         "canceled"
     } else if task_is_manually_blocked(task) && task.status != TaskStatus::Claimed {
@@ -19809,19 +19844,19 @@ fn task_lifecycle_state(task: &FugitTask) -> &'static str {
     }
 }
 
-fn clear_task_blocked_state(task: &mut FugitTask) {
+fn clear_task_blocked_state(task: &mut TaskNerveTask) {
     task.blocked_at_utc = None;
     task.blocked_by_agent_id = None;
     task.blocked_reason = None;
 }
 
-fn clear_task_canceled_state(task: &mut FugitTask) {
+fn clear_task_canceled_state(task: &mut TaskNerveTask) {
     task.canceled_at_utc = None;
     task.canceled_by_agent_id = None;
     task.canceled_reason = None;
 }
 
-fn set_task_blocked_state(task: &mut FugitTask, agent_id: &str, reason: &str) {
+fn set_task_blocked_state(task: &mut TaskNerveTask, agent_id: &str, reason: &str) {
     let now = now_utc();
     task.status = TaskStatus::Open;
     task.updated_at_utc = now.clone();
@@ -19978,13 +20013,13 @@ fn build_manual_task(
     priority: i32,
     tags: Vec<String>,
     depends_on: Vec<String>,
-) -> Result<FugitTask> {
+) -> Result<TaskNerveTask> {
     let normalized_title = normalize_task_title(title)?;
     let normalized_tags = dedupe_keep_order(tags);
     let normalized_depends_on = dedupe_keep_order(depends_on);
     validate_task_dependencies(state, None, &normalized_depends_on)?;
     let now = now_utc();
-    Ok(FugitTask {
+    Ok(TaskNerveTask {
         task_id: format!("task_{}", Uuid::new_v4().simple()),
         title: normalized_title,
         detail: normalize_task_detail(detail),
@@ -20025,7 +20060,7 @@ fn edit_task_in_state(
     task_id: &str,
     agent_id: &str,
     patch: TaskEditPatch,
-) -> Result<FugitTask> {
+) -> Result<TaskNerveTask> {
     let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id) else {
         bail!("task not found: {}", task_id);
     };
@@ -20131,7 +20166,7 @@ fn remove_task_from_state(
     state: &mut TaskState,
     task_id: &str,
     agent_id: &str,
-) -> Result<FugitTask> {
+) -> Result<TaskNerveTask> {
     let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id) else {
         bail!("task not found: {}", task_id);
     };
@@ -20161,7 +20196,7 @@ fn remove_task_from_state(
     Ok(removed)
 }
 
-fn reopen_task_in_state(state: &mut TaskState, task_id: &str, agent_id: &str) -> Result<FugitTask> {
+fn reopen_task_in_state(state: &mut TaskState, task_id: &str, agent_id: &str) -> Result<TaskNerveTask> {
     let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id) else {
         bail!("task not found: {}", task_id);
     };
@@ -20202,7 +20237,7 @@ fn cancel_task_in_state(
     task_id: &str,
     agent_id: &str,
     reason: String,
-) -> Result<FugitTask> {
+) -> Result<TaskNerveTask> {
     let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id) else {
         bail!("task not found: {}", task_id);
     };
@@ -20251,7 +20286,7 @@ fn approve_tasks_in_state(
     task_id: Option<&str>,
     all_pending_auto_replenish: bool,
     agent_id: &str,
-) -> Result<Vec<FugitTask>> {
+) -> Result<Vec<TaskNerveTask>> {
     if task_id.is_some() && all_pending_auto_replenish {
         bail!("task approve accepts either --task-id or --all-pending-auto-replenish");
     }
@@ -20284,7 +20319,7 @@ fn approve_tasks_in_state(
         bail!("no pending auto-replenish tasks are awaiting confirmation");
     }
 
-    let mut approved = Vec::<FugitTask>::new();
+    let mut approved = Vec::<TaskNerveTask>::new();
     let now = now_utc();
     for task_index in indices {
         if !state.tasks[task_index].awaiting_confirmation {
@@ -20384,7 +20419,7 @@ fn check_policy_payload(state: &CheckState, config: &TimelineConfig) -> serde_js
         .filter(|check| check_is_active(check))
         .count();
     json!({
-        "schema_version": "fugit.check.policy.v1",
+        "schema_version": "tasknerve.check.policy.v1",
         "generated_at_utc": now_utc(),
         "enabled": config.quality_checks_enabled,
         "backend": quality_checks_backend(config),
@@ -20503,7 +20538,7 @@ fn run_quality_checks(
         "failed"
     };
     Ok(json!({
-        "schema_version": "fugit.check.run.v1",
+        "schema_version": "tasknerve.check.run.v1",
         "generated_at_utc": now_utc(),
         "backend": QUALITY_CHECK_BACKEND_LOCAL,
         "ok": failed_count == 0,
@@ -20594,7 +20629,7 @@ fn task_policy_payload(state: &TaskState, config: &TimelineConfig) -> serde_json
         .map(|task| task.task_id.clone())
         .collect::<Vec<_>>();
     json!({
-        "schema_version": "fugit.task.policy.v1",
+        "schema_version": "tasknerve.task.policy.v1",
         "generated_at_utc": now_utc(),
         "auto_replenish_enabled": config.auto_replenish_enabled,
         "auto_replenish_confirmation": config.auto_replenish_require_confirmation,
@@ -20795,11 +20830,11 @@ fn auto_replenish_source_key(agent_id: &str) -> String {
     format!("agent:{}", agent_id.trim())
 }
 
-fn task_is_auto_replenish(task: &FugitTask) -> bool {
+fn task_is_auto_replenish(task: &TaskNerveTask) -> bool {
     task.source_plan.as_deref() == Some(AUTO_REPLENISH_SOURCE_PLAN)
 }
 
-fn task_auto_replenish_agent_id(task: &FugitTask) -> Option<&str> {
+fn task_auto_replenish_agent_id(task: &TaskNerveTask) -> Option<&str> {
     if !task_is_auto_replenish(task) {
         return None;
     }
@@ -20808,12 +20843,12 @@ fn task_auto_replenish_agent_id(task: &FugitTask) -> Option<&str> {
         .and_then(|value| value.strip_prefix("agent:"))
 }
 
-fn task_is_auto_replenish_for_agent(task: &FugitTask, agent_id: &str) -> bool {
+fn task_is_auto_replenish_for_agent(task: &TaskNerveTask, agent_id: &str) -> bool {
     task_auto_replenish_agent_id(task) == Some(agent_id)
 }
 
 fn task_is_ready_for_dispatch_at(
-    task: &FugitTask,
+    task: &TaskNerveTask,
     status_map: &BTreeMap<String, TaskStatus>,
     today: NaiveDate,
 ) -> bool {
@@ -20824,12 +20859,12 @@ fn task_is_ready_for_dispatch_at(
         && task_schedule_state(task, today) == TaskScheduleState::Ready
 }
 
-fn task_is_ready_for_dispatch(task: &FugitTask, status_map: &BTreeMap<String, TaskStatus>) -> bool {
+fn task_is_ready_for_dispatch(task: &TaskNerveTask, status_map: &BTreeMap<String, TaskStatus>) -> bool {
     task_is_ready_for_dispatch_at(task, status_map, Utc::now().date_naive())
 }
 
 fn task_is_dispatchable_without_date_gate(
-    task: &FugitTask,
+    task: &TaskNerveTask,
     status_map: &BTreeMap<String, TaskStatus>,
 ) -> bool {
     task.status != TaskStatus::Done
@@ -20873,13 +20908,13 @@ fn collect_auto_replenish_agents(
     dedupe_keep_order(agents)
 }
 
-fn build_auto_replenish_task(agent_id: &str, require_confirmation: bool) -> FugitTask {
+fn build_auto_replenish_task(agent_id: &str, require_confirmation: bool) -> TaskNerveTask {
     let now = now_utc();
-    FugitTask {
+    TaskNerveTask {
         task_id: format!("task_{}", Uuid::new_v4().simple()),
-        title: format!("Scout for more tasks to add to fugit ({})", agent_id),
+        title: format!("Scout for more tasks to add to tasknerve ({})", agent_id),
         detail: Some(
-            "The ready queue is empty for this agent. Inspect the repo, identify the next useful backlog items, and add them to fugit after checking for duplicates.".to_string(),
+            "The ready queue is empty for this agent. Inspect the repo, identify the next useful backlog items, and add them to tasknerve after checking for duplicates.".to_string(),
         ),
         priority: 0,
         tags: vec![
@@ -20916,7 +20951,7 @@ fn build_auto_replenish_task(agent_id: &str, require_confirmation: bool) -> Fugi
     }
 }
 
-fn sync_auto_replenish_task_confirmation(task: &mut FugitTask, require_confirmation: bool) -> bool {
+fn sync_auto_replenish_task_confirmation(task: &mut TaskNerveTask, require_confirmation: bool) -> bool {
     if !task_is_auto_replenish(task) || task.status != TaskStatus::Open {
         return false;
     }
@@ -21003,7 +21038,7 @@ fn ensure_auto_replenish_tasks(
     result
 }
 
-fn task_search_haystacks(task: &FugitTask) -> Vec<String> {
+fn task_search_haystacks(task: &TaskNerveTask) -> Vec<String> {
     let mut haystacks = vec![
         task.task_id.to_ascii_lowercase(),
         task.title.to_ascii_lowercase(),
@@ -21047,7 +21082,7 @@ fn extract_iso_dates_with_positions(text: &str) -> Vec<(usize, usize, NaiveDate)
     out
 }
 
-fn parse_task_date_window_from_tags(task: &FugitTask) -> TaskDateWindow {
+fn parse_task_date_window_from_tags(task: &TaskNerveTask) -> TaskDateWindow {
     let mut window = TaskDateWindow {
         not_before: None,
         not_after: None,
@@ -21123,7 +21158,7 @@ fn parse_task_date_window_from_text(text: &str) -> Option<TaskDateWindow> {
     None
 }
 
-fn task_date_window(task: &FugitTask) -> TaskDateWindow {
+fn task_date_window(task: &TaskNerveTask) -> TaskDateWindow {
     let from_tags = parse_task_date_window_from_tags(task);
     if from_tags.not_before.is_some() || from_tags.not_after.is_some() {
         return from_tags;
@@ -21143,7 +21178,7 @@ fn task_date_window(task: &FugitTask) -> TaskDateWindow {
     }
 }
 
-fn task_schedule_state(task: &FugitTask, today: NaiveDate) -> TaskScheduleState {
+fn task_schedule_state(task: &TaskNerveTask, today: NaiveDate) -> TaskScheduleState {
     let window = task_date_window(task);
     if let Some(not_before) = window.not_before
         && today < not_before
@@ -21158,7 +21193,7 @@ fn task_schedule_state(task: &FugitTask, today: NaiveDate) -> TaskScheduleState 
     TaskScheduleState::Ready
 }
 
-fn task_schedule_block_reason(task: &FugitTask, today: NaiveDate) -> Option<String> {
+fn task_schedule_block_reason(task: &TaskNerveTask, today: NaiveDate) -> Option<String> {
     match task_schedule_state(task, today) {
         TaskScheduleState::Ready => None,
         TaskScheduleState::NotBefore(date) => {
@@ -21170,7 +21205,7 @@ fn task_schedule_block_reason(task: &FugitTask, today: NaiveDate) -> Option<Stri
     }
 }
 
-fn task_matches_tag_filters(task: &FugitTask, required_tags: &[String]) -> bool {
+fn task_matches_tag_filters(task: &TaskNerveTask, required_tags: &[String]) -> bool {
     if required_tags.is_empty() {
         return true;
     }
@@ -21179,7 +21214,7 @@ fn task_matches_tag_filters(task: &FugitTask, required_tags: &[String]) -> bool 
         .all(|required| task.tags.iter().any(|task_tag| task_tag == required))
 }
 
-fn task_matches_query_filter(task: &FugitTask, filter: &TaskQueryFilter) -> bool {
+fn task_matches_query_filter(task: &TaskNerveTask, filter: &TaskQueryFilter) -> bool {
     if !task_matches_tag_filters(task, &filter.required_tags) {
         return false;
     }
@@ -21220,7 +21255,7 @@ fn task_matches_query_filter(task: &FugitTask, filter: &TaskQueryFilter) -> bool
 }
 
 fn task_to_json_payload(
-    task: &FugitTask,
+    task: &TaskNerveTask,
     status_map: &BTreeMap<String, TaskStatus>,
 ) -> serde_json::Value {
     let now = Utc::now();
@@ -21300,7 +21335,7 @@ fn task_to_json_payload(
 fn task_to_response_payload(
     repo_root: &Path,
     state: &TaskState,
-    task: &FugitTask,
+    task: &TaskNerveTask,
     status_map: &BTreeMap<String, TaskStatus>,
     include_context: bool,
 ) -> serde_json::Value {
@@ -21317,7 +21352,7 @@ fn task_to_response_payload(
 fn build_task_context_payload(
     repo_root: &Path,
     state: &TaskState,
-    task: &FugitTask,
+    task: &TaskNerveTask,
 ) -> serde_json::Value {
     let unresolved_dependencies = task
         .depends_on
@@ -21385,7 +21420,7 @@ fn build_task_context_payload(
     })
 }
 
-fn load_task_plan_context(repo_root: &Path, task: &FugitTask) -> Option<TaskPlanContext> {
+fn load_task_plan_context(repo_root: &Path, task: &TaskNerveTask) -> Option<TaskPlanContext> {
     let plan = task.source_plan.as_deref()?;
     let plan_path = if Path::new(plan).is_absolute() {
         PathBuf::from(plan)
@@ -21478,7 +21513,7 @@ fn split_task_context_lines(raw: &str) -> Vec<String> {
 }
 
 fn derive_task_acceptance_criteria(
-    task: &FugitTask,
+    task: &TaskNerveTask,
     plan_context: Option<&TaskPlanContext>,
 ) -> Vec<String> {
     let mut criteria = task
@@ -21498,7 +21533,7 @@ fn derive_task_acceptance_criteria(
 }
 
 fn task_request_selection_reason(
-    task: &FugitTask,
+    task: &TaskNerveTask,
     dispatch_kind: TaskDispatchKind,
     requested_task_id: Option<&str>,
 ) -> &'static str {
@@ -21689,7 +21724,7 @@ fn task_status_summary_payload(
     })
     .unwrap_or(serde_json::Value::Null);
     json!({
-        "schema_version": "fugit.task.status.v1",
+        "schema_version": "tasknerve.task.status.v1",
         "generated_at_utc": now_utc(),
         "repo_root": repo_root.display().to_string(),
         "agent_id": agent_id,
@@ -21739,7 +21774,7 @@ fn task_current_payload(
         })
         .collect::<Vec<_>>();
     json!({
-        "schema_version": "fugit.task.current.v1",
+        "schema_version": "tasknerve.task.current.v1",
         "generated_at_utc": now_utc(),
         "agent_id": agent_id,
         "found": !rows.is_empty(),
@@ -21991,7 +22026,7 @@ fn execute_task_request(
         }
         let status_map = task_status_map(state);
         return Ok(json!({
-            "schema_version": "fugit.task.request.v1",
+            "schema_version": "tasknerve.task.request.v1",
             "generated_at_utc": now_utc(),
             "agent_id": options.agent_id.clone(),
             "assigned": false,
@@ -22106,7 +22141,7 @@ fn execute_task_request(
         })
         .collect::<Vec<_>>();
     Ok(json!({
-        "schema_version": "fugit.task.request.v1",
+        "schema_version": "tasknerve.task.request.v1",
         "generated_at_utc": now_utc(),
         "agent_id": options.agent_id.clone(),
         "assigned": true,
@@ -22174,7 +22209,7 @@ fn print_task_request_payload(payload: &serde_json::Value, json: bool) -> Result
         let task_id = payload["task"]["task_id"].as_str().unwrap_or("unknown");
         let title = payload["task"]["title"].as_str().unwrap_or("untitled");
         println!(
-            "[fugit-task] {}dispatch={} claimed={} max={} task_id={} title={}",
+            "[tasknerve-task] {}dispatch={} claimed={} max={} task_id={} title={}",
             start_prefix,
             payload["dispatch_kind"].as_str().unwrap_or("unknown"),
             payload["claimed"].as_bool().unwrap_or(false),
@@ -22187,7 +22222,7 @@ fn print_task_request_payload(payload: &serde_json::Value, json: bool) -> Result
 
     if let Some(requested_task_id) = payload["requested_task_id"].as_str() {
         println!(
-            "[fugit-task] {}requested task is not dispatchable task_id={} reason={}",
+            "[tasknerve-task] {}requested task is not dispatchable task_id={} reason={}",
             start_prefix,
             requested_task_id,
             payload["request_reason"].as_str().unwrap_or("unavailable")
@@ -22201,13 +22236,13 @@ fn print_task_request_payload(payload: &serde_json::Value, json: bool) -> Result
             .unwrap_or(false)
     {
         println!(
-            "[fugit-task] {}auto-replenish is waiting for confirmation for agent={}",
+            "[tasknerve-task] {}auto-replenish is waiting for confirmation for agent={}",
             start_prefix,
             payload["agent_id"].as_str().unwrap_or("unknown")
         );
     } else {
         println!(
-            "[fugit-task] {}no ready tasks available for agent={}",
+            "[tasknerve-task] {}no ready tasks available for agent={}",
             start_prefix,
             payload["agent_id"].as_str().unwrap_or("unknown")
         );
@@ -22220,7 +22255,7 @@ fn add_task_progress_entry(
     task_id: &str,
     agent_id: &str,
     note: String,
-) -> Result<FugitTask> {
+) -> Result<TaskNerveTask> {
     let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id) else {
         bail!("task not found: {}", task_id);
     };
@@ -22241,7 +22276,7 @@ fn add_task_artifact_entries(
     task_id: &str,
     agent_id: &str,
     artifacts: Vec<String>,
-) -> Result<FugitTask> {
+) -> Result<TaskNerveTask> {
     let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id) else {
         bail!("task not found: {}", task_id);
     };
@@ -22332,7 +22367,8 @@ fn comment_syntax_for_path(rel_path: &str) -> Option<CommentSyntax> {
             | ".zshrc"
             | ".zprofile"
             | ".gitignore"
-            | ".fugitignore"
+            | ".tasknerveignore"
+            | ".tasknerveignore"
     ) {
         return Some(CommentSyntax {
             line_prefixes: COMMENT_PREFIX_HASH,
@@ -22657,7 +22693,7 @@ fn build_comment_sync_report(
     Ok((
         next_state,
         CommentSyncReport {
-            schema_version: "fugit.task.sync_comments.v1".to_string(),
+            schema_version: "tasknerve.task.sync_comments.v1".to_string(),
             generated_at_utc: now_utc(),
             plan: CODE_COMMENT_SOURCE_PLAN.to_string(),
             markers: normalized_markers,
@@ -22923,7 +22959,7 @@ fn task_status_label(status: &TaskStatus) -> &'static str {
     }
 }
 
-fn task_sync_record(task: &FugitTask) -> TaskSyncTaskRecord {
+fn task_sync_record(task: &TaskNerveTask) -> TaskSyncTaskRecord {
     TaskSyncTaskRecord {
         task_id: task.task_id.clone(),
         title: task.title.clone(),
@@ -22982,7 +23018,7 @@ fn find_sync_match_for_row(
 }
 
 fn sync_task_needs_update(
-    task: &FugitTask,
+    task: &TaskNerveTask,
     row: &TaskImportRow,
     plan_source: &str,
     default_priority: i32,
@@ -23083,7 +23119,7 @@ fn sync_plan_into_task_state(
     }
 
     let mut report = TaskSyncReport {
-        schema_version: "fugit.task.sync.v1".to_string(),
+        schema_version: "tasknerve.task.sync.v1".to_string(),
         generated_at_utc: now_utc(),
         plan: plan_source.to_string(),
         format: "resolved".to_string(),
@@ -23140,7 +23176,7 @@ fn sync_plan_into_task_state(
                     .map(|key| key_to_task_id[key].clone())
                     .collect::<Vec<_>>();
                 let now = now_utc();
-                let task = FugitTask {
+                let task = TaskNerveTask {
                     task_id: format!("task_{}", Uuid::new_v4().simple()),
                     title: normalize_task_title(&row.title)?,
                     detail: normalize_task_detail(row.detail.clone()),
@@ -23340,7 +23376,7 @@ fn sync_plan_into_task_state(
 }
 
 fn write_mcp_task_import_temp_file(repo_root: &Path, kind: &str, content: &str) -> Result<PathBuf> {
-    let dir = repo_root.join(".fugit").join("mcp_tmp");
+    let dir = timeline_root(repo_root).join("mcp_tmp");
     fs::create_dir_all(&dir)
         .with_context(|| format!("failed creating mcp temp dir {}", dir.display()))?;
     let filename = format!("task_import_{}_{}.txt", kind, Uuid::new_v4().simple());
@@ -23354,8 +23390,8 @@ fn write_mcp_task_import_temp_file(repo_root: &Path, kind: &str, content: &str) 
     Ok(path)
 }
 
-fn resolve_fugit_home() -> Result<PathBuf> {
-    if let Ok(path) = std::env::var("FUGIT_HOME")
+fn resolve_tasknerve_home() -> Result<PathBuf> {
+    if let Ok(path) = std::env::var("TASKNERVE_HOME")
         && !path.trim().is_empty()
     {
         return Ok(PathBuf::from(path.trim()));
@@ -23363,30 +23399,37 @@ fn resolve_fugit_home() -> Result<PathBuf> {
     if let Ok(home) = std::env::var("HOME")
         && !home.trim().is_empty()
     {
-        return Ok(PathBuf::from(home.trim()).join(".fugit"));
+        return Ok(PathBuf::from(home.trim()).join(".tasknerve"));
     }
     if let Ok(profile) = std::env::var("USERPROFILE")
         && !profile.trim().is_empty()
     {
-        return Ok(PathBuf::from(profile.trim()).join(".fugit"));
+        return Ok(PathBuf::from(profile.trim()).join(".tasknerve"));
     }
-    bail!("unable to resolve FUGIT_HOME; set FUGIT_HOME, HOME, or USERPROFILE")
+    bail!("unable to resolve TASKNERVE_HOME; set TASKNERVE_HOME, HOME, or USERPROFILE")
 }
 
-fn fugit_projects_registry_path() -> Result<PathBuf> {
-    Ok(resolve_fugit_home()?.join("projects.json"))
+fn tasknerve_projects_registry_path() -> Result<PathBuf> {
+    Ok(resolve_tasknerve_home()?.join("projects.json"))
 }
 
-fn fugit_update_state_path() -> Result<PathBuf> {
-    Ok(resolve_fugit_home()?.join("update_state.json"))
+fn tasknerve_update_state_path() -> Result<PathBuf> {
+    Ok(resolve_tasknerve_home()?.join("update_state.json"))
 }
 
-fn fugit_update_checkout_root() -> Result<PathBuf> {
-    Ok(resolve_fugit_home()?.join("updater").join("fugit-alpha"))
+fn tasknerve_update_checkout_root() -> Result<PathBuf> {
+    let home = resolve_tasknerve_home()?;
+    let primary = home.join("updater").join("tasknerve");
+    let legacy = home.join("updater").join("tasknerve");
+    Ok(if primary.exists() || !legacy.exists() {
+        primary
+    } else {
+        legacy
+    })
 }
 
 fn load_project_registry() -> Result<ProjectRegistry> {
-    let path = fugit_projects_registry_path()?;
+    let path = tasknerve_projects_registry_path()?;
     let mut registry = load_json_optional::<ProjectRegistry>(&path)?.unwrap_or(ProjectRegistry {
         schema_version: SCHEMA_PROJECTS.to_string(),
         updated_at_utc: now_utc(),
@@ -23403,7 +23446,7 @@ fn load_project_registry() -> Result<ProjectRegistry> {
 }
 
 fn write_project_registry(registry: &ProjectRegistry) -> Result<()> {
-    let path = fugit_projects_registry_path()?;
+    let path = tasknerve_projects_registry_path()?;
     write_pretty_json(&path, registry)
 }
 
@@ -23598,13 +23641,13 @@ fn should_descend_project_discovery(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
         return true;
     };
-    if name.starts_with('.') && name != ".fugit" {
+    if name.starts_with('.') && name != ".tasknerve" {
         return false;
     }
     !matches!(
         name,
         ".git"
-            | ".fugit"
+            | ".tasknerve"
             | "node_modules"
             | "target"
             | "dist"
@@ -23615,7 +23658,7 @@ fn should_descend_project_discovery(path: &Path) -> bool {
     )
 }
 
-fn discover_fugit_repo_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+fn discover_tasknerve_repo_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut discovered = Vec::<PathBuf>::new();
     let mut seen = BTreeSet::<String>::new();
     for root in roots {
@@ -23631,8 +23674,8 @@ fn discover_fugit_repo_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
             if !entry.file_type().is_dir() {
                 continue;
             }
-            let candidate = entry.path().join(".fugit").join("config.json");
-            if !candidate.exists() {
+            let config_path = entry.path().join(".tasknerve").join("config.json");
+            if !config_path.exists() {
                 continue;
             }
             if let Ok(canonical_root) = entry.path().canonicalize() {
@@ -23700,7 +23743,7 @@ fn discover_projects_into_registry(
             .map(|root| resolve_repo_root(root))
             .collect::<Result<Vec<_>>>()?
     };
-    let discovered_roots = discover_fugit_repo_roots(&discovery_roots);
+    let discovered_roots = discover_tasknerve_repo_roots(&discovery_roots);
     let now = now_utc();
     let mut existing_name_map = registry
         .projects
@@ -23769,7 +23812,7 @@ fn discover_projects_into_registry(
         });
 
     Ok(json!({
-        "schema_version": "fugit.project.discover.v1",
+        "schema_version": "tasknerve.project.discover.v1",
         "generated_at_utc": now_utc(),
         "roots": discovery_roots.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
         "created": created,
@@ -23903,7 +23946,7 @@ fn task_status_map(state: &TaskState) -> BTreeMap<String, TaskStatus> {
     map
 }
 
-fn task_blocked_by(task: &FugitTask, status_map: &BTreeMap<String, TaskStatus>) -> Vec<String> {
+fn task_blocked_by(task: &TaskNerveTask, status_map: &BTreeMap<String, TaskStatus>) -> Vec<String> {
     let mut blocked_by = Vec::<String>::new();
     for dependency in &task.depends_on {
         match status_map.get(dependency) {
@@ -24195,7 +24238,7 @@ fn agent_has_available_standard_work(
 }
 
 fn apply_task_claim(
-    task: &mut FugitTask,
+    task: &mut TaskNerveTask,
     agent_id: &str,
     claim_ttl_minutes: i64,
     now: DateTime<Utc>,
@@ -24220,7 +24263,7 @@ fn apply_task_claim(
     clear_task_canceled_state(task);
 }
 
-fn extend_task_claim(task: &mut FugitTask, claim_ttl_minutes: i64, now: DateTime<Utc>) {
+fn extend_task_claim(task: &mut TaskNerveTask, claim_ttl_minutes: i64, now: DateTime<Utc>) {
     task.updated_at_utc = format_utc(now);
     task.claim_expires_at_utc = if claim_ttl_minutes <= 0 {
         None
@@ -24232,7 +24275,7 @@ fn extend_task_claim(task: &mut FugitTask, claim_ttl_minutes: i64, now: DateTime
     }
 }
 
-fn task_claim_is_expired(task: &FugitTask, now: DateTime<Utc>) -> bool {
+fn task_claim_is_expired(task: &TaskNerveTask, now: DateTime<Utc>) -> bool {
     if task.status != TaskStatus::Claimed {
         return false;
     }
@@ -24245,7 +24288,7 @@ fn task_claim_is_expired(task: &FugitTask, now: DateTime<Utc>) -> bool {
     }
 }
 
-fn task_claim_is_stale(task: &FugitTask, now: DateTime<Utc>, steal_after_minutes: i64) -> bool {
+fn task_claim_is_stale(task: &TaskNerveTask, now: DateTime<Utc>, steal_after_minutes: i64) -> bool {
     if task_claim_is_expired(task, now) {
         return true;
     }
@@ -24486,9 +24529,11 @@ fn build_ignore_matcher(repo_root: &Path) -> Result<Gitignore> {
     if root_gitignore.exists() {
         builder.add(root_gitignore);
     }
-    let root_fugitignore = repo_root.join(".fugitignore");
-    if root_fugitignore.exists() {
-        builder.add(root_fugitignore);
+    for ignore_name in [".tasknerveignore", ".tasknerveignore"] {
+        let ignore_path = repo_root.join(ignore_name);
+        if ignore_path.exists() {
+            builder.add(ignore_path);
+        }
     }
     let git_info_exclude = repo_root.join(".git").join("info").join("exclude");
     if git_info_exclude.exists() {
@@ -24567,7 +24612,7 @@ fn validate_branch_name(name: &str) -> Result<()> {
 }
 
 fn default_agent_id() -> String {
-    if let Ok(token) = std::env::var("FUGIT_AGENT_ID")
+    if let Ok(token) = std::env::var("TASKNERVE_AGENT_ID")
         && !token.trim().is_empty()
     {
         return token.trim().to_string();
@@ -24733,6 +24778,10 @@ fn timeline_is_initialized(repo_root: &Path) -> bool {
     timeline_config_path(repo_root).exists() && timeline_branches_path(repo_root).exists()
 }
 
+fn preferred_timeline_root(repo_root: &Path) -> PathBuf {
+    repo_root.join(TIMELINE_ROOT_DIR)
+}
+
 fn write_pretty_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -24754,7 +24803,7 @@ fn load_json_optional<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
 }
 
 fn timeline_root(repo_root: &Path) -> PathBuf {
-    repo_root.join(TIMELINE_ROOT_DIR)
+    preferred_timeline_root(repo_root)
 }
 
 fn timeline_config_path(repo_root: &Path) -> PathBuf {
@@ -24858,7 +24907,7 @@ mod tests {
 
     impl TestRepo {
         fn new(label: &str) -> Self {
-            let root = std::env::temp_dir().join(format!("fugit-{label}-{}", Uuid::new_v4()));
+            let root = std::env::temp_dir().join(format!("tasknerve-{label}-{}", Uuid::new_v4()));
             fs::create_dir_all(&root).expect("create temp repo root");
             Self { root }
         }
@@ -24898,8 +24947,8 @@ mod tests {
         }
     }
 
-    fn sample_task(task_id: &str, title: &str, priority: i32, status: TaskStatus) -> FugitTask {
-        FugitTask {
+    fn sample_task(task_id: &str, title: &str, priority: i32, status: TaskStatus) -> TaskNerveTask {
+        TaskNerveTask {
             task_id: task_id.to_string(),
             title: title.to_string(),
             detail: None,
@@ -25061,9 +25110,9 @@ mod tests {
     #[test]
     fn extract_skill_command_paths_handles_global_options_and_nested_commands() {
         let skill = r#"
-- `fugit --repo-root . task start --agent agent.runner --json`
-- `fugit skill doctor --json`
-- `fugit --repo-root . bridge issue-monitor show --json`
+- `tasknerve --repo-root . task start --agent agent.runner --json`
+- `tasknerve skill doctor --json`
+- `tasknerve --repo-root . bridge issue-monitor show --json`
 "#;
         let paths = extract_skill_command_paths(skill);
         assert!(paths.contains("task"));
@@ -25077,8 +25126,8 @@ mod tests {
     #[test]
     fn unsupported_skill_command_paths_flags_unknown_nested_commands() {
         let skill = r#"
-- `fugit --repo-root . task teleport --agent agent.runner`
-- `fugit bridge wormhole`
+- `tasknerve --repo-root . task teleport --agent agent.runner`
+- `tasknerve bridge wormhole`
 "#;
         let unsupported = unsupported_skill_command_paths(skill);
         assert_eq!(
@@ -25357,7 +25406,7 @@ mod tests {
     fn default_quality_checks_backend_for_repo_prefers_local_for_non_github_remote() {
         let repo = TestRepo::new("quality-backend-local");
         repo.git(&["init"]);
-        repo.git(&["remote", "add", "origin", "/tmp/fugit-local-origin.git"]);
+        repo.git(&["remote", "add", "origin", "/tmp/tasknerve-local-origin.git"]);
         assert_eq!(
             default_quality_checks_backend_for_repo(repo.path()),
             QUALITY_CHECK_BACKEND_LOCAL
@@ -25409,7 +25458,7 @@ mod tests {
             schema_version: SCHEMA_TASKS.to_string(),
             updated_at_utc: now_utc(),
             tasks: vec![
-                FugitTask {
+                TaskNerveTask {
                     task_id: "task_dep".to_string(),
                     title: "dependency".to_string(),
                     detail: None,
@@ -25443,7 +25492,7 @@ mod tests {
                     canceled_by_agent_id: None,
                     canceled_reason: None,
                 },
-                FugitTask {
+                TaskNerveTask {
                     task_id: "task_child".to_string(),
                     title: "child".to_string(),
                     detail: None,
@@ -25497,7 +25546,7 @@ mod tests {
             schema_version: SCHEMA_TASKS.to_string(),
             updated_at_utc: now_utc(),
             tasks: vec![
-                FugitTask {
+                TaskNerveTask {
                     task_id: "task_dep_done".to_string(),
                     title: "dep done".to_string(),
                     detail: None,
@@ -25531,7 +25580,7 @@ mod tests {
                     canceled_by_agent_id: None,
                     canceled_reason: None,
                 },
-                FugitTask {
+                TaskNerveTask {
                     task_id: "task_simple".to_string(),
                     title: "simple".to_string(),
                     detail: None,
@@ -25565,7 +25614,7 @@ mod tests {
                     canceled_by_agent_id: None,
                     canceled_reason: None,
                 },
-                FugitTask {
+                TaskNerveTask {
                     task_id: "task_priority_ready".to_string(),
                     title: "priority ready".to_string(),
                     detail: None,
@@ -25599,7 +25648,7 @@ mod tests {
                     canceled_by_agent_id: None,
                     canceled_reason: None,
                 },
-                FugitTask {
+                TaskNerveTask {
                     task_id: "task_blocked".to_string(),
                     title: "blocked".to_string(),
                     detail: None,
@@ -25660,7 +25709,7 @@ mod tests {
         let state = TaskState {
             schema_version: SCHEMA_TASKS.to_string(),
             updated_at_utc: now_utc(),
-            tasks: vec![FugitTask {
+            tasks: vec![TaskNerveTask {
                 task_id: "task_claimed".to_string(),
                 title: "claimed".to_string(),
                 detail: None,
@@ -25730,7 +25779,7 @@ mod tests {
             schema_version: SCHEMA_TASKS.to_string(),
             updated_at_utc: now_utc(),
             tasks: vec![
-                FugitTask {
+                TaskNerveTask {
                     task_id: "task_owned".to_string(),
                     title: "owned".to_string(),
                     detail: None,
@@ -25764,7 +25813,7 @@ mod tests {
                     canceled_by_agent_id: None,
                     canceled_reason: None,
                 },
-                FugitTask {
+                TaskNerveTask {
                     task_id: "task_open".to_string(),
                     title: "open".to_string(),
                     detail: None,
@@ -25975,7 +26024,7 @@ mod tests {
         let state = TaskState {
             schema_version: SCHEMA_TASKS.to_string(),
             updated_at_utc: now_utc(),
-            tasks: vec![FugitTask {
+            tasks: vec![TaskNerveTask {
                 task_id: "task_owned".to_string(),
                 title: "owned".to_string(),
                 detail: None,
@@ -26042,7 +26091,7 @@ mod tests {
         let state = TaskState {
             schema_version: SCHEMA_TASKS.to_string(),
             updated_at_utc: now_utc(),
-            tasks: vec![FugitTask {
+            tasks: vec![TaskNerveTask {
                 task_id: "task_owned".to_string(),
                 title: "owned".to_string(),
                 detail: None,
@@ -26130,7 +26179,7 @@ mod tests {
             schema_version: SCHEMA_TASKS.to_string(),
             updated_at_utc: now_utc(),
             tasks: vec![
-                FugitTask {
+                TaskNerveTask {
                     task_id: "task_owned".to_string(),
                     title: "owned".to_string(),
                     detail: None,
@@ -26441,7 +26490,7 @@ Prefer evidence-backed tasks.
     #[test]
     fn effective_advisor_goal_prefers_workflow_goal_when_cli_goal_missing() {
         let definition = AdvisorWorkflowDefinition {
-            path: PathBuf::from("/tmp/FUGIT_WORKFLOW.md"),
+            path: PathBuf::from("/tmp/TASKNERVE_WORKFLOW.md"),
             config: AdvisorWorkflowFrontMatter {
                 advisor: AdvisorWorkflowPolicyDefaults::default(),
                 reviewer: AdvisorWorkflowRoleConfig {
@@ -26558,8 +26607,8 @@ Prefer evidence-backed tasks.
     fn collect_missing_timeline_objects_reports_missing_branch_index_blobs() {
         let repo = TestRepo::new("doctor-missing-objects");
         repo.git(&["init"]);
-        repo.git(&["config", "user.name", "Fugit Test"]);
-        repo.git(&["config", "user.email", "fugit-test@example.com"]);
+        repo.git(&["config", "user.name", "TaskNerve Test"]);
+        repo.git(&["config", "user.email", "tasknerve-test@example.com"]);
         repo.write_file("tracked.txt", "alpha\n");
         repo.git(&["add", "."]);
         repo.git(&["commit", "-m", "baseline"]);
@@ -26609,8 +26658,8 @@ Prefer evidence-backed tasks.
     fn checkpoint_repairs_missing_old_objects_from_git_history() {
         let repo = TestRepo::new("checkpoint-repair");
         repo.git(&["init"]);
-        repo.git(&["config", "user.name", "Fugit Test"]);
-        repo.git(&["config", "user.email", "fugit-test@example.com"]);
+        repo.git(&["config", "user.name", "TaskNerve Test"]);
+        repo.git(&["config", "user.email", "tasknerve-test@example.com"]);
         repo.write_file("tracked.txt", "alpha\n");
         repo.git(&["add", "."]);
         repo.git(&["commit", "-m", "baseline"]);
@@ -26664,8 +26713,8 @@ Prefer evidence-backed tasks.
     fn checkpoint_can_continue_with_explicit_lossy_repair_for_timeline_only_blobs() {
         let repo = TestRepo::new("checkpoint-lossy-repair");
         repo.git(&["init"]);
-        repo.git(&["config", "user.name", "Fugit Test"]);
-        repo.git(&["config", "user.email", "fugit-test@example.com"]);
+        repo.git(&["config", "user.name", "TaskNerve Test"]);
+        repo.git(&["config", "user.email", "tasknerve-test@example.com"]);
         repo.write_file("tracked.txt", "alpha\n");
         repo.git(&["add", "."]);
         repo.git(&["commit", "-m", "baseline"]);
@@ -26775,8 +26824,8 @@ Prefer evidence-backed tasks.
     fn checkpoint_preflight_reports_missing_old_objects_without_writing_event() {
         let repo = TestRepo::new("checkpoint-preflight");
         repo.git(&["init"]);
-        repo.git(&["config", "user.name", "Fugit Test"]);
-        repo.git(&["config", "user.email", "fugit-test@example.com"]);
+        repo.git(&["config", "user.name", "TaskNerve Test"]);
+        repo.git(&["config", "user.email", "tasknerve-test@example.com"]);
         repo.write_file("tracked.txt", "alpha\n");
         repo.git(&["add", "."]);
         repo.git(&["commit", "-m", "baseline"]);
@@ -26974,7 +27023,7 @@ Prefer evidence-backed tasks.
 
     #[test]
     fn task_timeline_tags_include_action_and_task_id() {
-        let task = FugitTask {
+        let task = TaskNerveTask {
             task_id: "task_abc".to_string(),
             title: "do thing".to_string(),
             detail: None,
@@ -27044,7 +27093,7 @@ Prefer evidence-backed tasks.
             schema_version: SCHEMA_TASKS.to_string(),
             updated_at_utc: now_utc(),
             tasks: vec![
-                FugitTask {
+                TaskNerveTask {
                     task_id: "task_dep".to_string(),
                     title: "dependency".to_string(),
                     detail: None,
@@ -27078,7 +27127,7 @@ Prefer evidence-backed tasks.
                     canceled_by_agent_id: None,
                     canceled_reason: None,
                 },
-                FugitTask {
+                TaskNerveTask {
                     task_id: "task_main".to_string(),
                     title: "before".to_string(),
                     detail: Some("old detail".to_string()),
@@ -27142,7 +27191,7 @@ Prefer evidence-backed tasks.
             schema_version: SCHEMA_TASKS.to_string(),
             updated_at_utc: now_utc(),
             tasks: vec![
-                FugitTask {
+                TaskNerveTask {
                     task_id: "task_parent".to_string(),
                     title: "parent".to_string(),
                     detail: None,
@@ -27176,7 +27225,7 @@ Prefer evidence-backed tasks.
                     canceled_by_agent_id: None,
                     canceled_reason: None,
                 },
-                FugitTask {
+                TaskNerveTask {
                     task_id: "task_child".to_string(),
                     title: "child".to_string(),
                     detail: None,
@@ -27223,7 +27272,7 @@ Prefer evidence-backed tasks.
         let mut state = TaskState {
             schema_version: SCHEMA_TASKS.to_string(),
             updated_at_utc: now_utc(),
-            tasks: vec![FugitTask {
+            tasks: vec![TaskNerveTask {
                 task_id: "task_done".to_string(),
                 title: "done".to_string(),
                 detail: None,
@@ -27276,7 +27325,7 @@ Prefer evidence-backed tasks.
             schema_version: SCHEMA_TASKS.to_string(),
             updated_at_utc: now_utc(),
             tasks: vec![
-                FugitTask {
+                TaskNerveTask {
                     task_id: "task_a01".to_string(),
                     title: "Define compiler contract".to_string(),
                     detail: None,
@@ -27310,7 +27359,7 @@ Prefer evidence-backed tasks.
                     canceled_by_agent_id: None,
                     canceled_reason: None,
                 },
-                FugitTask {
+                TaskNerveTask {
                     task_id: "task_a02".to_string(),
                     title: "Add checkpoint json payloads".to_string(),
                     detail: None,
