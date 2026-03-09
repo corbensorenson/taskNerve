@@ -173,6 +173,8 @@ struct CheckpointArgs {
     object_jobs: Option<usize>,
     #[arg(long, default_value_t = false)]
     burst: bool,
+    #[arg(long, default_value_t = false)]
+    allow_lossy_repair: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -884,6 +886,7 @@ fn cmd_quickstart(repo_root: &Path, args: QuickstartArgs) -> Result<()> {
             hash_jobs: None,
             object_jobs: None,
             burst: false,
+            allow_lossy_repair: false,
         },
     )?;
     Ok(())
@@ -913,6 +916,12 @@ fn cmd_doctor(repo_root: &Path, args: DoctorArgs) -> Result<()> {
         .and_then(|_| fs::remove_file(&write_test_file))
         .is_ok();
     let _ = fs::remove_dir_all(&write_test_dir);
+    let missing_timeline_objects = if timeline_initialized {
+        collect_missing_timeline_objects(repo_root)?
+    } else {
+        Vec::new()
+    };
+    let timeline_object_integrity = missing_timeline_objects.is_empty();
 
     let report = json!({
         "schema_version": "fugit.doctor_report.v1",
@@ -922,10 +931,12 @@ fn cmd_doctor(repo_root: &Path, args: DoctorArgs) -> Result<()> {
             "timeline_initialized": timeline_initialized,
             "repo_writable": writable,
             "git_available": git_available,
-            "git_work_tree": git_work_tree
+            "git_work_tree": git_work_tree,
+            "timeline_object_integrity": timeline_object_integrity
         },
+        "missing_timeline_objects": missing_timeline_objects,
         "summary": {
-            "pass": timeline_initialized && writable
+            "pass": timeline_initialized && writable && timeline_object_integrity
         }
     });
 
@@ -933,11 +944,17 @@ fn cmd_doctor(repo_root: &Path, args: DoctorArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         println!(
-            "[fugit-doctor] initialized={} writable={} git_available={} git_work_tree={} pass={}",
+            "[fugit-doctor] initialized={} writable={} git_available={} git_work_tree={} object_integrity={} missing_objects={} pass={}",
             timeline_initialized,
             writable,
             git_available,
             git_work_tree,
+            timeline_object_integrity,
+            report
+                .get("missing_timeline_objects")
+                .and_then(serde_json::Value::as_array)
+                .map(|rows| rows.len())
+                .unwrap_or(0),
             report
                 .get("summary")
                 .and_then(|v| v.get("pass"))
@@ -1295,10 +1312,32 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
             }
         }
     }
+    let repaired_old_objects = repair_missing_change_objects_from_git(repo_root, &changes, false)?;
+    if !repaired_old_objects.is_empty() {
+        missing_old_objects.retain(|row| {
+            let (_, hash) = row
+                .rsplit_once(" (")
+                .map(|(path, hash)| (path, hash.trim_end_matches(')')))
+                .unwrap_or(("", ""));
+            !timeline_objects_dir(repo_root).join(hash).exists()
+        });
+    }
     if !missing_old_objects.is_empty() {
-        bail!(
-            "checkpoint would lose recoverability because old object blobs are missing:\n{}\nRecreate the baseline snapshot first (for new repos, run `fugit init` before edits).",
-            missing_old_objects.join("\n")
+        if !args.allow_lossy_repair {
+            bail!(
+                "checkpoint would lose recoverability because old object blobs are missing:\n{}\nRecreate the baseline snapshot first (for new repos, run `fugit init` before edits).\nIf the missing blobs are irrecoverable and you want to reseal the current head anyway, rerun with `--allow-lossy-repair`.",
+                missing_old_objects.join("\n")
+            );
+        }
+        println!(
+            "[fugit] warning=lossy_repair missing_old_objects={} historical_checkout_before_this_checkpoint_may_fail",
+            missing_old_objects.len()
+        );
+    }
+    if !repaired_old_objects.is_empty() {
+        println!(
+            "[fugit] repaired_missing_old_objects={} source=git_history",
+            repaired_old_objects.len()
         );
     }
 
@@ -1344,6 +1383,11 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
         .branches
         .get(&active_branch)
         .and_then(|row| row.head_event_id.clone());
+    let mut event_tags = dedupe_keep_order(args.tags);
+    if args.allow_lossy_repair && !missing_old_objects.is_empty() {
+        event_tags.push("lossy_repair".to_string());
+        event_tags = dedupe_keep_order(event_tags);
+    }
     let event = TimelineEvent {
         schema_version: SCHEMA_EVENT.to_string(),
         event_id: event_id.clone(),
@@ -1352,7 +1396,7 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
         parent_event_id,
         agent_id,
         summary: args.summary.trim().to_string(),
-        tags: dedupe_keep_order(args.tags),
+        tags: event_tags,
         metrics: EventMetrics {
             tracked_file_count: new_index.len(),
             changed_file_count: changes.len(),
@@ -2216,11 +2260,28 @@ fn cmd_checkout(repo_root: &Path, args: CheckoutArgs) -> Result<()> {
             ChangeKind::Deleted => {}
         }
     }
+    let repaired_target_objects =
+        repair_missing_change_objects_from_git(repo_root, &planned, true)?;
+    if !repaired_target_objects.is_empty() {
+        missing_objects.retain(|row| {
+            let (_, hash) = row
+                .rsplit_once(" (")
+                .map(|(path, hash)| (path, hash.trim_end_matches(')')))
+                .unwrap_or(("", ""));
+            !timeline_objects_dir(repo_root).join(hash).exists()
+        });
+    }
 
     if !missing_objects.is_empty() {
         bail!(
             "cannot materialize target snapshot; missing object blobs:\n{}\nRun a checkpoint that captures these files before checkout.",
             missing_objects.join("\n")
+        );
+    }
+    if !repaired_target_objects.is_empty() {
+        println!(
+            "[fugit-checkout] repaired_missing_objects={} source=git_history",
+            repaired_target_objects.len()
         );
     }
 
@@ -5363,6 +5424,169 @@ fn git_has_worktree_changes(repo_root: &Path) -> Result<bool> {
     Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
 }
 
+fn collect_missing_timeline_objects(repo_root: &Path) -> Result<Vec<String>> {
+    if !timeline_is_initialized(repo_root) {
+        return Ok(Vec::new());
+    }
+
+    let (_config, branches) = load_initialized_state(repo_root)?;
+    let objects_dir = timeline_objects_dir(repo_root);
+    let mut missing = BTreeSet::<String>::new();
+
+    for branch_name in branches.branches.keys() {
+        let index = load_branch_index(repo_root, branch_name)?;
+        for (path, row) in &index {
+            if !objects_dir.join(&row.hash).exists() {
+                missing.insert(format!("index:{}:{} ({})", branch_name, path, row.hash));
+            }
+        }
+
+        for event in read_branch_events(repo_root, branch_name)? {
+            for change in &event.changes {
+                if let Some(hash) = change.old_hash.as_deref()
+                    && !objects_dir.join(hash).exists()
+                {
+                    missing.insert(format!(
+                        "event:{}:{}:old:{} ({})",
+                        branch_name, event.event_id, change.path, hash
+                    ));
+                }
+                if let Some(hash) = change.new_hash.as_deref()
+                    && !objects_dir.join(hash).exists()
+                {
+                    missing.insert(format!(
+                        "event:{}:{}:new:{} ({})",
+                        branch_name, event.event_id, change.path, hash
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(missing.into_iter().collect())
+}
+
+fn repair_missing_change_objects_from_git(
+    repo_root: &Path,
+    changes: &[ChangeRecord],
+    use_new_hash: bool,
+) -> Result<Vec<String>> {
+    let mut repaired = Vec::<String>::new();
+    let mut attempted = BTreeSet::<(String, String)>::new();
+
+    for change in changes {
+        let candidate_hash = if use_new_hash {
+            match change.kind {
+                ChangeKind::Added | ChangeKind::Modified => change.new_hash.as_deref(),
+                ChangeKind::Deleted => None,
+            }
+        } else {
+            match change.kind {
+                ChangeKind::Modified | ChangeKind::Deleted => change.old_hash.as_deref(),
+                ChangeKind::Added => None,
+            }
+        };
+        let Some(expected_hash) = candidate_hash else {
+            continue;
+        };
+        let key = (change.path.clone(), expected_hash.to_string());
+        if !attempted.insert(key.clone()) {
+            continue;
+        }
+        if timeline_objects_dir(repo_root).join(expected_hash).exists() {
+            continue;
+        }
+        if repair_timeline_object_from_git(repo_root, &change.path, expected_hash)? {
+            repaired.push(format!("{} ({})", key.0, key.1));
+        }
+    }
+
+    Ok(repaired)
+}
+
+fn repair_timeline_object_from_git(
+    repo_root: &Path,
+    rel_path: &str,
+    expected_hash: &str,
+) -> Result<bool> {
+    let object_path = timeline_objects_dir(repo_root).join(expected_hash);
+    if object_path.exists() {
+        return Ok(true);
+    }
+
+    let rel_path = normalize_user_path(rel_path);
+    let mut candidates = vec!["HEAD".to_string(), ":".to_string()];
+    candidates.extend(git_history_revisions_for_path(repo_root, &rel_path)?);
+
+    let mut seen = BTreeSet::<String>::new();
+    for revision in candidates {
+        if !seen.insert(revision.clone()) {
+            continue;
+        }
+        let Some(bytes) = git_show_path_at_revision(repo_root, &revision, &rel_path)? else {
+            continue;
+        };
+        if hash_bytes(&bytes) != expected_hash {
+            continue;
+        }
+        store_object_bytes(repo_root, expected_hash, &bytes)?;
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+fn git_history_revisions_for_path(repo_root: &Path, rel_path: &str) -> Result<Vec<String>> {
+    let output = match ProcessCommand::new("git")
+        .current_dir(repo_root)
+        .args(["log", "--format=%H", "--all", "--", rel_path])
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return Ok(Vec::new()),
+    };
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+
+    let mut revisions = Vec::<String>::new();
+    let mut seen = BTreeSet::<String>::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let revision = line.trim();
+        if revision.is_empty() {
+            continue;
+        }
+        if seen.insert(revision.to_string()) {
+            revisions.push(revision.to_string());
+        }
+    }
+    Ok(revisions)
+}
+
+fn git_show_path_at_revision(
+    repo_root: &Path,
+    revision: &str,
+    rel_path: &str,
+) -> Result<Option<Vec<u8>>> {
+    let spec = if revision == ":" {
+        format!(":{}", rel_path)
+    } else {
+        format!("{}:{}", revision, rel_path)
+    };
+    let output = match ProcessCommand::new("git")
+        .current_dir(repo_root)
+        .args(["show", "--no-textconv", &spec])
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return Ok(None),
+    };
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(Some(output.stdout))
+}
+
 fn run_process(mut cmd: ProcessCommand, context_msg: &str) -> Result<()> {
     let output = cmd.output().with_context(|| context_msg.to_string())?;
     if !output.status.success() {
@@ -5557,6 +5781,16 @@ fn store_object(repo_root: &Path, hash: &str, source_path: &Path) -> Result<()> 
             source_path.display()
         )
     })?;
+    Ok(())
+}
+
+fn store_object_bytes(repo_root: &Path, hash: &str, bytes: &[u8]) -> Result<()> {
+    let object_path = timeline_objects_dir(repo_root).join(hash);
+    if object_path.exists() {
+        return Ok(());
+    }
+    fs::write(&object_path, bytes)
+        .with_context(|| format!("failed storing timeline object {}", object_path.display()))?;
     Ok(())
 }
 
@@ -6407,8 +6641,8 @@ fn diff_indexes(
 fn hash_file(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path)
         .with_context(|| format!("failed opening file for hashing {}", path.display()))?;
-    let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 16 * 1024];
+    let mut hasher = Sha256::new();
 
     loop {
         let read = file
@@ -6420,8 +6654,13 @@ fn hash_file(path: &Path) -> Result<String> {
         hasher.update(&buffer[..read]);
     }
 
-    let digest = hasher.finalize();
-    Ok(format!("{:x}", digest))
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn hash_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
 }
 
 fn build_ignore_matcher(repo_root: &Path) -> Result<Gitignore> {
@@ -6640,6 +6879,52 @@ fn timeline_branch_index_path(repo_root: &Path, branch: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestRepo {
+        root: PathBuf,
+    }
+
+    impl TestRepo {
+        fn new(label: &str) -> Self {
+            let root = std::env::temp_dir().join(format!("fugit-{label}-{}", Uuid::new_v4()));
+            fs::create_dir_all(&root).expect("create temp repo root");
+            Self { root }
+        }
+
+        fn path(&self) -> &Path {
+            &self.root
+        }
+
+        fn write_file(&self, rel_path: &str, contents: &str) {
+            let path = self.root.join(rel_path);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create parent dirs");
+            }
+            fs::write(path, contents).expect("write file");
+        }
+
+        fn git(&self, args: &[&str]) -> String {
+            let output = ProcessCommand::new("git")
+                .current_dir(&self.root)
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {:?} failed\nstdout: {}\nstderr: {}",
+                args,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+    }
+
+    impl Drop for TestRepo {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
 
     #[test]
     fn normalize_user_path_collapses_tokens() {
@@ -6876,6 +7161,187 @@ mod tests {
             task_gui_url("127.0.0.1", 7788, Some("proj-a")),
             "http://127.0.0.1:7788/?project=proj-a"
         );
+    }
+
+    #[test]
+    fn collect_missing_timeline_objects_reports_missing_branch_index_blobs() {
+        let repo = TestRepo::new("doctor-missing-objects");
+        repo.git(&["init"]);
+        repo.git(&["config", "user.name", "Fugit Test"]);
+        repo.git(&["config", "user.email", "fugit-test@example.com"]);
+        repo.write_file("tracked.txt", "alpha\n");
+        repo.git(&["add", "."]);
+        repo.git(&["commit", "-m", "baseline"]);
+
+        cmd_init(
+            repo.path(),
+            InitArgs {
+                branch: "trunk".to_string(),
+                bridge_branch: None,
+                bridge_remote: "origin".to_string(),
+            },
+        )
+        .expect("init timeline");
+
+        let index = load_branch_index(repo.path(), "trunk").expect("load branch index");
+        let tracked = index.get("tracked.txt").expect("tracked row");
+        let object_path = timeline_objects_dir(repo.path()).join(&tracked.hash);
+        fs::remove_file(&object_path).expect("remove stored object");
+
+        let missing = collect_missing_timeline_objects(repo.path()).expect("collect missing");
+        assert!(
+            missing
+                .iter()
+                .any(|row| row.contains("index:trunk:tracked.txt") && row.contains(&tracked.hash)),
+            "expected branch index object to be reported missing: {:?}",
+            missing
+        );
+    }
+
+    #[test]
+    fn checkpoint_repairs_missing_old_objects_from_git_history() {
+        let repo = TestRepo::new("checkpoint-repair");
+        repo.git(&["init"]);
+        repo.git(&["config", "user.name", "Fugit Test"]);
+        repo.git(&["config", "user.email", "fugit-test@example.com"]);
+        repo.write_file("tracked.txt", "alpha\n");
+        repo.git(&["add", "."]);
+        repo.git(&["commit", "-m", "baseline"]);
+
+        cmd_init(
+            repo.path(),
+            InitArgs {
+                branch: "trunk".to_string(),
+                bridge_branch: None,
+                bridge_remote: "origin".to_string(),
+            },
+        )
+        .expect("init timeline");
+
+        let index = load_branch_index(repo.path(), "trunk").expect("load branch index");
+        let tracked = index.get("tracked.txt").expect("tracked row");
+        let object_path = timeline_objects_dir(repo.path()).join(&tracked.hash);
+        fs::remove_file(&object_path).expect("remove stored object");
+
+        repo.write_file("tracked.txt", "beta\n");
+
+        cmd_checkpoint(
+            repo.path(),
+            CheckpointArgs {
+                summary: "repair missing old object".to_string(),
+                agent: Some("test.agent".to_string()),
+                tags: vec![],
+                files: vec![],
+                strict_hash: true,
+                ignore_locks: false,
+                hash_jobs: None,
+                object_jobs: None,
+                burst: false,
+                allow_lossy_repair: false,
+            },
+        )
+        .expect("checkpoint succeeds after git-backed repair");
+
+        assert!(
+            object_path.exists(),
+            "expected missing object to be restored from git history"
+        );
+    }
+
+    #[test]
+    fn checkpoint_can_continue_with_explicit_lossy_repair_for_timeline_only_blobs() {
+        let repo = TestRepo::new("checkpoint-lossy-repair");
+        repo.git(&["init"]);
+        repo.git(&["config", "user.name", "Fugit Test"]);
+        repo.git(&["config", "user.email", "fugit-test@example.com"]);
+        repo.write_file("tracked.txt", "alpha\n");
+        repo.git(&["add", "."]);
+        repo.git(&["commit", "-m", "baseline"]);
+
+        cmd_init(
+            repo.path(),
+            InitArgs {
+                branch: "trunk".to_string(),
+                bridge_branch: None,
+                bridge_remote: "origin".to_string(),
+            },
+        )
+        .expect("init timeline");
+
+        repo.write_file("tracked.txt", "beta\n");
+        cmd_checkpoint(
+            repo.path(),
+            CheckpointArgs {
+                summary: "beta checkpoint".to_string(),
+                agent: Some("test.agent".to_string()),
+                tags: vec![],
+                files: vec![],
+                strict_hash: true,
+                ignore_locks: false,
+                hash_jobs: None,
+                object_jobs: None,
+                burst: false,
+                allow_lossy_repair: false,
+            },
+        )
+        .expect("beta checkpoint");
+
+        let beta_hash = load_branch_index(repo.path(), "trunk")
+            .expect("load branch index")
+            .get("tracked.txt")
+            .expect("tracked row")
+            .hash
+            .clone();
+        fs::remove_file(timeline_objects_dir(repo.path()).join(&beta_hash))
+            .expect("remove beta object");
+
+        repo.write_file("tracked.txt", "gamma\n");
+
+        let strict_err = cmd_checkpoint(
+            repo.path(),
+            CheckpointArgs {
+                summary: "gamma strict".to_string(),
+                agent: Some("test.agent".to_string()),
+                tags: vec![],
+                files: vec![],
+                strict_hash: true,
+                ignore_locks: false,
+                hash_jobs: None,
+                object_jobs: None,
+                burst: false,
+                allow_lossy_repair: false,
+            },
+        )
+        .expect_err("strict checkpoint should fail when timeline-only blob is missing");
+        assert!(
+            strict_err.to_string().contains("--allow-lossy-repair"),
+            "expected lossy repair hint, got: {strict_err:#}"
+        );
+
+        cmd_checkpoint(
+            repo.path(),
+            CheckpointArgs {
+                summary: "gamma lossy".to_string(),
+                agent: Some("test.agent".to_string()),
+                tags: vec![],
+                files: vec![],
+                strict_hash: true,
+                ignore_locks: false,
+                hash_jobs: None,
+                object_jobs: None,
+                burst: false,
+                allow_lossy_repair: true,
+            },
+        )
+        .expect("lossy repair checkpoint succeeds");
+
+        let current_hash = load_branch_index(repo.path(), "trunk")
+            .expect("load repaired branch index")
+            .get("tracked.txt")
+            .expect("tracked row after repair")
+            .hash
+            .clone();
+        assert_eq!(current_hash, hash_bytes(b"gamma\n"));
     }
 
     #[test]
