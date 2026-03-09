@@ -115,6 +115,7 @@ The same bundled skill package is distributed by:
 ```bash
 fugit --repo-root <project_path> init --branch trunk
 fugit --repo-root <project_path> status --json
+fugit --repo-root <project_path> status --json --summary-only
 fugit project add --name <project_name> --repo-root <project_path> --set-default
 fugit --repo-root <project_path> checkpoint \
   --summary "fugit migration baseline" \
@@ -133,6 +134,7 @@ fugit --repo-root . task request --agent agent.worker --focus compiler
 fugit --repo-root . task request --agent agent.worker --title-contains "Phase B"
 fugit --repo-root . task request --agent agent.worker --task-id <task_id>
 fugit --repo-root . task progress --task-id <task_id> --agent agent.worker --note "landed parser wiring"
+fugit --repo-root . task note --task-id <task_id> --agent agent.worker --artifact artifacts/report.json
 fugit --repo-root . checkpoint --summary "implemented feature X" --agent agent.worker --tag feature
 fugit --repo-root . task done --task-id <task_id> --agent agent.worker --summary "validated feature X" --command "cargo test" --regression "cargo test" --claim-next
 fugit --repo-root . log --limit 20
@@ -291,7 +293,9 @@ fugit --repo-root . task list --agent <agent_id> --mine --json
 fugit --repo-root . task list --jsonl --fields task_id,title,status
 fugit --repo-root . task list --status in_progress --json
 fugit --repo-root . task edit --task-id <task_id> --title "Updated title" --tag compiler
+fugit --repo-root . task claim --task-id <task_id> --agent <agent_id> --extend-only --claim-ttl-minutes 60
 fugit --repo-root . task progress --task-id <task_id> --note "waiting on benchmark rerun"
+fugit --repo-root . task note --task-id <task_id> --artifact artifacts/report.json --artifact artifacts/trace.log
 fugit --repo-root . task remove --task-id <task_id>
 fugit --repo-root . task approve --all-pending-auto-replenish --agent reviewer
 fugit --repo-root . task policy show --json
@@ -312,6 +316,8 @@ fugit --repo-root . task request --agent agent.worker --no-claim --max 3 --json
 fugit --repo-root . task request --agent agent.worker --skip-owned --json
 fugit --repo-root . task request --agent agent.worker --title-contains "compiler" --json
 fugit --repo-root . task request --agent agent.worker --task-id <task_id> --json
+fugit --repo-root . task request --agent agent.worker --json   # includes selection_reason
+fugit --repo-root . status --json --summary-only              # fast health polling without file list
 fugit --repo-root . task done --task-id <task_id> --claim-next --json
 fugit --repo-root . task reopen --task-id <task_id>
 ```

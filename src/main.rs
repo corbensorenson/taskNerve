@@ -168,6 +168,10 @@ struct StatusArgs {
     #[arg(long, default_value_t = false)]
     json: bool,
     #[arg(long, default_value_t = false)]
+    summary_only: bool,
+    #[arg(long, default_value_t = false)]
+    no_changes: bool,
+    #[arg(long, default_value_t = false)]
     strict_hash: bool,
     #[arg(long)]
     hash_jobs: Option<usize>,
@@ -921,6 +925,8 @@ struct FugitTask {
     approved_by_agent_id: Option<String>,
     #[serde(default)]
     progress_entries: Vec<TaskProgressEntry>,
+    #[serde(default)]
+    artifact_entries: Vec<TaskArtifactEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -935,6 +941,13 @@ struct TaskProgressEntry {
     at_utc: String,
     agent_id: String,
     note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TaskArtifactEntry {
+    at_utc: String,
+    agent_id: String,
+    artifact: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1584,6 +1597,8 @@ enum TaskAction {
         #[arg(long, default_value_t = false)]
         steal: bool,
         #[arg(long, default_value_t = false)]
+        extend_only: bool,
+        #[arg(long, default_value_t = false)]
         json: bool,
     },
     Done {
@@ -1617,6 +1632,16 @@ enum TaskAction {
         task_id: String,
         #[arg(long)]
         note: String,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Note {
+        #[arg(long)]
+        task_id: String,
+        #[arg(long = "artifact")]
+        artifacts: Vec<String>,
         #[arg(long)]
         agent: Option<String>,
         #[arg(long, default_value_t = false)]
@@ -2058,6 +2083,8 @@ fn cmd_quickstart(repo_root: &Path, args: QuickstartArgs) -> Result<()> {
         StatusArgs {
             limit: 20,
             json: false,
+            summary_only: false,
+            no_changes: false,
             strict_hash: false,
             hash_jobs: None,
             burst: false,
@@ -2487,18 +2514,26 @@ fn cmd_status(repo_root: &Path, args: StatusArgs) -> Result<()> {
     let hash_jobs = resolve_parallel_jobs(args.hash_jobs, args.burst);
     let new_index = scan_repo(repo_root, Some(&old_index), args.strict_hash, hash_jobs)?;
     let changes = diff_indexes(&old_index, &new_index);
+    let include_changes = !(args.summary_only || args.no_changes);
+    let visible_changes = if include_changes {
+        changes.iter().take(args.limit).collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
 
     let summary = json!({
         "schema_version": "timeline.status.v1",
         "generated_at_utc": now_utc(),
         "branch": active_branch,
         "hash_jobs": hash_jobs,
+        "change_limit": args.limit,
+        "changes_included": include_changes,
         "tracked_file_count": new_index.len(),
         "changed_file_count": changes.len(),
         "added_count": changes.iter().filter(|c| matches!(c.kind, ChangeKind::Added)).count(),
         "modified_count": changes.iter().filter(|c| matches!(c.kind, ChangeKind::Modified)).count(),
         "deleted_count": changes.iter().filter(|c| matches!(c.kind, ChangeKind::Deleted)).count(),
-        "changes": changes.iter().take(args.limit).collect::<Vec<_>>()
+        "changes": visible_changes
     });
 
     if args.json {
@@ -2514,6 +2549,9 @@ fn cmd_status(repo_root: &Path, args: StatusArgs) -> Result<()> {
             summary["deleted_count"].as_u64().unwrap_or(0),
             hash_jobs
         );
+        if !include_changes {
+            return Ok(());
+        }
         for change in changes.iter().take(args.limit) {
             let prefix = match change.kind {
                 ChangeKind::Added => "+",
@@ -4941,6 +4979,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                             completion_artifacts: Vec::new(),
                             completion_commands: Vec::new(),
                             progress_entries: Vec::new(),
+                            artifact_entries: Vec::new(),
                             source_key: task.source_key.clone(),
                             source_plan: Some(plan_source.clone()),
                             awaiting_confirmation: false,
@@ -5058,6 +5097,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                             completion_artifacts: Vec::new(),
                             completion_commands: Vec::new(),
                             progress_entries: Vec::new(),
+                            artifact_entries: Vec::new(),
                             source_key: row.source_key.clone(),
                             source_plan: Some(plan_source.clone()),
                             awaiting_confirmation: false,
@@ -5254,6 +5294,42 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             }
 
             let Some((task_index, dispatch_kind)) = candidates.first().copied() else {
+                let request_reason_value =
+                    requested_task_id
+                        .as_deref()
+                        .map(|_| match requested_task_index {
+                            None => "task_not_found".to_string(),
+                            Some(task_index) => specific_task_unavailable_reason(
+                                &state,
+                                task_index,
+                                &agent_id,
+                                !no_steal,
+                                respect_date_gates,
+                                steal_after_minutes,
+                                now,
+                            ),
+                        });
+                let date_gate_filtered = respect_date_gates
+                    && requested_task_id.is_none()
+                    && task_request_has_date_gated_match(
+                        &state,
+                        &agent_id,
+                        &filters,
+                        !no_steal,
+                        !skip_owned,
+                        steal_after_minutes,
+                        now,
+                    );
+                let selection_reason = task_request_failure_reason(
+                    requested_task_id.as_deref(),
+                    request_reason_value.as_deref(),
+                    auto_replenish
+                        .pending_confirmation_task_ids
+                        .iter()
+                        .next()
+                        .is_some(),
+                    date_gate_filtered,
+                );
                 if state_changed
                     || !auto_replenish.created_task_ids.is_empty()
                     || !auto_replenish.updated_task_ids.is_empty()
@@ -5283,20 +5359,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     "max": max,
                     "requested_task_id": requested_task_id,
                     "skip_owned": skip_owned,
-                    "request_reason": requested_task_id.as_deref().map(|_| {
-                        match requested_task_index {
-                            None => "task_not_found".to_string(),
-                            Some(task_index) => specific_task_unavailable_reason(
-                                &state,
-                                task_index,
-                                &agent_id,
-                                !no_steal,
-                                respect_date_gates,
-                                steal_after_minutes,
-                                now,
-                            ),
-                        }
-                    }),
+                    "selection_reason": selection_reason,
+                    "request_reason": request_reason_value,
                     "filters": {
                         "tags": filters.required_tags,
                         "focus": filters.focus,
@@ -5410,6 +5474,11 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 "requested_task_id": requested_task_id,
                 "skip_owned": skip_owned,
                 "dispatch_kind": dispatch_kind.as_str(),
+                "selection_reason": task_request_selection_reason(
+                    &task,
+                    dispatch_kind,
+                    requested_task_id.as_deref(),
+                ),
                 "filters": {
                     "tags": filters.required_tags,
                     "focus": filters.focus,
@@ -5451,6 +5520,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             agent,
             claim_ttl_minutes,
             steal,
+            extend_only,
             json,
         } => {
             let agent_id = agent.unwrap_or_else(default_agent_id);
@@ -5462,6 +5532,30 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             let task = &state.tasks[task_index];
             if task.status == TaskStatus::Done {
                 bail!("task already completed: {}", task.task_id);
+            }
+            if extend_only {
+                if task.claimed_by_agent_id.as_deref() != Some(agent_id.as_str()) {
+                    bail!(
+                        "task {} is not currently claimed by {}; cannot extend",
+                        task.task_id,
+                        agent_id
+                    );
+                }
+                extend_task_claim(&mut state.tasks[task_index], claim_ttl_minutes, now);
+                state.updated_at_utc = now_utc();
+                write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+                let task = state.tasks[task_index].clone();
+                append_task_timeline_event(repo_root, &task, &agent_id, "claim_extend", None)?;
+                let payload = task_to_json_payload(&task, &task_status_map(&state));
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    println!(
+                        "[fugit-task] extended claim {} by {}",
+                        state.tasks[task_index].task_id, agent_id
+                    );
+                }
+                return Ok(());
             }
             if task.awaiting_confirmation {
                 bail!(
@@ -5490,11 +5584,9 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
             let task = state.tasks[task_index].clone();
             append_task_timeline_event(repo_root, &task, &agent_id, "claim", None)?;
+            let payload = task_to_json_payload(&task, &task_status_map(&state));
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&state.tasks[task_index])?
-                );
+                println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!(
                     "[fugit-task] claimed {} by {}",
@@ -5771,6 +5863,48 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     payload["task_id"].as_str().unwrap_or("unknown"),
                     payload["progress_count"].as_u64().unwrap_or(0),
                     payload["last_progress_note"].as_str().unwrap_or("")
+                );
+            }
+        }
+        TaskAction::Note {
+            task_id,
+            artifacts,
+            agent,
+            json,
+        } => {
+            let agent_id = normalize_agent_id(agent);
+            let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id)
+            else {
+                bail!("task not found: {}", task_id);
+            };
+            if state.tasks[task_index].status == TaskStatus::Done {
+                bail!(
+                    "task already completed: {}",
+                    state.tasks[task_index].task_id
+                );
+            }
+            if let Some(owner) = state.tasks[task_index].claimed_by_agent_id.as_deref()
+                && owner != agent_id
+            {
+                bail!(
+                    "task {} is claimed by {}; cannot attach artifacts as {}",
+                    state.tasks[task_index].task_id,
+                    owner,
+                    agent_id
+                );
+            }
+            let task = add_task_artifact_entries(&mut state, &task_id, &agent_id, artifacts)?;
+            write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+            append_task_timeline_event(repo_root, &task, &agent_id, "note", None)?;
+            let payload = task_to_json_payload(&task, &task_status_map(&state));
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!(
+                    "[fugit-task] note task_id={} artifact_count={} last_artifact={}",
+                    payload["task_id"].as_str().unwrap_or("unknown"),
+                    payload["artifact_count"].as_u64().unwrap_or(0),
+                    payload["last_artifact"].as_str().unwrap_or("")
                 );
             }
         }
@@ -8689,8 +8823,14 @@ fn task_gui_html() -> &'static str {
         const completionArtifacts = (task.completion_artifacts || []).length > 0
           ? `<div class="meta-row">artifacts: ${escapeHtml((task.completion_artifacts || []).join(", "))}</div>`
           : "";
+        const progressArtifacts = (task.artifact_entries || []).length > 0
+          ? `<div class="meta-row">handoff artifacts: ${escapeHtml((task.artifact_entries || []).map((entry) => entry.artifact).join(", "))}</div>`
+          : "";
         const completionCommands = (task.completion_commands || []).length > 0
           ? `<div class="meta-row">commands: ${escapeHtml((task.completion_commands || []).join(" | "))}</div>`
+          : "";
+        const progressNotes = (task.progress_entries || []).length > 0
+          ? `<div class="meta-row">progress: ${escapeHtml((task.progress_entries || []).map((entry) => entry.note).join(" | "))}</div>`
           : "";
         const deps = (task.depends_on || []).join(", ");
         const blockedBy = (task.blocked_by || []).join(", ");
@@ -8719,7 +8859,9 @@ fn task_gui_html() -> &'static str {
             ${autoReplenishMeta}
             ${completedSummary}
             ${completionArtifacts}
+            ${progressArtifacts}
             ${completionCommands}
+            ${progressNotes}
             <div class="state">${stateLine}</div>
             <div class="tags">${tags}</div>
             <div class="task-actions">
@@ -9123,6 +9265,8 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                 "type": "object",
                 "properties": {
                     "limit": { "type": "integer", "minimum": 1 },
+                    "summary_only": { "type": "boolean" },
+                    "no_changes": { "type": "boolean" },
                     "strict_hash": { "type": "boolean" },
                     "hash_jobs": { "type": "integer", "minimum": 1 },
                     "burst": { "type": "boolean" }
@@ -9390,7 +9534,8 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "task_id": { "type": "string" },
                     "agent": { "type": "string" },
                     "claim_ttl_minutes": { "type": "integer" },
-                    "steal": { "type": "boolean" }
+                    "steal": { "type": "boolean" },
+                    "extend_only": { "type": "boolean" }
                 }
             }
         }),
@@ -9424,6 +9569,19 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                 "properties": {
                     "task_id": { "type": "string" },
                     "note": { "type": "string" },
+                    "agent": { "type": "string" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_task_note",
+            "description": "Attach one or more artifact breadcrumbs to a task for handoff and resume.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["task_id", "artifacts"],
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "artifacts": { "type": "array", "items": { "type": "string" } },
                     "agent": { "type": "string" }
                 }
             }
@@ -9745,6 +9903,20 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             if let Some(limit) = args.get("limit").and_then(serde_json::Value::as_u64) {
                 cli_args.push("--limit".to_string());
                 cli_args.push(limit.to_string());
+            }
+            if args
+                .get("summary_only")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--summary-only".to_string());
+            }
+            if args
+                .get("no_changes")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--no-changes".to_string());
             }
             if args
                 .get("strict_hash")
@@ -10470,6 +10642,13 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             {
                 cli_args.push("--steal".to_string());
             }
+            if args
+                .get("extend_only")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--extend-only".to_string());
+            }
             run_self_cli_json(repo_root, &cli_args)?
         }
         "fugit_task_done" => {
@@ -10576,6 +10755,34 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 note.to_string(),
                 "--json".to_string(),
             ];
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_task_note" => {
+            let task_id = args
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_task_note requires task_id"))?;
+            let artifacts = args
+                .get("artifacts")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| anyhow!("fugit_task_note requires artifacts"))?;
+            let mut cli_args = vec![
+                "task".to_string(),
+                "note".to_string(),
+                "--task-id".to_string(),
+                task_id.to_string(),
+                "--json".to_string(),
+            ];
+            for artifact in artifacts {
+                if let Some(artifact_value) = artifact.as_str() {
+                    cli_args.push("--artifact".to_string());
+                    cli_args.push(artifact_value.to_string());
+                }
+            }
             if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
                 cli_args.push("--agent".to_string());
                 cli_args.push(agent.to_string());
@@ -13599,6 +13806,7 @@ fn sync_advisor_generated_tasks(
                 completion_artifacts: Vec::new(),
                 completion_commands: Vec::new(),
                 progress_entries: Vec::new(),
+                artifact_entries: Vec::new(),
                 source_key: task.source_key.clone(),
                 source_plan: Some(plan_source.clone()),
                 awaiting_confirmation: false,
@@ -14895,6 +15103,7 @@ fn build_manual_task(
         completion_artifacts: Vec::new(),
         completion_commands: Vec::new(),
         progress_entries: Vec::new(),
+        artifact_entries: Vec::new(),
         source_key: None,
         source_plan: None,
         awaiting_confirmation: false,
@@ -15496,6 +15705,7 @@ fn build_auto_replenish_task(agent_id: &str, require_confirmation: bool) -> Fugi
         completion_artifacts: Vec::new(),
         completion_commands: Vec::new(),
         progress_entries: Vec::new(),
+        artifact_entries: Vec::new(),
         source_key: Some(auto_replenish_source_key(agent_id)),
         source_plan: Some(AUTO_REPLENISH_SOURCE_PLAN.to_string()),
         awaiting_confirmation: require_confirmation,
@@ -15837,6 +16047,7 @@ fn task_to_json_payload(
         "claimed_by_agent_id": task.claimed_by_agent_id,
         "created_at_utc": task.created_at_utc,
         "updated_at_utc": task.updated_at_utc,
+        "claim_started_at_utc": task.claim_started_at_utc,
         "completed_at_utc": task.completed_at_utc,
         "completed_by_agent_id": task.completed_by_agent_id,
         "completed_summary": task.completed_summary,
@@ -15853,6 +16064,9 @@ fn task_to_json_payload(
         "progress_entries": task.progress_entries,
         "progress_count": task.progress_entries.len(),
         "last_progress_note": task.progress_entries.last().map(|entry| entry.note.clone()),
+        "artifact_entries": task.artifact_entries,
+        "artifact_count": task.artifact_entries.len(),
+        "last_artifact": task.artifact_entries.last().map(|entry| entry.artifact.clone()),
         "schedule": {
             "ready_now": matches!(schedule_state, TaskScheduleState::Ready),
             "not_before": date_window
@@ -15862,6 +16076,92 @@ fn task_to_json_payload(
                 .not_after
                 .map(|value| value.format("%Y-%m-%d").to_string()),
             "source": date_window.source
+        }
+    })
+}
+
+fn task_request_selection_reason(
+    task: &FugitTask,
+    dispatch_kind: TaskDispatchKind,
+    requested_task_id: Option<&str>,
+) -> &'static str {
+    if requested_task_id.is_some() {
+        return "specific_task";
+    }
+    match dispatch_kind {
+        TaskDispatchKind::OwnedClaim => "owned_claim",
+        TaskDispatchKind::Steal => "stale_claim_steal",
+        TaskDispatchKind::Open => {
+            if task_is_auto_replenish(task) {
+                "auto_replenish_fallback"
+            } else {
+                "highest_priority_ready"
+            }
+        }
+    }
+}
+
+fn task_request_failure_reason(
+    requested_task_id: Option<&str>,
+    request_reason: Option<&str>,
+    auto_replenish_pending_confirmation: bool,
+    date_gate_filtered: bool,
+) -> &'static str {
+    if date_gate_filtered {
+        return "date_gate_filtered";
+    }
+    if let Some(reason) = request_reason {
+        if reason.starts_with("not_before:") {
+            return "date_gate_filtered";
+        }
+        if requested_task_id.is_some() && reason == "task_not_found" {
+            return "task_not_found";
+        }
+        if requested_task_id.is_some() {
+            return "specific_task_unavailable";
+        }
+    }
+    if auto_replenish_pending_confirmation {
+        "auto_replenish_waiting_confirmation"
+    } else {
+        "no_ready_tasks"
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn task_request_has_date_gated_match(
+    state: &TaskState,
+    agent_id: &str,
+    filters: &TaskQueryFilter,
+    allow_steal: bool,
+    include_owned_claims: bool,
+    steal_after_minutes: i64,
+    now: DateTime<Utc>,
+) -> bool {
+    let status_map = task_status_map(state);
+    let today = now.date_naive();
+    state.tasks.iter().any(|task| {
+        if task.status == TaskStatus::Done || task_is_auto_replenish(task) {
+            return false;
+        }
+        if !task_matches_query_filter(task, filters) {
+            return false;
+        }
+        let Some(reason) = task_schedule_block_reason(task, today) else {
+            return false;
+        };
+        if !reason.starts_with("not_before:")
+            || !task_is_dispatchable_without_date_gate(task, &status_map)
+        {
+            return false;
+        }
+        match task.status {
+            TaskStatus::Open => true,
+            TaskStatus::Claimed => {
+                (include_owned_claims && task.claimed_by_agent_id.as_deref() == Some(agent_id))
+                    || (allow_steal && task_claim_is_stale(task, now, steal_after_minutes))
+            }
+            TaskStatus::Done => false,
         }
     })
 }
@@ -16015,6 +16315,36 @@ fn add_task_progress_entry(
         note: normalized_note,
     };
     state.tasks[task_index].progress_entries.push(entry);
+    state.tasks[task_index].updated_at_utc = now_utc();
+    state.updated_at_utc = now_utc();
+    Ok(state.tasks[task_index].clone())
+}
+
+fn add_task_artifact_entries(
+    state: &mut TaskState,
+    task_id: &str,
+    agent_id: &str,
+    artifacts: Vec<String>,
+) -> Result<FugitTask> {
+    let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id) else {
+        bail!("task not found: {}", task_id);
+    };
+    let normalized_artifacts = artifacts
+        .into_iter()
+        .map(|artifact| normalize_required_text(artifact, "task artifact"))
+        .collect::<Result<Vec<_>>>()?;
+    if normalized_artifacts.is_empty() {
+        bail!("task note requires at least one --artifact");
+    }
+    for artifact in normalized_artifacts {
+        state.tasks[task_index]
+            .artifact_entries
+            .push(TaskArtifactEntry {
+                at_utc: now_utc(),
+                agent_id: agent_id.to_string(),
+                artifact,
+            });
+    }
     state.tasks[task_index].updated_at_utc = now_utc();
     state.updated_at_utc = now_utc();
     Ok(state.tasks[task_index].clone())
@@ -16511,6 +16841,7 @@ fn sync_plan_into_task_state(
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
                     progress_entries: Vec::new(),
+                    artifact_entries: Vec::new(),
                     source_key: row.source_key.clone(),
                     source_plan: Some(plan_source.to_string()),
                     awaiting_confirmation: false,
@@ -17547,6 +17878,18 @@ fn apply_task_claim(
     task.completion_commands.clear();
 }
 
+fn extend_task_claim(task: &mut FugitTask, claim_ttl_minutes: i64, now: DateTime<Utc>) {
+    task.updated_at_utc = format_utc(now);
+    task.claim_expires_at_utc = if claim_ttl_minutes <= 0 {
+        None
+    } else {
+        Some(format_utc(now + Duration::minutes(claim_ttl_minutes)))
+    };
+    if task.claim_started_at_utc.is_none() {
+        task.claim_started_at_utc = Some(format_utc(now));
+    }
+}
+
 fn task_claim_is_expired(task: &FugitTask, now: DateTime<Utc>) -> bool {
     if task.status != TaskStatus::Claimed {
         return false;
@@ -18179,6 +18522,7 @@ mod tests {
             completion_artifacts: Vec::new(),
             completion_commands: Vec::new(),
             progress_entries: Vec::new(),
+            artifact_entries: Vec::new(),
             source_key: None,
             source_plan: None,
             awaiting_confirmation: false,
@@ -18260,6 +18604,7 @@ mod tests {
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
                     progress_entries: Vec::new(),
+                    artifact_entries: Vec::new(),
                     source_key: None,
                     source_plan: None,
                     awaiting_confirmation: false,
@@ -18287,6 +18632,7 @@ mod tests {
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
                     progress_entries: Vec::new(),
+                    artifact_entries: Vec::new(),
                     source_key: None,
                     source_plan: None,
                     awaiting_confirmation: false,
@@ -18334,6 +18680,7 @@ mod tests {
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
                     progress_entries: Vec::new(),
+                    artifact_entries: Vec::new(),
                     source_key: None,
                     source_plan: None,
                     awaiting_confirmation: false,
@@ -18361,6 +18708,7 @@ mod tests {
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
                     progress_entries: Vec::new(),
+                    artifact_entries: Vec::new(),
                     source_key: None,
                     source_plan: None,
                     awaiting_confirmation: false,
@@ -18388,6 +18736,7 @@ mod tests {
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
                     progress_entries: Vec::new(),
+                    artifact_entries: Vec::new(),
                     source_key: None,
                     source_plan: None,
                     awaiting_confirmation: false,
@@ -18415,6 +18764,7 @@ mod tests {
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
                     progress_entries: Vec::new(),
+                    artifact_entries: Vec::new(),
                     source_key: None,
                     source_plan: None,
                     awaiting_confirmation: false,
@@ -18469,6 +18819,7 @@ mod tests {
                 completion_artifacts: Vec::new(),
                 completion_commands: Vec::new(),
                 progress_entries: Vec::new(),
+                artifact_entries: Vec::new(),
                 source_key: None,
                 source_plan: None,
                 awaiting_confirmation: false,
@@ -18532,6 +18883,7 @@ mod tests {
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
                     progress_entries: Vec::new(),
+                    artifact_entries: Vec::new(),
                     source_key: None,
                     source_plan: None,
                     awaiting_confirmation: false,
@@ -18559,6 +18911,7 @@ mod tests {
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
                     progress_entries: Vec::new(),
+                    artifact_entries: Vec::new(),
                     source_key: None,
                     source_plan: None,
                     awaiting_confirmation: false,
@@ -18668,6 +19021,49 @@ mod tests {
     }
 
     #[test]
+    fn add_task_artifact_entries_appends_artifacts() {
+        let mut state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![sample_task(
+                "task_artifact",
+                "artifact",
+                1,
+                TaskStatus::Open,
+            )],
+        };
+
+        let task = add_task_artifact_entries(
+            &mut state,
+            "task_artifact",
+            "agent.worker",
+            vec![
+                "artifacts/report.json".to_string(),
+                "artifacts/trace.log".to_string(),
+            ],
+        )
+        .expect("artifact entry");
+        assert_eq!(task.artifact_entries.len(), 2);
+        assert_eq!(task.artifact_entries[0].artifact, "artifacts/report.json");
+        assert_eq!(task.artifact_entries[1].artifact, "artifacts/trace.log");
+    }
+
+    #[test]
+    fn extend_task_claim_updates_expiry_without_resetting_owner() {
+        let now = parse_rfc3339_utc("2026-03-09T12:00:00Z").expect("fixed now");
+        let mut task = sample_task("task_claim", "claim", 1, TaskStatus::Open);
+        apply_task_claim(&mut task, "agent.worker", 30, now);
+        let started_at = task.claim_started_at_utc.clone();
+        extend_task_claim(&mut task, 90, now + Duration::minutes(10));
+        assert_eq!(task.claimed_by_agent_id.as_deref(), Some("agent.worker"));
+        assert_eq!(task.claim_started_at_utc, started_at);
+        assert_eq!(
+            task.claim_expires_at_utc.as_deref(),
+            Some("2026-03-09T13:40:00Z")
+        );
+    }
+
+    #[test]
     fn specific_task_request_targets_requested_open_task() {
         let now = Utc::now();
         let state = TaskState {
@@ -18720,6 +19116,7 @@ mod tests {
                 completion_artifacts: Vec::new(),
                 completion_commands: Vec::new(),
                 progress_entries: Vec::new(),
+                artifact_entries: Vec::new(),
                 source_key: None,
                 source_plan: None,
                 awaiting_confirmation: false,
@@ -18769,6 +19166,36 @@ mod tests {
         .expect("expected normal task");
         assert_eq!(selected.1, TaskDispatchKind::Open);
         assert_eq!(state.tasks[selected.0].task_id, "task_real");
+    }
+
+    #[test]
+    fn task_request_selection_reason_labels_dispatch_paths() {
+        let auto_task = build_auto_replenish_task("agent.worker", false);
+        assert_eq!(
+            task_request_selection_reason(&auto_task, TaskDispatchKind::Open, None),
+            "auto_replenish_fallback"
+        );
+        let standard_task = sample_task("task_real", "real", 5, TaskStatus::Open);
+        assert_eq!(
+            task_request_selection_reason(&standard_task, TaskDispatchKind::Open, None),
+            "highest_priority_ready"
+        );
+        assert_eq!(
+            task_request_selection_reason(&standard_task, TaskDispatchKind::OwnedClaim, None),
+            "owned_claim"
+        );
+        assert_eq!(
+            task_request_selection_reason(&standard_task, TaskDispatchKind::Steal, None),
+            "stale_claim_steal"
+        );
+        assert_eq!(
+            task_request_selection_reason(
+                &standard_task,
+                TaskDispatchKind::Open,
+                Some("task_real"),
+            ),
+            "specific_task"
+        );
     }
 
     #[test]
@@ -19282,6 +19709,7 @@ Prefer evidence-backed tasks.
             completion_artifacts: Vec::new(),
             completion_commands: Vec::new(),
             progress_entries: Vec::new(),
+            artifact_entries: Vec::new(),
             source_key: None,
             source_plan: None,
             awaiting_confirmation: false,
@@ -19345,6 +19773,7 @@ Prefer evidence-backed tasks.
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
                     progress_entries: Vec::new(),
+                    artifact_entries: Vec::new(),
                     source_key: None,
                     source_plan: None,
                     awaiting_confirmation: false,
@@ -19372,6 +19801,7 @@ Prefer evidence-backed tasks.
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
                     progress_entries: Vec::new(),
+                    artifact_entries: Vec::new(),
                     source_key: None,
                     source_plan: None,
                     awaiting_confirmation: false,
@@ -19428,6 +19858,7 @@ Prefer evidence-backed tasks.
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
                     progress_entries: Vec::new(),
+                    artifact_entries: Vec::new(),
                     source_key: None,
                     source_plan: None,
                     awaiting_confirmation: false,
@@ -19455,6 +19886,7 @@ Prefer evidence-backed tasks.
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
                     progress_entries: Vec::new(),
+                    artifact_entries: Vec::new(),
                     source_key: None,
                     source_plan: None,
                     awaiting_confirmation: false,
@@ -19495,6 +19927,7 @@ Prefer evidence-backed tasks.
                 completion_artifacts: vec!["artifact".to_string()],
                 completion_commands: vec!["cargo test".to_string()],
                 progress_entries: Vec::new(),
+                artifact_entries: Vec::new(),
                 source_key: Some("A-01".to_string()),
                 source_plan: Some("the_final_plan.md".to_string()),
                 awaiting_confirmation: false,
@@ -19541,6 +19974,7 @@ Prefer evidence-backed tasks.
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
                     progress_entries: Vec::new(),
+                    artifact_entries: Vec::new(),
                     source_key: Some("A-01".to_string()),
                     source_plan: Some("the_final_plan.md".to_string()),
                     awaiting_confirmation: false,
@@ -19568,6 +20002,7 @@ Prefer evidence-backed tasks.
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
                     progress_entries: Vec::new(),
+                    artifact_entries: Vec::new(),
                     source_key: Some("A-02".to_string()),
                     source_plan: Some("the_final_plan.md".to_string()),
                     awaiting_confirmation: false,

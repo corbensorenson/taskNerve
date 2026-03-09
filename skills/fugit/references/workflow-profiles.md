@@ -27,12 +27,16 @@ Use when multiple agents should coordinate by pulling from a shared queue.
 - `fugit --repo-root . task list --jsonl --fields task_id,title,status`
 - `fugit --repo-root . task list --agent <agent_id> --mine --json`
 - `fugit --repo-root . task status --agent <agent_id> --json`
+- `fugit --repo-root . status --json --summary-only`
 - `fugit --repo-root . task request --agent <agent_id> --no-claim --max 3 --json`
+- `task request --json` returns `selection_reason` for agent-side branching.
 - `fugit --repo-root . task policy show --json`
 - `fugit --repo-root . task approve --all-pending-auto-replenish --agent <agent_id>`
 - `fugit --repo-root . bridge auto-sync show --json`
 - `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --summary "done summary" --regression "<test command>"`
 - `fugit --repo-root . task progress --task-id <task_id> --agent <agent_id> --note "implemented parser wiring"`
+- `fugit --repo-root . task note --task-id <task_id> --agent <agent_id> --artifact artifacts/report.json`
+- `fugit --repo-root . task claim --task-id <task_id> --agent <agent_id> --extend-only --claim-ttl-minutes 60`
 - `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --claim-next --regression "<test command>"`
 - `fugit --repo-root . check run --json`
 - `fugit --repo-root . check deprecate --check-id <check_id> --reason "obsolete"`

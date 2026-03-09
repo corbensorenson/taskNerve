@@ -19,6 +19,8 @@
 - Added `task current`, `in_progress` as a status alias for `claimed`, and `bridge sync-github --repair-journal` for lossy recovery from malformed event journal lines.
 - Added `task request --skip-owned` so agents can pull the next ready task without re-dispatching their current claim.
 - Added `task status`, `task progress`, `task list --mine`, date-gated task filtering with `task request --ignore-date-gates`, and `task done --claim-next` for tighter agent execution loops.
+- Added `task claim --extend-only`, `task note --artifact ...`, and machine-readable `selection_reason` on `task request --json` for cleaner long-running agent loops and handoff breadcrumbs.
+- Added `status --summary-only` / `--no-changes`, and included consistent claim lease metadata on task claim/request/show/list JSON payloads.
 - Added default-on task auto-replenish fallback: when no real work is dispatchable, `task request` seeds per-agent scout tasks, with `task policy show|set`, `task approve`, GUI approval controls, and MCP tools for operating the flow.
 - Added default-on background bridge auto-sync after `task done`, with task-note commit subjects, `bridge auto-sync show|set`, and manual detached `bridge sync-github --background`.
 - Added default-on quality gates: `task done` now registers regression/benchmark checks, `check add|list|run|deprecate|policy` manages them, and bridge sync runs active checks before commit/push.

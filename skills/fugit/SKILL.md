@@ -23,6 +23,8 @@ Use this skill when any of the following are true:
 
 2. Inspect current state:
 - `fugit --repo-root . status --limit 20`
+- For cheap agent polling without the full changed-file payload:
+- `fugit --repo-root . status --json --summary-only`
 
 3. Register projects when coordinating across multiple repos:
 - `fugit project add --name <project_name> --repo-root <abs_repo_path> --set-default`
@@ -55,6 +57,7 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . task request --agent <agent_id> --skip-owned --json`
 - To request a specific task after scanning the queue:
 - `fugit --repo-root . task request --agent <agent_id> --task-id <task_id> --json`
+- `task request --json` also returns `selection_reason` so agents can branch on why a task was or was not selected.
 - optional dry assignment: `fugit --repo-root . task request --agent <agent_id> --no-claim`
 
 6. Capture progress as checkpoints:
@@ -66,8 +69,12 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --summary "<what finished>" --regression "<test command>"`
 - To leave a lightweight execution breadcrumb without changing task state:
 - `fugit --repo-root . task progress --task-id <task_id> --agent <agent_id> --note "<what changed>"`
+- To attach machine-readable artifact breadcrumbs for handoff/resume:
+- `fugit --repo-root . task note --task-id <task_id> --agent <agent_id> --artifact <path>`
 - To close work and pull the next ready item in one round trip:
 - `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --claim-next --regression "<test command>"`
+- To renew ownership on a long-running claim without re-claim side effects:
+- `fugit --repo-root . task claim --task-id <task_id> --agent <agent_id> --extend-only --claim-ttl-minutes 60`
 - Default quality gate is on: every completed task should carry at least one regression or benchmark check, and active checks run before bridge sync.
 - Register or retire checks explicitly when needed:
 - `fugit --repo-root . check add --kind regression --task-id <task_id> --command "<test command>"`
