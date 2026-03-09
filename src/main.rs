@@ -4939,7 +4939,6 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                             &filters,
                             peek_open,
                             !ignore_date_gates,
-                            steal_after_minutes,
                             Utc::now(),
                             json || include_context,
                             current["task"]["task_id"].as_str()
