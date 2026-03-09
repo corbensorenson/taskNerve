@@ -2081,6 +2081,12 @@ struct JsonCommandError {
     payload: serde_json::Value,
 }
 
+impl JsonCommandError {
+    fn new(payload: serde_json::Value) -> Self {
+        Self { payload }
+    }
+}
+
 impl std::fmt::Display for JsonCommandError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.payload)
