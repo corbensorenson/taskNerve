@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  rust-quality:
+    name: Rust Quality (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Format Check
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+  installer-smoke-unix:
+    name: Installer Smoke (Unix)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Binary
+        run: |
+          bash ./install.sh --install-dir "$RUNNER_TEMP/fugit-bin" --skip-rust-install --with-skill --overwrite-skill
+
+      - name: Validate Binary
+        run: |
+          "$RUNNER_TEMP/fugit-bin/fugit" --help
+          "$RUNNER_TEMP/fugit-bin/fugit" skill doctor
+
+  installer-smoke-windows:
+    name: Installer Smoke (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Binary
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 -InstallDir "$env:RUNNER_TEMP\fugit-bin" -SkipRustInstall -NoPathUpdate -WithSkill -OverwriteSkill
+
+      - name: Validate Binary
+        shell: pwsh
+        run: |
+          & "$env:RUNNER_TEMP\fugit-bin\fugit.exe" --help
+          & "$env:RUNNER_TEMP\fugit-bin\fugit.exe" skill doctor

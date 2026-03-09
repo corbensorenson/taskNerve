@@ -1,0 +1,6491 @@
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    fs,
+    io::{BufRead, BufReader, Read, Write},
+    net::{TcpListener, TcpStream},
+    path::{Path, PathBuf},
+    process::{Command as ProcessCommand, Stdio},
+    time::UNIX_EPOCH,
+};
+
+use anyhow::{Context, Result, anyhow, bail};
+use chrono::{DateTime, Duration, Utc};
+use clap::{Parser, Subcommand, ValueEnum};
+use globset::Glob;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::json;
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+use walkdir::WalkDir;
+
+const TIMELINE_ROOT_DIR: &str = ".fugit";
+const SCHEMA_CONFIG: &str = "timeline.config.v1";
+const SCHEMA_BRANCHES: &str = "timeline.branches.v1";
+const SCHEMA_FILE_RECORD: &str = "timeline.file_record.v1";
+const SCHEMA_EVENT: &str = "timeline.event.v1";
+const SCHEMA_LOCKS: &str = "timeline.locks.v1";
+const SCHEMA_TASKS: &str = "timeline.tasks.v1";
+const SCHEMA_PROJECTS: &str = "fugit.projects.v1";
+const SCHEMA_BRIDGE_AUTH: &str = "timeline.bridge_auth.v1";
+const BACKEND_MODE_GIT_BRIDGE: &str = "git_bridge";
+const BACKEND_MODE_FUGIT_CLOUD: &str = "fugit_cloud";
+const FUGIT_SKILL_ID: &str = "fugit";
+const FUGIT_SKILL_MD: &str = include_str!("../skills/fugit/SKILL.md");
+const FUGIT_SKILL_OPENAI_YAML: &str = include_str!("../skills/fugit/agents/openai.yaml");
+const FUGIT_SKILL_REF_WORKFLOW_PROFILES: &str =
+    include_str!("../skills/fugit/references/workflow-profiles.md");
+const FUGIT_SKILL_REF_RECOVERY_PLAYBOOKS: &str =
+    include_str!("../skills/fugit/references/recovery-playbooks.md");
+
+const IGNORE_ROOT_ENTRIES: &[&str] = &[
+    ".git",
+    ".fugit",
+    ".tmp",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".next",
+    ".turbo",
+    ".cache",
+    ".idea",
+    ".vscode",
+];
+
+#[derive(Debug, Parser)]
+#[command(name = "fugit")]
+#[command(about = "Timeline-first versioning with GitHub bridge for multi-agent work")]
+struct Cli {
+    #[arg(long, default_value = ".")]
+    repo_root: PathBuf,
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    Init(InitArgs),
+    Quickstart(QuickstartArgs),
+    Doctor(DoctorArgs),
+    Skill(SkillArgs),
+    Status(StatusArgs),
+    Checkpoint(CheckpointArgs),
+    Log(LogArgs),
+    Branch(BranchArgs),
+    Backend(BackendArgs),
+    Bridge(BridgeArgs),
+    Checkout(CheckoutArgs),
+    Gc(GcArgs),
+    Lock(LockArgs),
+    Task(TaskArgs),
+    Project(ProjectArgs),
+    Mcp(McpArgs),
+}
+
+#[derive(Debug, Parser)]
+struct SkillArgs {
+    #[command(subcommand)]
+    action: SkillAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum SkillAction {
+    Show {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        #[arg(long, default_value_t = false)]
+        include_openai_yaml: bool,
+    },
+    InstallCodex {
+        #[arg(long, default_value_t = false)]
+        overwrite: bool,
+    },
+    Doctor {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Parser)]
+struct InitArgs {
+    #[arg(long, default_value = "trunk")]
+    branch: String,
+    #[arg(long)]
+    bridge_branch: Option<String>,
+    #[arg(long, default_value = "origin")]
+    bridge_remote: String,
+}
+
+#[derive(Debug, Parser)]
+struct QuickstartArgs {
+    #[arg(long, default_value = "trunk")]
+    branch: String,
+    #[arg(long)]
+    summary: Option<String>,
+    #[arg(long)]
+    agent: Option<String>,
+    #[arg(long = "tag")]
+    tags: Vec<String>,
+    #[arg(long, default_value_t = false)]
+    status_only: bool,
+}
+
+#[derive(Debug, Parser)]
+struct DoctorArgs {
+    #[arg(long, default_value_t = false)]
+    json: bool,
+}
+
+#[derive(Debug, Parser)]
+struct StatusArgs {
+    #[arg(long, default_value_t = 50)]
+    limit: usize,
+    #[arg(long, default_value_t = false)]
+    json: bool,
+    #[arg(long, default_value_t = false)]
+    strict_hash: bool,
+    #[arg(long)]
+    hash_jobs: Option<usize>,
+    #[arg(long, default_value_t = false)]
+    burst: bool,
+}
+
+#[derive(Debug, Parser)]
+struct CheckpointArgs {
+    #[arg(long)]
+    summary: String,
+    #[arg(long)]
+    agent: Option<String>,
+    #[arg(long = "tag")]
+    tags: Vec<String>,
+    #[arg(long = "file")]
+    files: Vec<String>,
+    #[arg(long, default_value_t = false)]
+    strict_hash: bool,
+    #[arg(long, default_value_t = false)]
+    ignore_locks: bool,
+    #[arg(long)]
+    hash_jobs: Option<usize>,
+    #[arg(long)]
+    object_jobs: Option<usize>,
+    #[arg(long, default_value_t = false)]
+    burst: bool,
+}
+
+#[derive(Debug, Parser)]
+struct LogArgs {
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+    #[arg(long, default_value_t = false)]
+    json: bool,
+    #[arg(long)]
+    branch: Option<String>,
+}
+
+#[derive(Debug, Parser)]
+struct BranchArgs {
+    #[command(subcommand)]
+    action: BranchAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum BranchAction {
+    List,
+    Create {
+        name: String,
+        #[arg(long, default_value_t = false)]
+        switch: bool,
+    },
+    Switch {
+        name: String,
+    },
+}
+
+#[derive(Debug, Parser)]
+struct BackendArgs {
+    #[command(subcommand)]
+    action: BackendAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum BackendAction {
+    Show {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Set {
+        #[arg(long, value_enum)]
+        mode: BackendModeArg,
+        #[arg(long)]
+        cloud_endpoint: Option<String>,
+        #[arg(long)]
+        storage_namespace: Option<String>,
+        #[arg(long)]
+        billing_account_id: Option<String>,
+        #[arg(long)]
+        bridge_remote: Option<String>,
+        #[arg(long)]
+        bridge_branch: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum BackendModeArg {
+    GitBridge,
+    FugitCloud,
+}
+
+#[derive(Debug, Parser)]
+struct BridgeArgs {
+    #[command(subcommand)]
+    action: BridgeAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum BridgeAction {
+    Summary {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long, default_value_t = false)]
+        markdown: bool,
+    },
+    Auth(BridgeAuthArgs),
+    SyncGithub {
+        #[arg(long)]
+        remote: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long, default_value_t = 10)]
+        event_count: usize,
+        #[arg(long, default_value_t = false)]
+        no_push: bool,
+        #[arg(long)]
+        pack_threads: Option<usize>,
+        #[arg(long, default_value_t = false)]
+        burst_push: bool,
+    },
+    PullGithub {
+        #[arg(long)]
+        remote: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long, default_value_t = false)]
+        ff_only: bool,
+        #[arg(long, default_value_t = false)]
+        rebase: bool,
+        #[arg(long, default_value_t = false)]
+        autostash: bool,
+    },
+}
+
+#[derive(Debug, Parser)]
+struct BridgeAuthArgs {
+    #[command(subcommand)]
+    action: BridgeAuthAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum BridgeAuthAction {
+    Status {
+        #[arg(long)]
+        remote: Option<String>,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Login {
+        #[arg(long)]
+        remote: Option<String>,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        username: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value = "FUGIT_GIT_TOKEN")]
+        token_env: String,
+        #[arg(long)]
+        helper: Option<String>,
+    },
+    Logout {
+        #[arg(long)]
+        remote: Option<String>,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        username: Option<String>,
+    },
+}
+
+#[derive(Debug, Parser)]
+struct CheckoutArgs {
+    #[arg(long)]
+    event: Option<String>,
+    #[arg(long)]
+    branch: Option<String>,
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
+    #[arg(long, default_value_t = false)]
+    force: bool,
+    #[arg(long, default_value_t = false)]
+    strict_hash: bool,
+    #[arg(long, default_value_t = false)]
+    move_head: bool,
+    #[arg(long)]
+    hash_jobs: Option<usize>,
+    #[arg(long, default_value_t = false)]
+    burst: bool,
+}
+
+#[derive(Debug, Parser)]
+struct GcArgs {
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
+    #[arg(long, default_value_t = false)]
+    json: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FileLock {
+    lock_id: String,
+    pattern: String,
+    agent_id: String,
+    created_at_utc: String,
+    expires_at_utc: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LockState {
+    schema_version: String,
+    locks: Vec<FileLock>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TaskStatus {
+    Open,
+    Claimed,
+    Done,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FugitTask {
+    task_id: String,
+    title: String,
+    detail: Option<String>,
+    priority: i32,
+    tags: Vec<String>,
+    depends_on: Vec<String>,
+    status: TaskStatus,
+    created_at_utc: String,
+    updated_at_utc: String,
+    created_by_agent_id: String,
+    claimed_by_agent_id: Option<String>,
+    claim_started_at_utc: Option<String>,
+    claim_expires_at_utc: Option<String>,
+    completed_at_utc: Option<String>,
+    completed_by_agent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TaskState {
+    schema_version: String,
+    updated_at_utc: String,
+    tasks: Vec<FugitTask>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RegisteredProject {
+    name: String,
+    repo_root: String,
+    added_at_utc: String,
+    updated_at_utc: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectRegistry {
+    schema_version: String,
+    updated_at_utc: String,
+    default_project: Option<String>,
+    projects: Vec<RegisteredProject>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TaskGuiProject {
+    key: String,
+    name: String,
+    repo_root: String,
+    is_default: bool,
+    is_current_repo: bool,
+}
+
+#[derive(Debug, Parser)]
+struct LockArgs {
+    #[command(subcommand)]
+    action: LockAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum LockAction {
+    List {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Add {
+        #[arg(long)]
+        pattern: String,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        ttl_minutes: Option<i64>,
+    },
+    Remove {
+        #[arg(long)]
+        lock_id: String,
+    },
+}
+
+#[derive(Debug, Parser)]
+struct TaskArgs {
+    #[command(subcommand)]
+    action: TaskAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum TaskAction {
+    List {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        #[arg(long, value_enum)]
+        status: Option<TaskStatusArg>,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, default_value_t = false)]
+        ready_only: bool,
+        #[arg(long, default_value_t = 200)]
+        limit: usize,
+    },
+    Add {
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        detail: Option<String>,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        priority: i32,
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        #[arg(long = "depends-on")]
+        depends_on: Vec<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Request {
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        #[arg(long, default_value_t = 30)]
+        claim_ttl_minutes: i64,
+        #[arg(long, default_value_t = 90)]
+        steal_after_minutes: i64,
+        #[arg(long, default_value_t = false)]
+        no_steal: bool,
+        #[arg(long, default_value_t = false)]
+        no_claim: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Claim {
+        #[arg(long)]
+        task_id: String,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, default_value_t = 30)]
+        claim_ttl_minutes: i64,
+        #[arg(long, default_value_t = false)]
+        steal: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Done {
+        #[arg(long)]
+        task_id: String,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Release {
+        #[arg(long)]
+        task_id: String,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Gui {
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 7788)]
+        port: u16,
+        #[arg(long, default_value_t = false)]
+        no_open: bool,
+        #[arg(long, default_value_t = false)]
+        background: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum TaskStatusArg {
+    Open,
+    Claimed,
+    Done,
+}
+
+impl TaskStatusArg {
+    fn matches(self, status: &TaskStatus) -> bool {
+        matches!(
+            (self, status),
+            (TaskStatusArg::Open, TaskStatus::Open)
+                | (TaskStatusArg::Claimed, TaskStatus::Claimed)
+                | (TaskStatusArg::Done, TaskStatus::Done)
+        )
+    }
+}
+
+#[derive(Debug, Parser)]
+struct ProjectArgs {
+    #[command(subcommand)]
+    action: ProjectAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum ProjectAction {
+    List {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Add {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        repo_root: PathBuf,
+        #[arg(long, default_value_t = false)]
+        set_default: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Remove {
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Use {
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Parser)]
+struct McpArgs {
+    #[command(subcommand)]
+    action: McpAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum McpAction {
+    Serve,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TimelineConfig {
+    schema_version: String,
+    repo_root: String,
+    created_at_utc: String,
+    updated_at_utc: String,
+    #[serde(default = "default_backend_mode")]
+    backend_mode: String,
+    default_bridge_remote: String,
+    default_bridge_branch: String,
+    #[serde(default)]
+    cloud_endpoint: Option<String>,
+    #[serde(default)]
+    storage_namespace: Option<String>,
+    #[serde(default)]
+    billing_account_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BranchPointer {
+    name: String,
+    head_event_id: Option<String>,
+    created_at_utc: String,
+    from_branch: Option<String>,
+    from_event_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BranchesState {
+    schema_version: String,
+    active_branch: String,
+    branches: BTreeMap<String, BranchPointer>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FileRecord {
+    schema_version: String,
+    hash: String,
+    size_bytes: u64,
+    modified_unix_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ChangeKind {
+    Added,
+    Modified,
+    Deleted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChangeRecord {
+    path: String,
+    kind: ChangeKind,
+    old_hash: Option<String>,
+    new_hash: Option<String>,
+    old_size_bytes: Option<u64>,
+    new_size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EventMetrics {
+    tracked_file_count: usize,
+    changed_file_count: usize,
+    added_count: usize,
+    modified_count: usize,
+    deleted_count: usize,
+    changed_bytes_total: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TimelineEvent {
+    schema_version: String,
+    event_id: String,
+    created_at_utc: String,
+    branch: String,
+    parent_event_id: Option<String>,
+    agent_id: String,
+    summary: String,
+    tags: Vec<String>,
+    metrics: EventMetrics,
+    changes: Vec<ChangeRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BridgeAuthState {
+    schema_version: String,
+    updated_at_utc: String,
+    host: String,
+    username: String,
+    helper: String,
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let repo_root = resolve_repo_root(&cli.repo_root)?;
+
+    match cli.command {
+        Command::Init(args) => cmd_init(&repo_root, args),
+        Command::Quickstart(args) => cmd_quickstart(&repo_root, args),
+        Command::Doctor(args) => cmd_doctor(&repo_root, args),
+        Command::Skill(args) => cmd_skill(args),
+        Command::Status(args) => cmd_status(&repo_root, args),
+        Command::Checkpoint(args) => cmd_checkpoint(&repo_root, args),
+        Command::Log(args) => cmd_log(&repo_root, args),
+        Command::Branch(args) => cmd_branch(&repo_root, args),
+        Command::Backend(args) => cmd_backend(&repo_root, args),
+        Command::Bridge(args) => cmd_bridge(&repo_root, args),
+        Command::Checkout(args) => cmd_checkout(&repo_root, args),
+        Command::Gc(args) => cmd_gc(&repo_root, args),
+        Command::Lock(args) => cmd_lock(&repo_root, args),
+        Command::Task(args) => cmd_task(&repo_root, args),
+        Command::Project(args) => cmd_project(args),
+        Command::Mcp(args) => cmd_mcp(&repo_root, args),
+    }
+}
+
+fn cmd_init(repo_root: &Path, args: InitArgs) -> Result<()> {
+    validate_branch_name(&args.branch)?;
+    fs::create_dir_all(timeline_objects_dir(repo_root)).with_context(|| {
+        format!(
+            "failed creating {}",
+            timeline_objects_dir(repo_root).display()
+        )
+    })?;
+
+    let now = now_utc();
+    let detected_branch = detect_git_branch(repo_root).unwrap_or_else(|| args.branch.clone());
+    let bridge_branch = args.bridge_branch.unwrap_or(detected_branch);
+
+    let mut config = load_json_optional::<TimelineConfig>(&timeline_config_path(repo_root))?
+        .unwrap_or(TimelineConfig {
+            schema_version: SCHEMA_CONFIG.to_string(),
+            // Avoid persisting machine-specific absolute paths in project metadata.
+            repo_root: ".".to_string(),
+            created_at_utc: now.clone(),
+            updated_at_utc: now.clone(),
+            backend_mode: default_backend_mode(),
+            default_bridge_remote: args.bridge_remote,
+            default_bridge_branch: bridge_branch,
+            cloud_endpoint: None,
+            storage_namespace: None,
+            billing_account_id: None,
+        });
+    config.updated_at_utc = now.clone();
+    write_pretty_json(&timeline_config_path(repo_root), &config)?;
+
+    let mut branches = load_json_optional::<BranchesState>(&timeline_branches_path(repo_root))?
+        .unwrap_or(BranchesState {
+            schema_version: SCHEMA_BRANCHES.to_string(),
+            active_branch: args.branch.clone(),
+            branches: BTreeMap::new(),
+        });
+
+    if !branches.branches.contains_key(&args.branch) {
+        branches.branches.insert(
+            args.branch.clone(),
+            BranchPointer {
+                name: args.branch.clone(),
+                head_event_id: None,
+                created_at_utc: now.clone(),
+                from_branch: None,
+                from_event_id: None,
+            },
+        );
+    }
+    branches.active_branch = args.branch.clone();
+
+    let branch_root = timeline_branch_root(repo_root, &args.branch);
+    fs::create_dir_all(&branch_root)
+        .with_context(|| format!("failed creating {}", branch_root.display()))?;
+
+    if !timeline_branch_events_path(repo_root, &args.branch).exists() {
+        fs::write(timeline_branch_events_path(repo_root, &args.branch), b"")
+            .with_context(|| "failed creating branch events log")?;
+    }
+
+    if !timeline_branch_index_path(repo_root, &args.branch).exists() {
+        let index = scan_repo(repo_root, None, true, 1)?;
+        // Capture a baseline snapshot so checkout can always materialize branch history.
+        for (rel, row) in &index {
+            let abs = repo_root.join(rel);
+            if abs.exists() {
+                store_object(repo_root, &row.hash, &abs)?;
+            }
+        }
+        write_pretty_json(&timeline_branch_index_path(repo_root, &args.branch), &index)?;
+    }
+
+    write_pretty_json(&timeline_branches_path(repo_root), &branches)?;
+
+    println!(
+        "[fugit] initialized repo=. root=.fugit active_branch={} bridge={}/{}",
+        branches.active_branch, config.default_bridge_remote, config.default_bridge_branch
+    );
+    Ok(())
+}
+
+fn cmd_quickstart(repo_root: &Path, args: QuickstartArgs) -> Result<()> {
+    if !timeline_is_initialized(repo_root) {
+        let init_args = InitArgs {
+            branch: args.branch.clone(),
+            bridge_branch: None,
+            bridge_remote: "origin".to_string(),
+        };
+        cmd_init(repo_root, init_args)?;
+    }
+
+    cmd_status(
+        repo_root,
+        StatusArgs {
+            limit: 20,
+            json: false,
+            strict_hash: false,
+            hash_jobs: None,
+            burst: false,
+        },
+    )?;
+
+    if args.status_only {
+        return Ok(());
+    }
+
+    let summary = args
+        .summary
+        .unwrap_or_else(|| "quickstart checkpoint".to_string());
+    let mut tags = args.tags;
+    if tags.is_empty() {
+        tags.push("quickstart".to_string());
+    }
+    cmd_checkpoint(
+        repo_root,
+        CheckpointArgs {
+            summary,
+            agent: args.agent,
+            tags,
+            files: Vec::new(),
+            strict_hash: false,
+            ignore_locks: false,
+            hash_jobs: None,
+            object_jobs: None,
+            burst: false,
+        },
+    )?;
+    Ok(())
+}
+
+fn cmd_doctor(repo_root: &Path, args: DoctorArgs) -> Result<()> {
+    let timeline_initialized = timeline_is_initialized(repo_root);
+    let git_available = ProcessCommand::new("git")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    let git_work_tree = ProcessCommand::new("git")
+        .current_dir(repo_root)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .map(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
+        })
+        .unwrap_or(false);
+
+    let fugit_root = timeline_root(repo_root);
+    let write_test_dir = fugit_root.join(".doctor");
+    let write_test_file = write_test_dir.join("write_test.tmp");
+    let writable = fs::create_dir_all(&write_test_dir)
+        .and_then(|_| fs::write(&write_test_file, b"ok"))
+        .and_then(|_| fs::remove_file(&write_test_file))
+        .is_ok();
+    let _ = fs::remove_dir_all(&write_test_dir);
+
+    let report = json!({
+        "schema_version": "fugit.doctor_report.v1",
+        "generated_at_utc": now_utc(),
+        "repo_root": ".",
+        "checks": {
+            "timeline_initialized": timeline_initialized,
+            "repo_writable": writable,
+            "git_available": git_available,
+            "git_work_tree": git_work_tree
+        },
+        "summary": {
+            "pass": timeline_initialized && writable
+        }
+    });
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "[fugit-doctor] initialized={} writable={} git_available={} git_work_tree={} pass={}",
+            timeline_initialized,
+            writable,
+            git_available,
+            git_work_tree,
+            report
+                .get("summary")
+                .and_then(|v| v.get("pass"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        );
+        if !timeline_initialized {
+            println!(
+                "[fugit-doctor] hint: run `fugit --repo-root {} init --branch trunk`",
+                repo_root.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn cmd_skill(args: SkillArgs) -> Result<()> {
+    match args.action {
+        SkillAction::Show {
+            json,
+            include_openai_yaml,
+        } => {
+            if json {
+                let bundle = fugit_skill_bundle(true, include_openai_yaml);
+                println!("{}", serde_json::to_string_pretty(&bundle)?);
+            } else {
+                println!("{}", FUGIT_SKILL_MD.trim_end());
+                if include_openai_yaml {
+                    println!("\n---\n");
+                    println!("{}", FUGIT_SKILL_OPENAI_YAML.trim_end());
+                }
+            }
+        }
+        SkillAction::InstallCodex { overwrite } => {
+            let install_path = install_fugit_skill_to_codex(overwrite)?;
+            println!(
+                "[fugit-skill] installed skill={} path={}",
+                FUGIT_SKILL_ID,
+                install_path.display()
+            );
+        }
+        SkillAction::Doctor { json } => {
+            let (ok, checks) = fugit_skill_doctor_checks();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "schema_version": "fugit.skill.doctor.v1",
+                        "generated_at_utc": now_utc(),
+                        "skill_id": FUGIT_SKILL_ID,
+                        "ok": ok,
+                        "checks": checks
+                    }))?
+                );
+            } else {
+                println!(
+                    "[fugit-skill] skill={} ok={} checks={}",
+                    FUGIT_SKILL_ID,
+                    ok,
+                    checks.len()
+                );
+                for check in checks {
+                    println!(
+                        "- {}: {}",
+                        check["name"].as_str().unwrap_or("unknown"),
+                        check["pass"].as_bool().unwrap_or(false)
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn fugit_skill_bundle(include_skill_body: bool, include_openai_yaml: bool) -> serde_json::Value {
+    let mut bundle = json!({
+        "schema_version": "fugit.skill.bundle.v1",
+        "generated_at_utc": now_utc(),
+        "skill_id": FUGIT_SKILL_ID,
+        "delivery": {
+            "cli": {
+                "show": "fugit skill show",
+                "show_json": "fugit skill show --json",
+                "install_codex": "fugit skill install-codex"
+            },
+            "mcp_tools": [
+                "fugit_status",
+                "fugit_checkpoint",
+                "fugit_log",
+                "fugit_checkout",
+                "fugit_lock_add",
+                "fugit_lock_list",
+                "fugit_task_add",
+                "fugit_task_list",
+                "fugit_task_request",
+                "fugit_task_claim",
+                "fugit_task_done",
+                "fugit_task_release",
+                "fugit_skill_bundle",
+                "fugit_skill_install_codex",
+                "fugit_task_gui_launch",
+                "fugit_project_list",
+                "fugit_project_add",
+                "fugit_project_use",
+                "fugit_project_remove",
+                "fugit_gc"
+            ]
+        },
+        "references": [
+            {
+                "path": "skills/fugit/references/workflow-profiles.md",
+                "title": "Workflow Profiles"
+            },
+            {
+                "path": "skills/fugit/references/recovery-playbooks.md",
+                "title": "Recovery Playbooks"
+            }
+        ]
+    });
+
+    if include_skill_body && let Some(map) = bundle.as_object_mut() {
+        map.insert("skill_md".to_string(), json!(FUGIT_SKILL_MD));
+        map.insert(
+            "reference_workflow_profiles_md".to_string(),
+            json!(FUGIT_SKILL_REF_WORKFLOW_PROFILES),
+        );
+        map.insert(
+            "reference_recovery_playbooks_md".to_string(),
+            json!(FUGIT_SKILL_REF_RECOVERY_PLAYBOOKS),
+        );
+    }
+    if include_openai_yaml && let Some(map) = bundle.as_object_mut() {
+        map.insert("openai_yaml".to_string(), json!(FUGIT_SKILL_OPENAI_YAML));
+    }
+
+    bundle
+}
+
+fn fugit_skill_doctor_checks() -> (bool, Vec<serde_json::Value>) {
+    let checks = vec![
+        json!({
+            "name": "frontmatter_present",
+            "pass": FUGIT_SKILL_MD.trim_start().starts_with("---"),
+            "detail": "SKILL.md starts with YAML frontmatter."
+        }),
+        json!({
+            "name": "skill_name_matches",
+            "pass": FUGIT_SKILL_MD.contains("\nname: fugit\n"),
+            "detail": "SKILL.md frontmatter name matches fugit."
+        }),
+        json!({
+            "name": "skill_description_present",
+            "pass": FUGIT_SKILL_MD.contains("\ndescription: "),
+            "detail": "SKILL.md frontmatter description exists."
+        }),
+        json!({
+            "name": "openai_yaml_id_matches",
+            "pass": FUGIT_SKILL_OPENAI_YAML.contains("\n  id: fugit\n") || FUGIT_SKILL_OPENAI_YAML.contains("\nid: fugit\n"),
+            "detail": "agents/openai.yaml includes id: fugit."
+        }),
+        json!({
+            "name": "workflow_section_present",
+            "pass": FUGIT_SKILL_MD.contains("## Workflow"),
+            "detail": "SKILL.md includes a workflow section."
+        }),
+        json!({
+            "name": "task_contract_present",
+            "pass": FUGIT_SKILL_MD.contains("## Task System Contract") && FUGIT_SKILL_MD.contains("task request"),
+            "detail": "SKILL.md includes explicit task-system operating contract."
+        }),
+        json!({
+            "name": "project_registry_guidance_present",
+            "pass": FUGIT_SKILL_MD.contains("fugit project add"),
+            "detail": "SKILL.md includes multi-project registry guidance."
+        }),
+        json!({
+            "name": "openai_yaml_multi_project_present",
+            "pass": FUGIT_SKILL_OPENAI_YAML.contains("multi-project"),
+            "detail": "agents/openai.yaml mentions multi-project behavior."
+        }),
+        json!({
+            "name": "references_present",
+            "pass": !FUGIT_SKILL_REF_WORKFLOW_PROFILES.trim().is_empty() && !FUGIT_SKILL_REF_RECOVERY_PLAYBOOKS.trim().is_empty(),
+            "detail": "Bundled reference files are embedded and non-empty."
+        }),
+    ];
+    let ok = checks.iter().all(|check| {
+        check
+            .get("pass")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    });
+    (ok, checks)
+}
+
+fn install_fugit_skill_to_codex(overwrite: bool) -> Result<PathBuf> {
+    let codex_home = resolve_codex_home()?;
+    let skill_root = codex_home.join("skills").join(FUGIT_SKILL_ID);
+    let skill_path = skill_root.join("SKILL.md");
+    let agents_path = skill_root.join("agents").join("openai.yaml");
+    let ref_workflow_path = skill_root.join("references").join("workflow-profiles.md");
+    let ref_recovery_path = skill_root.join("references").join("recovery-playbooks.md");
+
+    write_text_file_with_overwrite(&skill_path, FUGIT_SKILL_MD, overwrite)?;
+    write_text_file_with_overwrite(&agents_path, FUGIT_SKILL_OPENAI_YAML, overwrite)?;
+    write_text_file_with_overwrite(
+        &ref_workflow_path,
+        FUGIT_SKILL_REF_WORKFLOW_PROFILES,
+        overwrite,
+    )?;
+    write_text_file_with_overwrite(
+        &ref_recovery_path,
+        FUGIT_SKILL_REF_RECOVERY_PLAYBOOKS,
+        overwrite,
+    )?;
+    Ok(skill_root)
+}
+
+fn resolve_codex_home() -> Result<PathBuf> {
+    if let Ok(path) = std::env::var("CODEX_HOME")
+        && !path.trim().is_empty()
+    {
+        return Ok(PathBuf::from(path.trim()));
+    }
+    if let Ok(home) = std::env::var("HOME")
+        && !home.trim().is_empty()
+    {
+        return Ok(PathBuf::from(home.trim()).join(".codex"));
+    }
+    bail!("unable to resolve CODEX_HOME; set CODEX_HOME or HOME")
+}
+
+fn write_text_file_with_overwrite(path: &Path, content: &str, overwrite: bool) -> Result<()> {
+    if path.exists() && !overwrite {
+        bail!(
+            "path already exists (use --overwrite to replace): {}",
+            path.display()
+        );
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed creating {}", parent.display()))?;
+    }
+    fs::write(path, content).with_context(|| format!("failed writing {}", path.display()))
+}
+
+fn cmd_status(repo_root: &Path, args: StatusArgs) -> Result<()> {
+    let (_config, branches) = load_initialized_state(repo_root)?;
+    let active_branch = branches.active_branch;
+    let old_index = load_branch_index(repo_root, &active_branch)?;
+    let hash_jobs = resolve_parallel_jobs(args.hash_jobs, args.burst);
+    let new_index = scan_repo(repo_root, Some(&old_index), args.strict_hash, hash_jobs)?;
+    let changes = diff_indexes(&old_index, &new_index);
+
+    let summary = json!({
+        "schema_version": "timeline.status.v1",
+        "generated_at_utc": now_utc(),
+        "branch": active_branch,
+        "hash_jobs": hash_jobs,
+        "tracked_file_count": new_index.len(),
+        "changed_file_count": changes.len(),
+        "added_count": changes.iter().filter(|c| matches!(c.kind, ChangeKind::Added)).count(),
+        "modified_count": changes.iter().filter(|c| matches!(c.kind, ChangeKind::Modified)).count(),
+        "deleted_count": changes.iter().filter(|c| matches!(c.kind, ChangeKind::Deleted)).count(),
+        "changes": changes.iter().take(args.limit).collect::<Vec<_>>()
+    });
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+    } else {
+        println!(
+            "[fugit] branch={} tracked={} changed={} (+{} ~{} -{}) hash_jobs={}",
+            summary["branch"].as_str().unwrap_or("unknown"),
+            summary["tracked_file_count"].as_u64().unwrap_or(0),
+            summary["changed_file_count"].as_u64().unwrap_or(0),
+            summary["added_count"].as_u64().unwrap_or(0),
+            summary["modified_count"].as_u64().unwrap_or(0),
+            summary["deleted_count"].as_u64().unwrap_or(0),
+            hash_jobs
+        );
+        for change in changes.iter().take(args.limit) {
+            let prefix = match change.kind {
+                ChangeKind::Added => "+",
+                ChangeKind::Modified => "~",
+                ChangeKind::Deleted => "-",
+            };
+            println!("{} {}", prefix, change.path);
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
+    if args.summary.trim().is_empty() {
+        bail!("checkpoint summary cannot be empty");
+    }
+
+    let (_config, mut branches) = load_initialized_state(repo_root)?;
+    let active_branch = branches.active_branch.clone();
+    let old_index = load_branch_index(repo_root, &active_branch)?;
+    let hash_jobs = resolve_parallel_jobs(args.hash_jobs, args.burst);
+    let object_jobs = resolve_parallel_jobs(args.object_jobs.or(args.hash_jobs), args.burst);
+    let new_index = scan_repo(repo_root, Some(&old_index), args.strict_hash, hash_jobs)?;
+
+    let allowed_paths = args
+        .files
+        .iter()
+        .map(|path| normalize_user_path(path))
+        .collect::<BTreeSet<_>>();
+
+    let mut changes = diff_indexes(&old_index, &new_index);
+    if !allowed_paths.is_empty() {
+        changes.retain(|change| allowed_paths.contains(&change.path));
+    }
+
+    let agent_id = args.agent.clone().unwrap_or_else(default_agent_id);
+    if !args.ignore_locks {
+        let conflicts = collect_lock_conflicts(repo_root, &changes, &agent_id)?;
+        if !conflicts.is_empty() {
+            let mut lines = Vec::<String>::new();
+            for lock in &conflicts {
+                lines.push(format!(
+                    "lock_id={} pattern={} owner={}",
+                    lock.lock_id, lock.pattern, lock.agent_id
+                ));
+            }
+            bail!(
+                "checkpoint blocked by active locks held by other agents:\n{}\nUse --ignore-locks to bypass.",
+                lines.join("\n")
+            );
+        }
+    }
+
+    let mut missing_old_objects = Vec::<String>::new();
+    for change in &changes {
+        if !matches!(change.kind, ChangeKind::Modified | ChangeKind::Deleted) {
+            continue;
+        }
+        if let Some(old_hash) = change.old_hash.as_deref() {
+            let object_path = timeline_objects_dir(repo_root).join(old_hash);
+            if !object_path.exists() {
+                missing_old_objects.push(format!("{} ({})", change.path, old_hash));
+            }
+        }
+    }
+    if !missing_old_objects.is_empty() {
+        bail!(
+            "checkpoint would lose recoverability because old object blobs are missing:\n{}\nRecreate the baseline snapshot first (for new repos, run `fugit init` before edits).",
+            missing_old_objects.join("\n")
+        );
+    }
+
+    let mut object_candidates = BTreeMap::<String, PathBuf>::new();
+    for change in &changes {
+        if matches!(change.kind, ChangeKind::Added | ChangeKind::Modified)
+            && let Some(new_hash) = &change.new_hash
+        {
+            let rel = PathBuf::from(&change.path);
+            let abs = repo_root.join(&rel);
+            if abs.exists() {
+                object_candidates.entry(new_hash.clone()).or_insert(abs);
+            }
+        }
+    }
+    let object_queue = object_candidates.into_iter().collect::<Vec<_>>();
+    store_objects(repo_root, &object_queue, object_jobs)?;
+
+    let mut changed_bytes_total = 0_u64;
+    let mut added_count = 0_usize;
+    let mut modified_count = 0_usize;
+    let mut deleted_count = 0_usize;
+
+    for change in &changes {
+        match change.kind {
+            ChangeKind::Added => {
+                added_count += 1;
+                changed_bytes_total += change.new_size_bytes.unwrap_or(0);
+            }
+            ChangeKind::Modified => {
+                modified_count += 1;
+                changed_bytes_total += change.new_size_bytes.unwrap_or(0);
+            }
+            ChangeKind::Deleted => {
+                deleted_count += 1;
+                changed_bytes_total += change.old_size_bytes.unwrap_or(0);
+            }
+        }
+    }
+
+    let event_id = format!("evt_{}", Uuid::new_v4().simple());
+    let parent_event_id = branches
+        .branches
+        .get(&active_branch)
+        .and_then(|row| row.head_event_id.clone());
+    let event = TimelineEvent {
+        schema_version: SCHEMA_EVENT.to_string(),
+        event_id: event_id.clone(),
+        created_at_utc: now_utc(),
+        branch: active_branch.clone(),
+        parent_event_id,
+        agent_id,
+        summary: args.summary.trim().to_string(),
+        tags: dedupe_keep_order(args.tags),
+        metrics: EventMetrics {
+            tracked_file_count: new_index.len(),
+            changed_file_count: changes.len(),
+            added_count,
+            modified_count,
+            deleted_count,
+            changed_bytes_total,
+        },
+        changes,
+    };
+
+    append_jsonl(
+        &timeline_branch_events_path(repo_root, &active_branch),
+        &event,
+    )?;
+    write_pretty_json(
+        &timeline_branch_index_path(repo_root, &active_branch),
+        &new_index,
+    )?;
+
+    if let Some(pointer) = branches.branches.get_mut(&active_branch) {
+        pointer.head_event_id = Some(event_id.clone());
+    }
+    write_pretty_json(&timeline_branches_path(repo_root), &branches)?;
+
+    println!(
+        "[fugit] checkpoint={} branch={} changed={} summary={} hash_jobs={} object_jobs={}",
+        event_id,
+        active_branch,
+        event.metrics.changed_file_count,
+        event.summary,
+        hash_jobs,
+        object_jobs
+    );
+    Ok(())
+}
+
+fn cmd_log(repo_root: &Path, args: LogArgs) -> Result<()> {
+    let (_config, branches) = load_initialized_state(repo_root)?;
+    let active_branch = args.branch.unwrap_or(branches.active_branch);
+    let events = read_branch_events_tail(repo_root, &active_branch, args.limit)?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&events)?);
+    } else {
+        println!(
+            "[fugit] branch={} events={} (showing up to {})",
+            active_branch,
+            events.len(),
+            args.limit
+        );
+        for event in events {
+            println!(
+                "{} {} [{}] {}",
+                event.created_at_utc, event.event_id, event.agent_id, event.summary
+            );
+        }
+    }
+    Ok(())
+}
+
+fn cmd_branch(repo_root: &Path, args: BranchArgs) -> Result<()> {
+    let (_config, mut branches) = load_initialized_state(repo_root)?;
+    let active = branches.active_branch.clone();
+
+    match args.action {
+        BranchAction::List => {
+            for (name, pointer) in branches.branches {
+                let marker = if name == active { "*" } else { " " };
+                println!(
+                    "{} {} head={}",
+                    marker,
+                    name,
+                    pointer.head_event_id.unwrap_or_else(|| "none".to_string())
+                );
+            }
+        }
+        BranchAction::Create { name, switch } => {
+            validate_branch_name(&name)?;
+            if branches.branches.contains_key(&name) {
+                bail!("timeline branch already exists: {}", name);
+            }
+
+            let from_pointer = branches
+                .branches
+                .get(&active)
+                .ok_or_else(|| anyhow!("active branch pointer missing: {}", active))?
+                .clone();
+
+            fs::create_dir_all(timeline_branch_root(repo_root, &name)).with_context(|| {
+                format!(
+                    "failed creating timeline branch root {}",
+                    timeline_branch_root(repo_root, &name).display()
+                )
+            })?;
+
+            let from_events = timeline_branch_events_path(repo_root, &active);
+            let to_events = timeline_branch_events_path(repo_root, &name);
+            if from_events.exists() {
+                fs::copy(&from_events, &to_events).with_context(|| {
+                    format!(
+                        "failed copying branch events {} -> {}",
+                        from_events.display(),
+                        to_events.display()
+                    )
+                })?;
+            } else {
+                fs::write(&to_events, b"")?;
+            }
+
+            let from_index = timeline_branch_index_path(repo_root, &active);
+            let to_index = timeline_branch_index_path(repo_root, &name);
+            if from_index.exists() {
+                fs::copy(&from_index, &to_index).with_context(|| {
+                    format!(
+                        "failed copying branch index {} -> {}",
+                        from_index.display(),
+                        to_index.display()
+                    )
+                })?;
+            } else {
+                write_pretty_json(&to_index, &BTreeMap::<String, FileRecord>::new())?;
+            }
+
+            branches.branches.insert(
+                name.clone(),
+                BranchPointer {
+                    name: name.clone(),
+                    head_event_id: from_pointer.head_event_id.clone(),
+                    created_at_utc: now_utc(),
+                    from_branch: Some(active.clone()),
+                    from_event_id: from_pointer.head_event_id,
+                },
+            );
+            if switch {
+                branches.active_branch = name.clone();
+            }
+            write_pretty_json(&timeline_branches_path(repo_root), &branches)?;
+
+            println!(
+                "[fugit] branch created={} from={} switched={}",
+                name,
+                active,
+                if switch { "true" } else { "false" }
+            );
+        }
+        BranchAction::Switch { name } => {
+            if !branches.branches.contains_key(&name) {
+                bail!("timeline branch does not exist: {}", name);
+            }
+            branches.active_branch = name.clone();
+            write_pretty_json(&timeline_branches_path(repo_root), &branches)?;
+            println!("[fugit] active branch={}", name);
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_backend(repo_root: &Path, args: BackendArgs) -> Result<()> {
+    let (_config, branches) = load_initialized_state(repo_root)?;
+    let mut config = load_json_optional::<TimelineConfig>(&timeline_config_path(repo_root))?
+        .ok_or_else(|| {
+            anyhow!(
+                "timeline not initialized: missing {}",
+                timeline_config_path(repo_root).display()
+            )
+        })?;
+
+    match args.action {
+        BackendAction::Show { json } => {
+            let summary = json!({
+                "schema_version": "fugit.backend.summary.v1",
+                "generated_at_utc": now_utc(),
+                "active_branch": branches.active_branch,
+                "backend_mode": config.backend_mode,
+                "default_bridge_remote": config.default_bridge_remote,
+                "default_bridge_branch": config.default_bridge_branch,
+                "cloud_endpoint": config.cloud_endpoint,
+                "storage_namespace": config.storage_namespace,
+                "billing_account_id": config.billing_account_id
+            });
+            if json {
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+            } else {
+                println!(
+                    "[fugit-backend] mode={} bridge={}/{} storage_namespace={} billing_account_id={}",
+                    summary["backend_mode"].as_str().unwrap_or("unknown"),
+                    summary["default_bridge_remote"]
+                        .as_str()
+                        .unwrap_or("origin"),
+                    summary["default_bridge_branch"].as_str().unwrap_or("trunk"),
+                    summary["storage_namespace"].as_str().unwrap_or("unset"),
+                    summary["billing_account_id"].as_str().unwrap_or("unset")
+                );
+            }
+        }
+        BackendAction::Set {
+            mode,
+            cloud_endpoint,
+            storage_namespace,
+            billing_account_id,
+            bridge_remote,
+            bridge_branch,
+        } => {
+            config.backend_mode = match mode {
+                BackendModeArg::GitBridge => BACKEND_MODE_GIT_BRIDGE.to_string(),
+                BackendModeArg::FugitCloud => BACKEND_MODE_FUGIT_CLOUD.to_string(),
+            };
+
+            if let Some(remote) = bridge_remote
+                && !remote.trim().is_empty()
+            {
+                config.default_bridge_remote = remote.trim().to_string();
+            }
+            if let Some(branch) = bridge_branch
+                && !branch.trim().is_empty()
+            {
+                config.default_bridge_branch = branch.trim().to_string();
+            }
+            if cloud_endpoint.is_some() {
+                config.cloud_endpoint = cloud_endpoint.and_then(|v| {
+                    let token = v.trim().to_string();
+                    if token.is_empty() { None } else { Some(token) }
+                });
+            }
+            if storage_namespace.is_some() {
+                config.storage_namespace = storage_namespace.and_then(|v| {
+                    let token = v.trim().to_string();
+                    if token.is_empty() { None } else { Some(token) }
+                });
+            }
+            if billing_account_id.is_some() {
+                config.billing_account_id = billing_account_id.and_then(|v| {
+                    let token = v.trim().to_string();
+                    if token.is_empty() { None } else { Some(token) }
+                });
+            }
+            config.updated_at_utc = now_utc();
+            write_pretty_json(&timeline_config_path(repo_root), &config)?;
+            println!(
+                "[fugit-backend] updated mode={} bridge={}/{} storage_namespace={} billing_account_id={}",
+                config.backend_mode,
+                config.default_bridge_remote,
+                config.default_bridge_branch,
+                config.storage_namespace.as_deref().unwrap_or("unset"),
+                config.billing_account_id.as_deref().unwrap_or("unset")
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
+    let (config, branches) = load_initialized_state(repo_root)?;
+
+    match args.action {
+        BridgeAction::Summary { limit, markdown } => {
+            let mut events = read_branch_events(repo_root, &branches.active_branch)?;
+            if events.len() > limit {
+                let start = events.len().saturating_sub(limit);
+                events = events.split_off(start);
+            }
+
+            if markdown {
+                println!("# Timeline Summary ({})", branches.active_branch);
+                for event in &events {
+                    println!(
+                        "- `{}` `{}` `{}` {}",
+                        event.created_at_utc, event.event_id, event.agent_id, event.summary
+                    );
+                }
+            } else {
+                println!(
+                    "[fugit-bridge] branch={} events={} (last {})",
+                    branches.active_branch,
+                    events.len(),
+                    limit
+                );
+                for event in &events {
+                    println!(
+                        "{} {} [{}] {}",
+                        event.created_at_utc, event.event_id, event.agent_id, event.summary
+                    );
+                }
+            }
+        }
+        BridgeAction::Auth(auth_args) => {
+            ensure_git_repo(repo_root)?;
+            cmd_bridge_auth(repo_root, &config, auth_args)?;
+        }
+        BridgeAction::SyncGithub {
+            remote,
+            branch,
+            event_count,
+            no_push,
+            pack_threads,
+            burst_push,
+        } => {
+            ensure_git_repo(repo_root)?;
+
+            let remote = remote.unwrap_or(config.default_bridge_remote);
+            let branch = branch.unwrap_or(config.default_bridge_branch);
+            if let Some(remote_url) = git_remote_url(repo_root, &remote)?
+                && (remote_url.starts_with("http://") || remote_url.starts_with("https://"))
+                && let Some(host) = parse_git_host(&remote_url)
+            {
+                let cred = git_credential_fill(repo_root, &host, None)?;
+                let has_password = cred.as_ref().and_then(|row| row.password.clone()).is_some();
+                if !has_password {
+                    bail!(
+                        "missing credentials for remote host '{}'; run `fugit bridge auth login --remote {}` first",
+                        host,
+                        remote
+                    );
+                }
+            }
+            let mut events = read_branch_events(repo_root, &branches.active_branch)?;
+            if events.len() > event_count {
+                let start = events.len().saturating_sub(event_count);
+                events = events.split_off(start);
+            }
+
+            let (subject, body) = build_bridge_commit_message(&events);
+
+            run_git(repo_root, &["add", "-A"])?;
+            let staged_clean = ProcessCommand::new("git")
+                .current_dir(repo_root)
+                .args(["diff", "--cached", "--quiet"])
+                .status()
+                .with_context(|| "failed checking staged git diff")?
+                .success();
+
+            if staged_clean {
+                println!("[fugit-bridge] no staged changes after git add -A; skipping commit/push");
+                return Ok(());
+            }
+
+            let mut cmd = ProcessCommand::new("git");
+            cmd.current_dir(repo_root)
+                .arg("commit")
+                .arg("-m")
+                .arg(subject)
+                .arg("-m")
+                .arg(body);
+            run_process(cmd, "failed committing timeline bridge sync")?;
+
+            if no_push {
+                println!(
+                    "[fugit-bridge] committed locally (push skipped): remote={} branch={}",
+                    remote, branch
+                );
+            } else {
+                if pack_threads.is_some() || burst_push {
+                    let threads = resolve_parallel_jobs(pack_threads, burst_push);
+                    run_git_with_configs(
+                        repo_root,
+                        &[("pack.threads", threads.to_string())],
+                        &["push", &remote, &format!("HEAD:{}", branch)],
+                    )?;
+                    println!(
+                        "[fugit-bridge] committed+pushed remote={} branch={} pack_threads={}",
+                        remote, branch, threads
+                    );
+                } else {
+                    run_git(repo_root, &["push", &remote, &format!("HEAD:{}", branch)])?;
+                    println!(
+                        "[fugit-bridge] committed+pushed remote={} branch={}",
+                        remote, branch
+                    );
+                }
+            }
+        }
+        BridgeAction::PullGithub {
+            remote,
+            branch,
+            ff_only,
+            rebase,
+            autostash,
+        } => {
+            ensure_git_repo(repo_root)?;
+            let remote = remote.unwrap_or(config.default_bridge_remote);
+            let branch = branch.unwrap_or(config.default_bridge_branch);
+
+            let mut created_autostash = false;
+            if autostash && git_has_worktree_changes(repo_root)? {
+                let mut stash_cmd = ProcessCommand::new("git");
+                stash_cmd
+                    .current_dir(repo_root)
+                    .arg("stash")
+                    .arg("push")
+                    .arg("--include-untracked")
+                    .arg("-m")
+                    .arg(format!("fugit-autostash-{}", now_utc()));
+                run_process(stash_cmd, "failed creating autostash before pull")?;
+                created_autostash = true;
+            }
+
+            let mut pull_cmd = ProcessCommand::new("git");
+            pull_cmd.current_dir(repo_root).arg("pull");
+            if ff_only {
+                pull_cmd.arg("--ff-only");
+            }
+            if rebase {
+                pull_cmd.arg("--rebase");
+            }
+            pull_cmd.arg(&remote).arg(&branch);
+            run_process(pull_cmd, "failed pulling from git remote")?;
+
+            if created_autostash {
+                let mut pop_cmd = ProcessCommand::new("git");
+                pop_cmd.current_dir(repo_root).arg("stash").arg("pop");
+                if let Err(err) = run_process(pop_cmd, "failed applying autostash after pull") {
+                    bail!(
+                        "pull succeeded but autostash pop failed; run `git stash list`/`git stash pop` to recover.\n{}",
+                        err
+                    );
+                }
+            }
+
+            println!(
+                "[fugit-bridge] pulled remote={} branch={} ff_only={} rebase={} autostash={}",
+                remote, branch, ff_only, rebase, created_autostash
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct GitCredential {
+    username: Option<String>,
+    password: Option<String>,
+}
+
+fn cmd_bridge_auth(repo_root: &Path, config: &TimelineConfig, args: BridgeAuthArgs) -> Result<()> {
+    match args.action {
+        BridgeAuthAction::Status { remote, host, json } => {
+            let remote_name = remote.unwrap_or_else(|| config.default_bridge_remote.clone());
+            let remote_url = git_remote_url(repo_root, &remote_name)?;
+            let resolved_host = resolve_bridge_host(host.as_deref(), remote_url.as_deref())
+                .unwrap_or_else(|| "github.com".to_string());
+            let helper =
+                configured_credential_helper(repo_root)?.unwrap_or_else(|| "unset".to_string());
+            let cred = git_credential_fill(repo_root, &resolved_host, None)?;
+            let state =
+                load_json_optional::<BridgeAuthState>(&timeline_bridge_auth_path(repo_root))?;
+            let username = cred
+                .as_ref()
+                .and_then(|row| row.username.clone())
+                .or_else(|| state.as_ref().map(|row| row.username.clone()))
+                .unwrap_or_else(|| "unset".to_string());
+            let has_credential = cred.as_ref().and_then(|row| row.password.clone()).is_some();
+            let summary = json!({
+                "schema_version": "fugit.bridge_auth.status.v1",
+                "generated_at_utc": now_utc(),
+                "remote": remote_name,
+                "remote_url": remote_url,
+                "host": resolved_host,
+                "username": username,
+                "credential_helper": helper,
+                "credential_present": has_credential
+            });
+            if json {
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+            } else {
+                println!(
+                    "[fugit-bridge-auth] remote={} host={} helper={} username={} credential_present={}",
+                    summary["remote"].as_str().unwrap_or("origin"),
+                    summary["host"].as_str().unwrap_or("github.com"),
+                    summary["credential_helper"].as_str().unwrap_or("unset"),
+                    summary["username"].as_str().unwrap_or("unset"),
+                    summary["credential_present"].as_bool().unwrap_or(false)
+                );
+            }
+        }
+        BridgeAuthAction::Login {
+            remote,
+            host,
+            username,
+            token,
+            token_env,
+            helper,
+        } => {
+            let remote_name = remote.unwrap_or_else(|| config.default_bridge_remote.clone());
+            let remote_url = git_remote_url(repo_root, &remote_name)?;
+            let resolved_host = resolve_bridge_host(host.as_deref(), remote_url.as_deref())
+                .unwrap_or_else(|| "github.com".to_string());
+            let username = username
+                .filter(|row| !row.trim().is_empty())
+                .unwrap_or_else(|| "x-access-token".to_string());
+            let token = token
+                .or_else(|| std::env::var(&token_env).ok())
+                .filter(|row| !row.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "missing token; pass --token or export {} before login",
+                        token_env
+                    )
+                })?;
+
+            let (helper, used_store_fallback) = ensure_credential_helper(repo_root, helper)?;
+            git_credential_approve(repo_root, &resolved_host, &username, token.trim())?;
+
+            let mut access_verified = false;
+            if let Some(url) = remote_url.as_deref()
+                && (url.starts_with("http://") || url.starts_with("https://"))
+            {
+                access_verified = verify_git_remote_access(repo_root, url)?;
+            }
+
+            let state = BridgeAuthState {
+                schema_version: SCHEMA_BRIDGE_AUTH.to_string(),
+                updated_at_utc: now_utc(),
+                host: resolved_host.clone(),
+                username: username.clone(),
+                helper: helper.clone(),
+            };
+            write_pretty_json(&timeline_bridge_auth_path(repo_root), &state)?;
+
+            println!(
+                "[fugit-bridge-auth] login complete host={} username={} helper={} verified_remote_access={}",
+                resolved_host, username, helper, access_verified
+            );
+            if used_store_fallback {
+                println!(
+                    "[fugit-bridge-auth] note: credential.helper was unset; defaulted to 'store'. Switch to a secure helper (manager-core/osxkeychain/libsecret/wincred) for long-term use."
+                );
+            }
+            if !access_verified {
+                println!(
+                    "[fugit-bridge-auth] note: remote access verification skipped/failed (non-HTTPS remote or insufficient token scope)"
+                );
+            }
+        }
+        BridgeAuthAction::Logout {
+            remote,
+            host,
+            username,
+        } => {
+            let remote_name = remote.unwrap_or_else(|| config.default_bridge_remote.clone());
+            let remote_url = git_remote_url(repo_root, &remote_name)?;
+            let resolved_host = resolve_bridge_host(host.as_deref(), remote_url.as_deref())
+                .unwrap_or_else(|| "github.com".to_string());
+            let fallback_state =
+                load_json_optional::<BridgeAuthState>(&timeline_bridge_auth_path(repo_root))?;
+            let username = username
+                .filter(|row| !row.trim().is_empty())
+                .or_else(|| fallback_state.map(|row| row.username))
+                .unwrap_or_else(|| "x-access-token".to_string());
+
+            git_credential_reject(repo_root, &resolved_host, &username)?;
+            let auth_path = timeline_bridge_auth_path(repo_root);
+            if auth_path.exists() {
+                let _ = fs::remove_file(auth_path);
+            }
+            println!(
+                "[fugit-bridge-auth] logout complete host={} username={}",
+                resolved_host, username
+            );
+        }
+    }
+    Ok(())
+}
+
+fn resolve_bridge_host(host_arg: Option<&str>, remote_url: Option<&str>) -> Option<String> {
+    if let Some(host) = host_arg {
+        let token = host.trim();
+        if !token.is_empty() {
+            return Some(token.to_string());
+        }
+    }
+    if let Some(url) = remote_url {
+        return parse_git_host(url);
+    }
+    None
+}
+
+fn parse_git_host(remote_url: &str) -> Option<String> {
+    let trimmed = remote_url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some((_, tail)) = trimmed.split_once("://") {
+        let host_port = tail.split('/').next().unwrap_or_default();
+        if host_port.is_empty() {
+            return None;
+        }
+        let without_user = host_port.rsplit('@').next().unwrap_or(host_port);
+        let host = without_user.split(':').next().unwrap_or_default().trim();
+        if host.is_empty() {
+            None
+        } else {
+            Some(host.to_string())
+        }
+    } else if trimmed.contains('@') && trimmed.contains(':') {
+        let tail = trimmed.split('@').nth(1).unwrap_or_default();
+        let host = tail.split(':').next().unwrap_or_default().trim();
+        if host.is_empty() {
+            None
+        } else {
+            Some(host.to_string())
+        }
+    } else {
+        None
+    }
+}
+
+fn git_remote_url(repo_root: &Path, remote: &str) -> Result<Option<String>> {
+    let output = ProcessCommand::new("git")
+        .current_dir(repo_root)
+        .args(["remote", "get-url", remote])
+        .output()
+        .with_context(|| format!("failed reading git remote URL for '{}'", remote))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let remote_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if remote_url.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(remote_url))
+    }
+}
+
+fn configured_credential_helper(repo_root: &Path) -> Result<Option<String>> {
+    let output = ProcessCommand::new("git")
+        .current_dir(repo_root)
+        .args(["config", "--get", "credential.helper"])
+        .output()
+        .with_context(|| "failed reading git credential.helper")?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let helper = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if helper.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(helper))
+    }
+}
+
+fn ensure_credential_helper(repo_root: &Path, requested: Option<String>) -> Result<(String, bool)> {
+    if let Some(helper) = requested {
+        let helper = helper.trim().to_string();
+        if helper.is_empty() {
+            bail!("credential helper cannot be empty");
+        }
+        run_git(repo_root, &["config", "credential.helper", &helper])?;
+        return Ok((helper, false));
+    }
+
+    if let Some(helper) = configured_credential_helper(repo_root)? {
+        return Ok((helper, false));
+    }
+
+    // Portable fallback so auth works end-to-end even on clean machines.
+    let helper = "store".to_string();
+    run_git(repo_root, &["config", "credential.helper", &helper])?;
+    Ok((helper, true))
+}
+
+fn git_credential_fill(
+    repo_root: &Path,
+    host: &str,
+    username: Option<&str>,
+) -> Result<Option<GitCredential>> {
+    let mut payload = format!("protocol=https\nhost={}\n", host);
+    if let Some(username) = username
+        && !username.trim().is_empty()
+    {
+        payload.push_str(&format!("username={}\n", username.trim()));
+    }
+    payload.push('\n');
+
+    let mut cmd = ProcessCommand::new("git");
+    cmd.current_dir(repo_root)
+        .arg("credential")
+        .arg("fill")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .with_context(|| "failed spawning git credential fill")?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(payload.as_bytes())
+            .with_context(|| "failed writing git credential fill payload")?;
+    }
+    let output = child
+        .wait_with_output()
+        .with_context(|| "failed waiting on git credential fill")?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if stdout.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(parse_git_credential_output(&stdout))
+}
+
+fn git_credential_approve(repo_root: &Path, host: &str, username: &str, token: &str) -> Result<()> {
+    let payload = format!(
+        "protocol=https\nhost={}\nusername={}\npassword={}\n\n",
+        host, username, token
+    );
+    let mut cmd = ProcessCommand::new("git");
+    cmd.current_dir(repo_root)
+        .arg("credential")
+        .arg("approve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .with_context(|| "failed spawning git credential approve")?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(payload.as_bytes())
+            .with_context(|| "failed writing git credential approve payload")?;
+    }
+    let output = child
+        .wait_with_output()
+        .with_context(|| "failed waiting on git credential approve")?;
+    if !output.status.success() {
+        bail!(
+            "git credential approve failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn git_credential_reject(repo_root: &Path, host: &str, username: &str) -> Result<()> {
+    let payload = format!("protocol=https\nhost={}\nusername={}\n\n", host, username);
+    let mut cmd = ProcessCommand::new("git");
+    cmd.current_dir(repo_root)
+        .arg("credential")
+        .arg("reject")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .with_context(|| "failed spawning git credential reject")?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(payload.as_bytes())
+            .with_context(|| "failed writing git credential reject payload")?;
+    }
+    let output = child
+        .wait_with_output()
+        .with_context(|| "failed waiting on git credential reject")?;
+    if !output.status.success() {
+        bail!(
+            "git credential reject failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn parse_git_credential_output(stdout: &str) -> Option<GitCredential> {
+    let mut username = None::<String>;
+    let mut password = None::<String>;
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "username" => username = Some(value.trim().to_string()),
+            "password" => password = Some(value.trim().to_string()),
+            _ => {}
+        }
+    }
+    if username.is_none() && password.is_none() {
+        None
+    } else {
+        Some(GitCredential { username, password })
+    }
+}
+
+fn verify_git_remote_access(repo_root: &Path, remote_url: &str) -> Result<bool> {
+    let output = ProcessCommand::new("git")
+        .current_dir(repo_root)
+        .args(["ls-remote", "--exit-code", remote_url, "HEAD"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .with_context(|| "failed verifying remote access with git ls-remote")?;
+    Ok(output.status.success())
+}
+
+fn cmd_checkout(repo_root: &Path, args: CheckoutArgs) -> Result<()> {
+    let (_config, mut branches) = load_initialized_state(repo_root)?;
+    let active_branch = branches.active_branch.clone();
+    let source_branch = args.branch.unwrap_or_else(|| active_branch.clone());
+    let branch_pointer = branches
+        .branches
+        .get(&source_branch)
+        .ok_or_else(|| anyhow!("timeline branch does not exist: {}", source_branch))?
+        .clone();
+
+    let events = read_branch_events(repo_root, &source_branch)?;
+    let head_index = load_branch_index(repo_root, &source_branch)?;
+    let target_event_id = match args.event {
+        Some(token) => Some(token),
+        None => branch_pointer.head_event_id.clone(),
+    };
+
+    let target_index = match target_event_id.as_deref() {
+        Some(event_id) => reconstruct_index_at_event(&events, &head_index, event_id)?,
+        None => head_index.clone(),
+    };
+
+    let current_base_index = load_branch_index(repo_root, &active_branch)?;
+    let hash_jobs = resolve_parallel_jobs(args.hash_jobs, args.burst);
+    let current_index = scan_repo(
+        repo_root,
+        Some(&current_base_index),
+        args.strict_hash,
+        hash_jobs,
+    )?;
+    let dirty = diff_indexes(&current_base_index, &current_index);
+    if !args.force && !dirty.is_empty() {
+        bail!(
+            "working tree has uncheckpointed changes on active branch '{}': {} paths (use --force to override)",
+            active_branch,
+            dirty.len()
+        );
+    }
+
+    let planned = diff_indexes(&current_index, &target_index);
+    let mut missing_objects = Vec::<String>::new();
+    for change in &planned {
+        match change.kind {
+            ChangeKind::Added | ChangeKind::Modified => {
+                let target_hash = change
+                    .new_hash
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("missing target hash for {}", change.path))?;
+                let current_same = current_index
+                    .get(&change.path)
+                    .map(|row| row.hash == target_hash)
+                    .unwrap_or(false);
+                let object_path = timeline_objects_dir(repo_root).join(target_hash);
+                if !current_same && !object_path.exists() {
+                    missing_objects.push(format!("{} ({})", change.path, target_hash));
+                }
+            }
+            ChangeKind::Deleted => {}
+        }
+    }
+
+    if !missing_objects.is_empty() {
+        bail!(
+            "cannot materialize target snapshot; missing object blobs:\n{}\nRun a checkpoint that captures these files before checkout.",
+            missing_objects.join("\n")
+        );
+    }
+
+    if args.dry_run {
+        println!(
+            "[fugit-checkout] dry-run branch={} event={} planned_changes={} (+{} ~{} -{})",
+            source_branch,
+            target_event_id.as_deref().unwrap_or("head"),
+            planned.len(),
+            planned
+                .iter()
+                .filter(|row| matches!(row.kind, ChangeKind::Added))
+                .count(),
+            planned
+                .iter()
+                .filter(|row| matches!(row.kind, ChangeKind::Modified))
+                .count(),
+            planned
+                .iter()
+                .filter(|row| matches!(row.kind, ChangeKind::Deleted))
+                .count()
+        );
+        return Ok(());
+    }
+
+    for change in &planned {
+        let abs_path = repo_root.join(PathBuf::from(&change.path));
+        match change.kind {
+            ChangeKind::Added | ChangeKind::Modified => {
+                let target_hash = change
+                    .new_hash
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("missing target hash for {}", change.path))?;
+                let current_same = current_index
+                    .get(&change.path)
+                    .map(|row| row.hash == target_hash)
+                    .unwrap_or(false);
+                if current_same {
+                    continue;
+                }
+                let object_path = timeline_objects_dir(repo_root).join(target_hash);
+                if let Some(parent) = abs_path.parent() {
+                    fs::create_dir_all(parent).with_context(|| {
+                        format!("failed creating parent directory {}", parent.display())
+                    })?;
+                }
+                fs::copy(&object_path, &abs_path).with_context(|| {
+                    format!(
+                        "failed restoring {} from object {}",
+                        abs_path.display(),
+                        object_path.display()
+                    )
+                })?;
+            }
+            ChangeKind::Deleted => {
+                if abs_path.exists() {
+                    fs::remove_file(&abs_path)
+                        .with_context(|| format!("failed deleting {}", abs_path.display()))?;
+                }
+            }
+        }
+    }
+
+    if args.move_head {
+        if !branches.branches.contains_key(&source_branch) {
+            bail!("timeline branch missing after checkout: {}", source_branch);
+        }
+        if let Some(pointer) = branches.branches.get_mut(&source_branch) {
+            pointer.head_event_id = target_event_id.clone();
+        }
+        branches.active_branch = source_branch.clone();
+        write_pretty_json(
+            &timeline_branch_index_path(repo_root, &source_branch),
+            &target_index,
+        )?;
+        write_pretty_json(&timeline_branches_path(repo_root), &branches)?;
+    }
+
+    println!(
+        "[fugit-checkout] restored branch={} event={} changed_paths={} move_head={}",
+        source_branch,
+        target_event_id.as_deref().unwrap_or("head"),
+        planned.len(),
+        if args.move_head { "true" } else { "false" }
+    );
+    Ok(())
+}
+
+fn cmd_gc(repo_root: &Path, args: GcArgs) -> Result<()> {
+    let (_config, branches) = load_initialized_state(repo_root)?;
+    let mut referenced = BTreeSet::<String>::new();
+    for branch_name in branches.branches.keys() {
+        let events = read_branch_events(repo_root, branch_name)?;
+        for event in events {
+            for change in event.changes {
+                if let Some(hash) = change.old_hash {
+                    referenced.insert(hash);
+                }
+                if let Some(hash) = change.new_hash {
+                    referenced.insert(hash);
+                }
+            }
+        }
+        let index = load_branch_index(repo_root, branch_name)?;
+        for row in index.values() {
+            referenced.insert(row.hash.clone());
+        }
+    }
+
+    let objects_dir = timeline_objects_dir(repo_root);
+    let mut total_objects = 0_u64;
+    let mut total_bytes = 0_u64;
+    let mut pruned_objects = 0_u64;
+    let mut pruned_bytes = 0_u64;
+
+    if objects_dir.exists() {
+        for entry in fs::read_dir(&objects_dir)
+            .with_context(|| format!("failed reading {}", objects_dir.display()))?
+        {
+            let entry = entry.with_context(|| "failed reading object dir entry")?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let hash = entry.file_name().to_string_lossy().to_string();
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            total_objects += 1;
+            total_bytes += size;
+            if referenced.contains(&hash) {
+                continue;
+            }
+            pruned_objects += 1;
+            pruned_bytes += size;
+            if !args.dry_run {
+                fs::remove_file(&path)
+                    .with_context(|| format!("failed deleting object {}", path.display()))?;
+            }
+        }
+    }
+
+    let report = json!({
+        "schema_version": "fugit.gc.report.v1",
+        "generated_at_utc": now_utc(),
+        "dry_run": args.dry_run,
+        "total_objects": total_objects,
+        "total_bytes": total_bytes,
+        "pruned_objects": pruned_objects,
+        "pruned_bytes": pruned_bytes,
+        "remaining_objects": total_objects.saturating_sub(pruned_objects),
+        "remaining_bytes": total_bytes.saturating_sub(pruned_bytes)
+    });
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "[fugit-gc] dry_run={} total_objects={} pruned_objects={} reclaimed_bytes={}",
+            args.dry_run, total_objects, pruned_objects, pruned_bytes
+        );
+    }
+    Ok(())
+}
+
+fn cmd_lock(repo_root: &Path, args: LockArgs) -> Result<()> {
+    let mut state = load_lock_state(repo_root)?;
+    let state_changed = prune_expired_locks(&mut state)?;
+    match args.action {
+        LockAction::List { json } => {
+            if state_changed {
+                write_pretty_json(&timeline_locks_path(repo_root), &state)?;
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&state.locks)?);
+            } else {
+                println!("[fugit-lock] active={}", state.locks.len());
+                for lock in &state.locks {
+                    println!(
+                        "{} pattern={} agent={} expires={}",
+                        lock.lock_id,
+                        lock.pattern,
+                        lock.agent_id,
+                        lock.expires_at_utc.as_deref().unwrap_or("never")
+                    );
+                }
+            }
+        }
+        LockAction::Add {
+            pattern,
+            agent,
+            ttl_minutes,
+        } => {
+            if pattern.trim().is_empty() {
+                bail!("lock pattern cannot be empty");
+            }
+            let lock_id = format!("lock_{}", Uuid::new_v4().simple());
+            let created_at = now_utc();
+            let expires_at_utc = ttl_minutes.and_then(|minutes| {
+                if minutes <= 0 {
+                    None
+                } else {
+                    Some((Utc::now() + Duration::minutes(minutes)).to_rfc3339())
+                }
+            });
+            state.locks.push(FileLock {
+                lock_id: lock_id.clone(),
+                pattern: pattern.trim().to_string(),
+                agent_id: agent.unwrap_or_else(default_agent_id),
+                created_at_utc: created_at,
+                expires_at_utc,
+            });
+            write_pretty_json(&timeline_locks_path(repo_root), &state)?;
+            println!("[fugit-lock] added {}", lock_id);
+        }
+        LockAction::Remove { lock_id } => {
+            let before = state.locks.len();
+            state.locks.retain(|lock| lock.lock_id != lock_id);
+            if state.locks.len() == before {
+                bail!("lock not found: {}", lock_id);
+            }
+            write_pretty_json(&timeline_locks_path(repo_root), &state)?;
+            println!("[fugit-lock] removed {}", lock_id);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_project(args: ProjectArgs) -> Result<()> {
+    let mut registry = load_project_registry()?;
+    match args.action {
+        ProjectAction::List { json } => {
+            let rows = registry
+                .projects
+                .iter()
+                .map(|project| {
+                    json!({
+                        "name": project.name,
+                        "repo_root": project.repo_root,
+                        "added_at_utc": project.added_at_utc,
+                        "updated_at_utc": project.updated_at_utc,
+                        "is_default": registry.default_project.as_deref() == Some(project.name.as_str())
+                    })
+                })
+                .collect::<Vec<_>>();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else {
+                println!("[fugit-project] registered={}", rows.len());
+                for row in rows {
+                    let marker = if row["is_default"].as_bool().unwrap_or(false) {
+                        "*"
+                    } else {
+                        "-"
+                    };
+                    println!(
+                        "{} {} repo_root={}",
+                        marker,
+                        row["name"].as_str().unwrap_or("unknown"),
+                        row["repo_root"].as_str().unwrap_or("unknown")
+                    );
+                }
+            }
+        }
+        ProjectAction::Add {
+            name,
+            repo_root,
+            set_default,
+            json,
+        } => {
+            validate_project_name(&name)?;
+            let canonical_root = resolve_repo_root(&repo_root)?;
+            let now = now_utc();
+            let normalized_name = name.trim().to_string();
+            if let Some(existing) = registry
+                .projects
+                .iter_mut()
+                .find(|project| project.name == normalized_name)
+            {
+                existing.repo_root = canonical_root.display().to_string();
+                existing.updated_at_utc = now.clone();
+            } else {
+                registry.projects.push(RegisteredProject {
+                    name: normalized_name.clone(),
+                    repo_root: canonical_root.display().to_string(),
+                    added_at_utc: now.clone(),
+                    updated_at_utc: now.clone(),
+                });
+            }
+            if set_default {
+                registry.default_project = Some(normalized_name.clone());
+            }
+            registry
+                .projects
+                .sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
+            registry.updated_at_utc = now;
+            write_project_registry(&registry)?;
+            let payload = json!({
+                "schema_version": "fugit.project.add.v1",
+                "generated_at_utc": now_utc(),
+                "name": normalized_name,
+                "repo_root": canonical_root.display().to_string(),
+                "set_default": set_default,
+                "default_project": registry.default_project
+            });
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!(
+                    "[fugit-project] upserted name={} repo_root={}",
+                    payload["name"].as_str().unwrap_or("unknown"),
+                    payload["repo_root"].as_str().unwrap_or("unknown")
+                );
+            }
+        }
+        ProjectAction::Remove { name, json } => {
+            let normalized_name = name.trim();
+            if normalized_name.is_empty() {
+                bail!("project name cannot be empty");
+            }
+            let before = registry.projects.len();
+            registry
+                .projects
+                .retain(|project| project.name != normalized_name);
+            if registry.projects.len() == before {
+                bail!("project not found: {}", normalized_name);
+            }
+            if registry.default_project.as_deref() == Some(normalized_name) {
+                registry.default_project = None;
+            }
+            registry
+                .projects
+                .sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
+            registry.updated_at_utc = now_utc();
+            write_project_registry(&registry)?;
+            let payload = json!({
+                "schema_version": "fugit.project.remove.v1",
+                "generated_at_utc": now_utc(),
+                "name": normalized_name,
+                "default_project": registry.default_project
+            });
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("[fugit-project] removed name={}", normalized_name);
+            }
+        }
+        ProjectAction::Use { name, json } => {
+            let normalized_name = name.trim();
+            if normalized_name.is_empty() {
+                bail!("project name cannot be empty");
+            }
+            if !registry
+                .projects
+                .iter()
+                .any(|project| project.name == normalized_name)
+            {
+                bail!("project not found: {}", normalized_name);
+            }
+            registry
+                .projects
+                .sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
+            registry.default_project = Some(normalized_name.to_string());
+            registry.updated_at_utc = now_utc();
+            write_project_registry(&registry)?;
+            let payload = json!({
+                "schema_version": "fugit.project.use.v1",
+                "generated_at_utc": now_utc(),
+                "default_project": registry.default_project
+            });
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("[fugit-project] default project set to {}", normalized_name);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskDispatchKind {
+    OwnedClaim,
+    Open,
+    Steal,
+}
+
+impl TaskDispatchKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            TaskDispatchKind::OwnedClaim => "owned_claim",
+            TaskDispatchKind::Open => "open",
+            TaskDispatchKind::Steal => "steal",
+        }
+    }
+}
+
+fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
+    let mut state = load_task_state(repo_root)?;
+    let state_changed = prune_expired_task_claims(&mut state)?;
+
+    match args.action {
+        TaskAction::List {
+            json,
+            status,
+            agent,
+            ready_only,
+            limit,
+        } => {
+            if state_changed {
+                state.updated_at_utc = now_utc();
+                write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+            }
+            let status_map = task_status_map(&state);
+            let mut indices: Vec<usize> = (0..state.tasks.len()).collect();
+            sort_task_indices(&state, &mut indices);
+            let mut rows = Vec::<serde_json::Value>::new();
+            for idx in indices {
+                let task = &state.tasks[idx];
+                if let Some(filter) = status
+                    && !filter.matches(&task.status)
+                {
+                    continue;
+                }
+                if let Some(agent_filter) = agent.as_deref() {
+                    let touches_agent = task.created_by_agent_id == agent_filter
+                        || task.claimed_by_agent_id.as_deref() == Some(agent_filter)
+                        || task.completed_by_agent_id.as_deref() == Some(agent_filter);
+                    if !touches_agent {
+                        continue;
+                    }
+                }
+                let blocked_by = task_blocked_by(task, &status_map);
+                let ready = task.status != TaskStatus::Done && blocked_by.is_empty();
+                if ready_only && !ready {
+                    continue;
+                }
+                rows.push(json!({
+                    "task_id": task.task_id,
+                    "title": task.title,
+                    "detail": task.detail,
+                    "priority": task.priority,
+                    "status": task.status,
+                    "tags": task.tags,
+                    "depends_on": task.depends_on,
+                    "blocked_by": blocked_by,
+                    "ready": ready,
+                    "created_by_agent_id": task.created_by_agent_id,
+                    "claimed_by_agent_id": task.claimed_by_agent_id,
+                    "created_at_utc": task.created_at_utc,
+                    "updated_at_utc": task.updated_at_utc,
+                    "completed_at_utc": task.completed_at_utc
+                }));
+                if rows.len() >= limit {
+                    break;
+                }
+            }
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else {
+                println!("[fugit-task] count={}", rows.len());
+                for row in rows {
+                    let task_id = row
+                        .get("task_id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown");
+                    let title = row
+                        .get("title")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("untitled");
+                    let status = row
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("open");
+                    let priority = row
+                        .get("priority")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0);
+                    let ready = row
+                        .get("ready")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    let claimed_by = row
+                        .get("claimed_by_agent_id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("none");
+                    println!(
+                        "{} status={} priority={} ready={} claimed_by={} title={}",
+                        task_id, status, priority, ready, claimed_by, title
+                    );
+                }
+            }
+        }
+        TaskAction::Add {
+            title,
+            detail,
+            agent,
+            priority,
+            tags,
+            depends_on,
+            json,
+        } => {
+            let normalized_title = title.trim();
+            if normalized_title.is_empty() {
+                bail!("task title cannot be empty");
+            }
+            let now = now_utc();
+            let task = FugitTask {
+                task_id: format!("task_{}", Uuid::new_v4().simple()),
+                title: normalized_title.to_string(),
+                detail: detail.and_then(|value| {
+                    let trimmed = value.trim().to_string();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed)
+                    }
+                }),
+                priority,
+                tags: dedupe_keep_order(tags),
+                depends_on: dedupe_keep_order(depends_on),
+                status: TaskStatus::Open,
+                created_at_utc: now.clone(),
+                updated_at_utc: now.clone(),
+                created_by_agent_id: agent.unwrap_or_else(default_agent_id),
+                claimed_by_agent_id: None,
+                claim_started_at_utc: None,
+                claim_expires_at_utc: None,
+                completed_at_utc: None,
+                completed_by_agent_id: None,
+            };
+            state.tasks.push(task.clone());
+            state.updated_at_utc = now;
+            write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+            append_task_timeline_event(repo_root, &task, &task.created_by_agent_id, "add", None)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&task)?);
+            } else {
+                println!(
+                    "[fugit-task] added {} priority={} tags={}",
+                    task.task_id,
+                    task.priority,
+                    task.tags.join(",")
+                );
+            }
+        }
+        TaskAction::Request {
+            agent,
+            tags,
+            claim_ttl_minutes,
+            steal_after_minutes,
+            no_steal,
+            no_claim,
+            json,
+        } => {
+            let agent_id = agent.unwrap_or_else(default_agent_id);
+            let required_tags = dedupe_keep_order(tags);
+            let now = Utc::now();
+            let selection = select_task_for_agent(
+                &state,
+                &agent_id,
+                &required_tags,
+                !no_steal,
+                steal_after_minutes,
+                now,
+            );
+            let Some((task_index, dispatch_kind)) = selection else {
+                if state_changed {
+                    state.updated_at_utc = now_utc();
+                    write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+                }
+                let payload = json!({
+                    "schema_version": "fugit.task.request.v1",
+                    "generated_at_utc": now_utc(),
+                    "agent_id": agent_id,
+                    "assigned": false,
+                    "claimed": false,
+                    "task": null
+                });
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    println!(
+                        "[fugit-task] no ready tasks available for agent={}",
+                        payload["agent_id"]
+                    );
+                }
+                return Ok(());
+            };
+
+            let mut claimed = false;
+            if !no_claim {
+                apply_task_claim(
+                    &mut state.tasks[task_index],
+                    &agent_id,
+                    claim_ttl_minutes,
+                    Utc::now(),
+                );
+                state.updated_at_utc = now_utc();
+                write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+                claimed = true;
+            } else if state_changed {
+                state.updated_at_utc = now_utc();
+                write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+            }
+            let task = state.tasks[task_index].clone();
+            if claimed {
+                append_task_timeline_event(
+                    repo_root,
+                    &task,
+                    &agent_id,
+                    "claim",
+                    Some(dispatch_kind),
+                )?;
+            }
+            let status_map = task_status_map(&state);
+            let blocked_by = task_blocked_by(&task, &status_map);
+            let ready = task.status != TaskStatus::Done && blocked_by.is_empty();
+            let payload = json!({
+                "schema_version": "fugit.task.request.v1",
+                "generated_at_utc": now_utc(),
+                "agent_id": agent_id,
+                "assigned": true,
+                "claimed": claimed,
+                "dispatch_kind": dispatch_kind.as_str(),
+                "task": {
+                    "task_id": task.task_id,
+                    "title": task.title,
+                    "detail": task.detail,
+                    "priority": task.priority,
+                    "status": task.status,
+                    "tags": task.tags,
+                    "depends_on": task.depends_on,
+                    "blocked_by": blocked_by,
+                    "ready": ready,
+                    "created_by_agent_id": task.created_by_agent_id,
+                    "claimed_by_agent_id": task.claimed_by_agent_id,
+                    "claim_expires_at_utc": task.claim_expires_at_utc
+                }
+            });
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                let task_id = payload["task"]["task_id"].as_str().unwrap_or("unknown");
+                let title = payload["task"]["title"].as_str().unwrap_or("untitled");
+                println!(
+                    "[fugit-task] dispatch={} claimed={} task_id={} title={}",
+                    dispatch_kind.as_str(),
+                    claimed,
+                    task_id,
+                    title
+                );
+            }
+        }
+        TaskAction::Claim {
+            task_id,
+            agent,
+            claim_ttl_minutes,
+            steal,
+            json,
+        } => {
+            let agent_id = agent.unwrap_or_else(default_agent_id);
+            let now = Utc::now();
+            let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id)
+            else {
+                bail!("task not found: {}", task_id);
+            };
+            let task = &state.tasks[task_index];
+            if task.status == TaskStatus::Done {
+                bail!("task already completed: {}", task.task_id);
+            }
+            if let Some(owner) = task.claimed_by_agent_id.as_deref()
+                && owner != agent_id
+                && !task_claim_is_expired(task, now)
+                && !steal
+            {
+                bail!(
+                    "task {} is currently claimed by {} (use --steal to override)",
+                    task.task_id,
+                    owner
+                );
+            }
+            apply_task_claim(
+                &mut state.tasks[task_index],
+                &agent_id,
+                claim_ttl_minutes,
+                now,
+            );
+            state.updated_at_utc = now_utc();
+            write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+            let task = state.tasks[task_index].clone();
+            append_task_timeline_event(repo_root, &task, &agent_id, "claim", None)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&state.tasks[task_index])?
+                );
+            } else {
+                println!(
+                    "[fugit-task] claimed {} by {}",
+                    state.tasks[task_index].task_id, agent_id
+                );
+            }
+        }
+        TaskAction::Done {
+            task_id,
+            agent,
+            json,
+        } => {
+            let agent_id = agent.unwrap_or_else(default_agent_id);
+            let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id)
+            else {
+                bail!("task not found: {}", task_id);
+            };
+            let task = &state.tasks[task_index];
+            if let Some(owner) = task.claimed_by_agent_id.as_deref()
+                && owner != agent_id
+            {
+                bail!(
+                    "task {} is claimed by {}; release/steal before marking done",
+                    task.task_id,
+                    owner
+                );
+            }
+            let now = now_utc();
+            state.tasks[task_index].status = TaskStatus::Done;
+            state.tasks[task_index].updated_at_utc = now.clone();
+            state.tasks[task_index].completed_at_utc = Some(now);
+            state.tasks[task_index].completed_by_agent_id = Some(agent_id.clone());
+            state.tasks[task_index].claimed_by_agent_id = None;
+            state.tasks[task_index].claim_started_at_utc = None;
+            state.tasks[task_index].claim_expires_at_utc = None;
+            state.updated_at_utc = now_utc();
+            write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+            let task = state.tasks[task_index].clone();
+            append_task_timeline_event(repo_root, &task, &agent_id, "done", None)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&state.tasks[task_index])?
+                );
+            } else {
+                println!(
+                    "[fugit-task] completed {} by {}",
+                    state.tasks[task_index].task_id, agent_id
+                );
+            }
+        }
+        TaskAction::Release {
+            task_id,
+            agent,
+            json,
+        } => {
+            let agent_id = agent.unwrap_or_else(default_agent_id);
+            let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id)
+            else {
+                bail!("task not found: {}", task_id);
+            };
+            if state.tasks[task_index].status == TaskStatus::Done {
+                bail!(
+                    "task already completed: {}",
+                    state.tasks[task_index].task_id
+                );
+            }
+            if let Some(owner) = state.tasks[task_index].claimed_by_agent_id.as_deref()
+                && owner != agent_id
+            {
+                bail!(
+                    "task {} is claimed by {}; cannot release as {}",
+                    state.tasks[task_index].task_id,
+                    owner,
+                    agent_id
+                );
+            }
+            state.tasks[task_index].status = TaskStatus::Open;
+            state.tasks[task_index].updated_at_utc = now_utc();
+            state.tasks[task_index].claimed_by_agent_id = None;
+            state.tasks[task_index].claim_started_at_utc = None;
+            state.tasks[task_index].claim_expires_at_utc = None;
+            state.updated_at_utc = now_utc();
+            write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+            let task = state.tasks[task_index].clone();
+            append_task_timeline_event(repo_root, &task, &agent_id, "release", None)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&state.tasks[task_index])?
+                );
+            } else {
+                println!("[fugit-task] released {}", state.tasks[task_index].task_id);
+            }
+        }
+        TaskAction::Gui {
+            project,
+            host,
+            port,
+            no_open,
+            background,
+            json,
+        } => {
+            if json && !background {
+                bail!("--json requires --background for task gui");
+            }
+            let open_browser = !no_open;
+            if background {
+                if port == 0 {
+                    bail!("--background requires explicit non-zero --port");
+                }
+                let url = task_gui_url(&host, port, project.as_deref());
+                spawn_task_gui_background(repo_root, &host, port, project.as_deref())?;
+                let mut opened_browser = false;
+                if open_browser {
+                    if open_url_in_browser(&url).is_ok() {
+                        opened_browser = true;
+                    } else {
+                        eprintln!(
+                            "[fugit-task-gui] warning: launched server but failed opening browser"
+                        );
+                    }
+                }
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "schema_version": "fugit.task.gui.launch.v1",
+                            "generated_at_utc": now_utc(),
+                            "background": true,
+                            "url": url,
+                            "host": host,
+                            "port": port,
+                            "project": project,
+                            "opened_browser": opened_browser
+                        }))?
+                    );
+                } else {
+                    println!("[fugit-task-gui] launched background server at {}", url);
+                }
+            } else {
+                let listener = bind_task_gui_listener(&host, port)?;
+                let local_addr = listener
+                    .local_addr()
+                    .with_context(|| "failed resolving task-gui local address")?;
+                let url = task_gui_url(
+                    &local_addr.ip().to_string(),
+                    local_addr.port(),
+                    project.as_deref(),
+                );
+                println!(
+                    "[fugit-task-gui] serving live task board at {} (Ctrl+C to stop)",
+                    url
+                );
+                if open_browser && let Err(err) = open_url_in_browser(&url) {
+                    eprintln!(
+                        "[fugit-task-gui] warning: failed opening browser automatically: {}",
+                        err
+                    );
+                }
+                serve_task_gui(listener, repo_root, project.as_deref())?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn append_task_timeline_event(
+    repo_root: &Path,
+    task: &FugitTask,
+    agent_id: &str,
+    action: &str,
+    dispatch_kind: Option<TaskDispatchKind>,
+) -> Result<()> {
+    if !timeline_is_initialized(repo_root) {
+        return Ok(());
+    }
+
+    let (_config, mut branches) = load_initialized_state(repo_root)?;
+    let active_branch = branches.active_branch.clone();
+    let parent_event_id = branches
+        .branches
+        .get(&active_branch)
+        .and_then(|row| row.head_event_id.clone());
+    let tracked_file_count = load_branch_index(repo_root, &active_branch)
+        .map(|index| index.len())
+        .unwrap_or(0);
+    let event_id = format!("evt_{}", Uuid::new_v4().simple());
+    let event = TimelineEvent {
+        schema_version: SCHEMA_EVENT.to_string(),
+        event_id: event_id.clone(),
+        created_at_utc: now_utc(),
+        branch: active_branch.clone(),
+        parent_event_id,
+        agent_id: agent_id.to_string(),
+        summary: task_timeline_summary(action, task, dispatch_kind),
+        tags: task_timeline_tags(action, task, dispatch_kind),
+        metrics: EventMetrics {
+            tracked_file_count,
+            changed_file_count: 0,
+            added_count: 0,
+            modified_count: 0,
+            deleted_count: 0,
+            changed_bytes_total: 0,
+        },
+        changes: Vec::new(),
+    };
+    append_jsonl(
+        &timeline_branch_events_path(repo_root, &active_branch),
+        &event,
+    )?;
+    if let Some(pointer) = branches.branches.get_mut(&active_branch) {
+        pointer.head_event_id = Some(event_id);
+    }
+    write_pretty_json(&timeline_branches_path(repo_root), &branches)?;
+    Ok(())
+}
+
+fn task_timeline_summary(
+    action: &str,
+    task: &FugitTask,
+    dispatch_kind: Option<TaskDispatchKind>,
+) -> String {
+    let title = task.title.trim();
+    match (action, dispatch_kind) {
+        ("add", _) => format!("task add: {} \"{}\"", task.task_id, title),
+        ("claim", Some(dispatch)) => format!(
+            "task claim: {} \"{}\" (dispatch={})",
+            task.task_id,
+            title,
+            dispatch.as_str()
+        ),
+        ("claim", None) => format!("task claim: {} \"{}\"", task.task_id, title),
+        ("done", _) => format!("task done: {} \"{}\"", task.task_id, title),
+        ("release", _) => format!("task release: {} \"{}\"", task.task_id, title),
+        (other, _) => format!("task {}: {} \"{}\"", other, task.task_id, title),
+    }
+}
+
+fn task_timeline_tags(
+    action: &str,
+    task: &FugitTask,
+    dispatch_kind: Option<TaskDispatchKind>,
+) -> Vec<String> {
+    let mut tags = vec![
+        "task".to_string(),
+        format!("task_action:{}", action),
+        format!("task_id:{}", task.task_id),
+    ];
+    if let Some(dispatch) = dispatch_kind {
+        tags.push(format!("task_dispatch:{}", dispatch.as_str()));
+    }
+    for tag in &task.tags {
+        tags.push(format!("task_tag:{}", tag));
+    }
+    dedupe_keep_order(tags)
+}
+
+fn bind_task_gui_listener(host: &str, port: u16) -> Result<TcpListener> {
+    let bind_addr = format!("{}:{}", host.trim(), port);
+    let listener = TcpListener::bind(&bind_addr)
+        .with_context(|| format!("failed binding task gui listener at {}", bind_addr))?;
+    Ok(listener)
+}
+
+fn task_gui_url(host: &str, port: u16, project: Option<&str>) -> String {
+    let browser_host = match host {
+        "0.0.0.0" => "127.0.0.1",
+        "::" => "localhost",
+        _ => host,
+    };
+    let base = if browser_host.contains(':') && !browser_host.starts_with('[') {
+        format!("http://[{}]:{}", browser_host, port)
+    } else {
+        format!("http://{}:{}", browser_host, port)
+    };
+    if let Some(project_key) = project {
+        let trimmed = project_key.trim();
+        if !trimmed.is_empty() {
+            return format!("{}/?project={}", base, percent_encode(trimmed));
+        }
+    }
+    base
+}
+
+fn spawn_task_gui_background(
+    repo_root: &Path,
+    host: &str,
+    port: u16,
+    project: Option<&str>,
+) -> Result<()> {
+    let current_exe =
+        std::env::current_exe().with_context(|| "failed resolving current executable")?;
+    let mut cmd = ProcessCommand::new(current_exe);
+    cmd.arg("--repo-root")
+        .arg(repo_root)
+        .arg("task")
+        .arg("gui")
+        .arg("--host")
+        .arg(host)
+        .arg("--port")
+        .arg(port.to_string())
+        .args(
+            project
+                .filter(|token| !token.trim().is_empty())
+                .map(|token| vec!["--project".to_string(), token.to_string()])
+                .unwrap_or_default(),
+        )
+        .arg("--no-open")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    cmd.spawn()
+        .with_context(|| "failed spawning background task gui process")?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn open_url_in_browser(url: &str) -> Result<()> {
+    let status = ProcessCommand::new("open")
+        .arg(url)
+        .status()
+        .with_context(|| "failed invoking 'open'")?;
+    if !status.success() {
+        bail!("'open' exited with status {}", status);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn open_url_in_browser(url: &str) -> Result<()> {
+    let status = ProcessCommand::new("cmd")
+        .args(["/C", "start", "", url])
+        .status()
+        .with_context(|| "failed invoking 'cmd /C start'")?;
+    if !status.success() {
+        bail!("'cmd /C start' exited with status {}", status);
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_url_in_browser(url: &str) -> Result<()> {
+    let status = ProcessCommand::new("xdg-open")
+        .arg(url)
+        .status()
+        .with_context(|| "failed invoking 'xdg-open'")?;
+    if !status.success() {
+        bail!("'xdg-open' exited with status {}", status);
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", unix)))]
+fn open_url_in_browser(_url: &str) -> Result<()> {
+    bail!("automatic browser launch is not supported on this platform")
+}
+
+fn serve_task_gui(
+    listener: TcpListener,
+    repo_root: &Path,
+    default_project: Option<&str>,
+) -> Result<()> {
+    for incoming in listener.incoming() {
+        match incoming {
+            Ok(mut stream) => {
+                if let Err(err) =
+                    handle_task_gui_connection(&mut stream, repo_root, default_project)
+                {
+                    eprintln!("[fugit-task-gui] request error: {}", err);
+                }
+            }
+            Err(err) => {
+                eprintln!("[fugit-task-gui] incoming connection error: {}", err);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn handle_task_gui_connection(
+    stream: &mut TcpStream,
+    repo_root: &Path,
+    default_project: Option<&str>,
+) -> Result<()> {
+    let mut buffer = [0_u8; 8192];
+    let read = stream
+        .read(&mut buffer)
+        .with_context(|| "failed reading task-gui request")?;
+    if read == 0 {
+        return Ok(());
+    }
+    let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+    let target = parse_http_target(&request).unwrap_or_else(|| HttpTarget {
+        path: "/".to_string(),
+        query: BTreeMap::new(),
+    });
+    let path = target.path;
+
+    if path == "/health" {
+        return write_http_response(
+            stream,
+            "200 OK",
+            "application/json; charset=utf-8",
+            br#"{"ok":true}"#,
+        );
+    }
+
+    if path.starts_with("/api/tasks") {
+        let selected_project = target
+            .query
+            .get("project")
+            .map(String::as_str)
+            .or(default_project);
+        let payload = task_gui_payload(repo_root, selected_project)?;
+        let bytes = serde_json::to_vec_pretty(&payload)
+            .with_context(|| "failed serializing task-gui payload")?;
+        return write_http_response(stream, "200 OK", "application/json; charset=utf-8", &bytes);
+    }
+
+    if path.starts_with("/api/timeline") {
+        let selected_project = target
+            .query
+            .get("project")
+            .map(String::as_str)
+            .or(default_project);
+        let selected_branch = target
+            .query
+            .get("branch")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|token| !token.is_empty());
+        let limit = parse_query_usize(&target.query, "limit")
+            .unwrap_or(120)
+            .clamp(1, 1000);
+        let offset = parse_query_usize(&target.query, "offset")
+            .unwrap_or(0)
+            .min(1_000_000);
+        let payload =
+            task_gui_timeline_payload(repo_root, selected_project, selected_branch, limit, offset)?;
+        let bytes = serde_json::to_vec_pretty(&payload)
+            .with_context(|| "failed serializing task-gui timeline payload")?;
+        return write_http_response(stream, "200 OK", "application/json; charset=utf-8", &bytes);
+    }
+
+    let html = task_gui_html();
+    write_http_response(
+        stream,
+        "200 OK",
+        "text/html; charset=utf-8",
+        html.as_bytes(),
+    )
+}
+
+#[derive(Debug, Clone)]
+struct HttpTarget {
+    path: String,
+    query: BTreeMap<String, String>,
+}
+
+fn parse_http_target(request: &str) -> Option<HttpTarget> {
+    let first_line = request.lines().next()?;
+    let mut parts = first_line.split_whitespace();
+    let _method = parts.next()?;
+    let raw_target = parts.next()?;
+    let mut pieces = raw_target.splitn(2, '?');
+    let path = pieces.next().unwrap_or("/").to_string();
+    let query = pieces.next().map(parse_query_string).unwrap_or_default();
+    Some(HttpTarget { path, query })
+}
+
+fn parse_query_string(query: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::<String, String>::new();
+    for pair in query.split('&') {
+        if pair.trim().is_empty() {
+            continue;
+        }
+        let mut parts = pair.splitn(2, '=');
+        let key = percent_decode(parts.next().unwrap_or_default());
+        if key.trim().is_empty() {
+            continue;
+        }
+        let value = percent_decode(parts.next().unwrap_or_default());
+        out.insert(key, value);
+    }
+    out
+}
+
+fn parse_query_usize(query: &BTreeMap<String, String>, key: &str) -> Option<usize> {
+    query.get(key)?.trim().parse::<usize>().ok()
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut idx = 0;
+    while idx < bytes.len() {
+        let b = bytes[idx];
+        if b == b'%' && idx + 2 < bytes.len() {
+            let hi = bytes[idx + 1];
+            let lo = bytes[idx + 2];
+            if let (Some(hi), Some(lo)) = (hex_to_u8(hi), hex_to_u8(lo)) {
+                out.push((hi << 4 | lo) as char);
+                idx += 3;
+                continue;
+            }
+        }
+        if b == b'+' {
+            out.push(' ');
+        } else {
+            out.push(b as char);
+        }
+        idx += 1;
+    }
+    out
+}
+
+fn percent_encode(input: &str) -> String {
+    let mut out = String::new();
+    for ch in input.bytes() {
+        let is_unreserved = ch.is_ascii_alphanumeric() || matches!(ch, b'-' | b'_' | b'.' | b'~');
+        if is_unreserved {
+            out.push(ch as char);
+        } else if ch == b' ' {
+            out.push('+');
+        } else {
+            out.push('%');
+            out.push_str(&format!("{:02X}", ch));
+        }
+    }
+    out
+}
+
+fn hex_to_u8(ch: u8) -> Option<u8> {
+    match ch {
+        b'0'..=b'9' => Some(ch - b'0'),
+        b'a'..=b'f' => Some(10 + (ch - b'a')),
+        b'A'..=b'F' => Some(10 + (ch - b'A')),
+        _ => None,
+    }
+}
+
+fn write_http_response(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+) -> Result<()> {
+    let headers = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(headers.as_bytes())
+        .with_context(|| "failed writing task-gui headers")?;
+    stream
+        .write_all(body)
+        .with_context(|| "failed writing task-gui body")?;
+    stream
+        .flush()
+        .with_context(|| "failed flushing task-gui response")?;
+    Ok(())
+}
+
+fn task_gui_payload(repo_root: &Path, project_selector: Option<&str>) -> Result<serde_json::Value> {
+    let projects = collect_task_gui_projects(repo_root)?;
+    let selected = resolve_selected_task_gui_project(&projects, project_selector)
+        .ok_or_else(|| anyhow!("task gui has no available projects"))?;
+    let selected_repo = PathBuf::from(selected.repo_root.clone());
+    let mut state = load_task_state(&selected_repo)?;
+    let changed = prune_expired_task_claims(&mut state)?;
+    if changed {
+        state.updated_at_utc = now_utc();
+        write_pretty_json(&timeline_tasks_path(&selected_repo), &state)?;
+    }
+    let status_map = task_status_map(&state);
+    let mut indices: Vec<usize> = (0..state.tasks.len()).collect();
+    sort_task_indices(&state, &mut indices);
+    let tasks = indices
+        .into_iter()
+        .map(|idx| {
+            let task = &state.tasks[idx];
+            let blocked_by = task_blocked_by(task, &status_map);
+            let ready = task.status != TaskStatus::Done && blocked_by.is_empty();
+            json!({
+                "task_id": task.task_id,
+                "title": task.title,
+                "detail": task.detail,
+                "priority": task.priority,
+                "status": task.status,
+                "tags": task.tags,
+                "depends_on": task.depends_on,
+                "blocked_by": blocked_by,
+                "ready": ready,
+                "created_by_agent_id": task.created_by_agent_id,
+                "claimed_by_agent_id": task.claimed_by_agent_id,
+                "claim_expires_at_utc": task.claim_expires_at_utc,
+                "created_at_utc": task.created_at_utc,
+                "updated_at_utc": task.updated_at_utc,
+                "completed_at_utc": task.completed_at_utc,
+                "completed_by_agent_id": task.completed_by_agent_id
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "schema_version": "fugit.task.gui.snapshot.v1",
+        "generated_at_utc": now_utc(),
+        "selected_project": {
+            "key": selected.key,
+            "name": selected.name,
+            "repo_root": selected.repo_root
+        },
+        "projects": projects,
+        "timeline_initialized": timeline_is_initialized(&selected_repo),
+        "count": tasks.len(),
+        "tasks": tasks
+    }))
+}
+
+fn task_gui_timeline_payload(
+    repo_root: &Path,
+    project_selector: Option<&str>,
+    branch_selector: Option<&str>,
+    limit: usize,
+    offset: usize,
+) -> Result<serde_json::Value> {
+    let projects = collect_task_gui_projects(repo_root)?;
+    let selected = resolve_selected_task_gui_project(&projects, project_selector)
+        .ok_or_else(|| anyhow!("task gui has no available projects"))?;
+    let selected_repo = PathBuf::from(selected.repo_root.clone());
+    let timeline_initialized = timeline_is_initialized(&selected_repo);
+    if !timeline_initialized {
+        return Ok(json!({
+            "schema_version": "fugit.task.gui.timeline.v1",
+            "generated_at_utc": now_utc(),
+            "selected_project": {
+                "key": selected.key,
+                "name": selected.name,
+                "repo_root": selected.repo_root
+            },
+            "projects": projects,
+            "timeline_initialized": false,
+            "active_branch": null,
+            "branch": null,
+            "branches": [],
+            "offset": offset,
+            "limit": limit,
+            "count": 0,
+            "total_events": 0,
+            "has_more": false,
+            "next_offset": offset,
+            "events": []
+        }));
+    }
+
+    let (_config, branches_state) = load_initialized_state(&selected_repo)?;
+    let mut branches = branches_state.branches.keys().cloned().collect::<Vec<_>>();
+    branches.sort();
+    let active_branch = branches_state.active_branch.clone();
+    let selected_branch = branch_selector
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .filter(|token| branches_state.branches.contains_key(*token))
+        .map(ToString::to_string)
+        .unwrap_or_else(|| active_branch.clone());
+
+    let all_events = read_branch_events(&selected_repo, &selected_branch)?;
+    let total_events = all_events.len();
+    let page = timeline_events_page(&all_events, offset, limit);
+    let count = page.len();
+    let has_more = offset + count < total_events;
+    let next_offset = offset + count;
+    let events = page
+        .into_iter()
+        .map(|event| {
+            let task_action = timeline_tag_value(&event.tags, "task_action:");
+            let task_id = timeline_tag_value(&event.tags, "task_id:");
+            let task_dispatch = timeline_tag_value(&event.tags, "task_dispatch:");
+            let is_task_event = event.tags.iter().any(|tag| tag == "task")
+                || task_action.is_some()
+                || task_id.is_some();
+            json!({
+                "event_id": event.event_id,
+                "created_at_utc": event.created_at_utc,
+                "branch": event.branch,
+                "agent_id": event.agent_id,
+                "summary": event.summary,
+                "tags": event.tags,
+                "metrics": {
+                    "tracked_file_count": event.metrics.tracked_file_count,
+                    "changed_file_count": event.metrics.changed_file_count,
+                    "added_count": event.metrics.added_count,
+                    "modified_count": event.metrics.modified_count,
+                    "deleted_count": event.metrics.deleted_count,
+                    "changed_bytes_total": event.metrics.changed_bytes_total
+                },
+                "is_task_event": is_task_event,
+                "task_action": task_action,
+                "task_id": task_id,
+                "task_dispatch": task_dispatch
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(json!({
+        "schema_version": "fugit.task.gui.timeline.v1",
+        "generated_at_utc": now_utc(),
+        "selected_project": {
+            "key": selected.key,
+            "name": selected.name,
+            "repo_root": selected.repo_root
+        },
+        "projects": projects,
+        "timeline_initialized": true,
+        "active_branch": active_branch,
+        "branch": selected_branch,
+        "branches": branches,
+        "offset": offset,
+        "limit": limit,
+        "count": count,
+        "total_events": total_events,
+        "has_more": has_more,
+        "next_offset": next_offset,
+        "events": events
+    }))
+}
+
+fn timeline_events_page(
+    events: &[TimelineEvent],
+    offset: usize,
+    limit: usize,
+) -> Vec<TimelineEvent> {
+    if limit == 0 || events.is_empty() || offset >= events.len() {
+        return Vec::new();
+    }
+    let end_exclusive = events.len().saturating_sub(offset);
+    let start_inclusive = end_exclusive.saturating_sub(limit);
+    let mut page = events[start_inclusive..end_exclusive].to_vec();
+    page.reverse();
+    page
+}
+
+fn timeline_tag_value(tags: &[String], prefix: &str) -> Option<String> {
+    for tag in tags {
+        if let Some(rest) = tag.strip_prefix(prefix) {
+            let token = rest.trim();
+            if !token.is_empty() {
+                return Some(token.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn task_gui_html() -> &'static str {
+    r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>fugit task board</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7fb;
+      --card: #ffffff;
+      --ink: #111827;
+      --muted: #6b7280;
+      --border: #dbe2ef;
+      --open: #065f46;
+      --claimed: #92400e;
+      --done: #1e40af;
+      --blocked: #9f1239;
+      --ready: #15803d;
+      --timeline-task: #0f766e;
+      --timeline-file: #1d4ed8;
+    }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: linear-gradient(180deg, #eef2ff 0%, var(--bg) 30%, var(--bg) 100%);
+      color: var(--ink);
+    }
+    header {
+      padding: 18px 20px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255,255,255,0.85);
+      backdrop-filter: blur(4px);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .head-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    h1 { margin: 0; font-size: 20px; }
+    .meta { margin-top: 6px; color: var(--muted); font-size: 13px; }
+    .project-picker {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--ink);
+      padding: 6px 10px;
+      min-width: 260px;
+      font-size: 13px;
+    }
+    main {
+      padding: 16px;
+      display: grid;
+      gap: 16px;
+      grid-template-columns: 1fr;
+    }
+    @media (min-width: 1080px) {
+      main { grid-template-columns: 1.25fr 1fr; }
+    }
+    .panel {
+      background: rgba(255,255,255,0.82);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px;
+      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.04);
+    }
+    .summary { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+    .pill {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 12px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.04);
+    }
+    .row { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+    .title { margin: 0; font-size: 15px; font-weight: 700; }
+    .priority { font-size: 12px; color: var(--muted); }
+    .status {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .status-open { color: var(--open); background: #d1fae5; }
+    .status-claimed { color: var(--claimed); background: #fef3c7; }
+    .status-done { color: var(--done); background: #dbeafe; }
+    .detail { margin: 8px 0; font-size: 13px; color: #1f2937; white-space: pre-wrap; }
+    .meta-row { font-size: 12px; color: var(--muted); margin-top: 6px; }
+    .tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+    .tag {
+      font-size: 11px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 2px 7px;
+      color: #334155;
+      background: #f8fafc;
+    }
+    .state { margin-top: 8px; font-size: 12px; }
+    .ready { color: var(--ready); font-weight: 600; }
+    .blocked { color: var(--blocked); font-weight: 600; }
+    .timeline-controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    .timeline-controls select,
+    .timeline-controls button {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--ink);
+      padding: 6px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .timeline-controls button[disabled] {
+      cursor: not-allowed;
+      opacity: 0.55;
+    }
+    .timeline-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 72vh;
+      overflow-y: auto;
+      padding-right: 4px;
+    }
+    .timeline-row {
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px;
+      font-size: 12px;
+    }
+    .timeline-row.task { border-left: 4px solid var(--timeline-task); }
+    .timeline-row.file { border-left: 4px solid var(--timeline-file); }
+    .timeline-topline {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+    .timeline-summary {
+      color: var(--ink);
+      font-size: 13px;
+      margin-bottom: 6px;
+      word-break: break-word;
+    }
+    .timeline-metrics {
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .empty {
+      margin-top: 20px;
+      border: 1px dashed var(--border);
+      padding: 20px;
+      border-radius: 12px;
+      color: var(--muted);
+      text-align: center;
+      background: var(--card);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="head-row">
+      <h1>fugit task board</h1>
+      <label>
+        <select id="projectSelect" class="project-picker"></select>
+      </label>
+    </div>
+    <div class="meta" id="meta">loading...</div>
+  </header>
+  <main>
+    <section class="panel">
+      <div class="summary" id="summary"></div>
+      <div class="grid" id="tasks"></div>
+      <div class="empty" id="empty" style="display:none;">No tasks yet. Add one with <code>fugit task add --title "..."</code>.</div>
+    </section>
+    <section class="panel">
+      <div class="timeline-controls">
+        <strong>timeline</strong>
+        <select id="branchSelect"></select>
+        <button id="refreshTimeline" type="button">refresh</button>
+        <button id="loadOlder" type="button">load older</button>
+      </div>
+      <div class="meta" id="timelineMeta">loading timeline...</div>
+      <div class="timeline-list" id="timelineList"></div>
+      <div class="empty" id="timelineEmpty" style="display:none;">No timeline events yet for this branch.</div>
+    </section>
+  </main>
+  <script>
+    const byId = (id) => document.getElementById(id);
+    const params = new URLSearchParams(window.location.search);
+    let selectedProject = params.get("project") || "";
+    let selectedBranch = params.get("branch") || "";
+    let timelineOffset = 0;
+    let timelineHasMore = false;
+    let timelineRows = [];
+    let timelineLoading = false;
+    const TIMELINE_PAGE_SIZE = 120;
+
+    const syncUrl = () => {
+      const next = new URL(window.location.href);
+      if (selectedProject) {
+        next.searchParams.set("project", selectedProject);
+      } else {
+        next.searchParams.delete("project");
+      }
+      if (selectedBranch) {
+        next.searchParams.set("branch", selectedBranch);
+      } else {
+        next.searchParams.delete("branch");
+      }
+      window.history.replaceState({}, "", next.toString());
+    };
+
+    const resetTimeline = () => {
+      timelineOffset = 0;
+      timelineHasMore = false;
+      timelineRows = [];
+    };
+
+    const statusClass = (status) => {
+      if (status === "open") return "status-open";
+      if (status === "claimed") return "status-claimed";
+      if (status === "done") return "status-done";
+      return "status-open";
+    };
+
+    const renderSummary = (tasks) => {
+      const counts = { open: 0, claimed: 0, done: 0, ready: 0, blocked: 0 };
+      for (const task of tasks) {
+        if (counts[task.status] !== undefined) counts[task.status] += 1;
+        if (task.ready) counts.ready += 1;
+        if (!task.ready && task.status !== "done") counts.blocked += 1;
+      }
+      byId("summary").innerHTML = [
+        `open: ${counts.open}`,
+        `claimed: ${counts.claimed}`,
+        `done: ${counts.done}`,
+        `ready: ${counts.ready}`,
+        `blocked: ${counts.blocked}`
+      ].map((line) => `<div class="pill">${line}</div>`).join("");
+    };
+
+    const renderProjectPicker = (projects, selectedKey) => {
+      const picker = byId("projectSelect");
+      if (!picker) return;
+      picker.innerHTML = (projects || []).map((project) => {
+        const selected = project.key === selectedKey ? " selected" : "";
+        const label = `${project.name} (${project.repo_root})`;
+        return `<option value="${project.key}"${selected}>${label}</option>`;
+      }).join("");
+      picker.onchange = () => {
+        selectedProject = picker.value || "";
+        selectedBranch = "";
+        resetTimeline();
+        syncUrl();
+        refresh();
+        refreshTimeline(true);
+      };
+    };
+
+    const renderTasks = (tasks) => {
+      byId("empty").style.display = tasks.length === 0 ? "block" : "none";
+      byId("tasks").innerHTML = tasks.map((task) => {
+        const tags = (task.tags || []).map((tag) => `<span class="tag">${tag}</span>`).join("");
+        const detail = task.detail ? `<p class="detail">${task.detail}</p>` : "";
+        const deps = (task.depends_on || []).join(", ");
+        const blockedBy = (task.blocked_by || []).join(", ");
+        const stateLine = task.ready
+          ? `<span class="ready">ready</span>`
+          : `<span class="blocked">blocked by: ${blockedBy || "unknown"}</span>`;
+        return `
+          <article class="card">
+            <div class="row">
+              <h2 class="title">${task.title || "(untitled)"}</h2>
+              <span class="status ${statusClass(task.status)}">${task.status}</span>
+            </div>
+            <div class="priority">id: ${task.task_id} • priority: ${task.priority}</div>
+            ${detail}
+            <div class="meta-row">claimed by: ${task.claimed_by_agent_id || "none"}</div>
+            <div class="meta-row">depends on: ${deps || "none"}</div>
+            <div class="state">${stateLine}</div>
+            <div class="tags">${tags}</div>
+          </article>
+        `;
+      }).join("");
+    };
+
+    const renderBranchPicker = (branches, activeBranch, branchValue) => {
+      const picker = byId("branchSelect");
+      if (!picker) return;
+      if (!branches || branches.length === 0) {
+        picker.innerHTML = `<option value="">timeline not initialized</option>`;
+        picker.disabled = true;
+        return;
+      }
+      picker.disabled = false;
+      const selected = branchValue || activeBranch || branches[0];
+      selectedBranch = selected;
+      picker.innerHTML = branches.map((branch) => {
+        const marker = branch === activeBranch ? " (active)" : "";
+        const chosen = branch === selected ? " selected" : "";
+        return `<option value="${branch}"${chosen}>${branch}${marker}</option>`;
+      }).join("");
+      picker.onchange = () => {
+        selectedBranch = picker.value || "";
+        resetTimeline();
+        syncUrl();
+        refreshTimeline(true);
+      };
+    };
+
+    const timelineRowClass = (event) => {
+      if (event.is_task_event) return "timeline-row task";
+      return "timeline-row file";
+    };
+
+    const renderTimeline = (payload) => {
+      const rows = timelineRows || [];
+      byId("timelineEmpty").style.display = rows.length === 0 ? "block" : "none";
+      byId("loadOlder").disabled = !timelineHasMore || timelineLoading;
+      byId("timelineList").innerHTML = rows.map((event) => {
+        const when = new Date(event.created_at_utc).toLocaleString();
+        const changed = Number(event.metrics?.changed_file_count || 0);
+        const taskInfo = event.is_task_event
+          ? `task ${event.task_action || "event"} • ${event.task_id || "unknown"}`
+          : `file delta ${changed}`;
+        const tagList = (event.tags || []).slice(0, 8).join(", ");
+        const dispatch = event.task_dispatch ? ` • dispatch=${event.task_dispatch}` : "";
+        return `
+          <article class="${timelineRowClass(event)}">
+            <div class="timeline-topline">
+              <span>${when}</span>
+              <span>${event.event_id}</span>
+            </div>
+            <div class="timeline-summary">${event.summary || "(no summary)"}</div>
+            <div class="timeline-metrics">branch=${event.branch} • agent=${event.agent_id} • ${taskInfo}${dispatch}</div>
+            <div class="timeline-metrics">${tagList ? `tags: ${tagList}` : "tags: none"}</div>
+          </article>
+        `;
+      }).join("");
+      const total = payload.total_events || 0;
+      const shown = rows.length;
+      const branch = payload.branch || "unknown";
+      const branchCount = (payload.branches || []).length;
+      byId("timelineMeta").textContent = `branch: ${branch} • shown: ${shown}/${total} • branches: ${branchCount} • has_more: ${timelineHasMore}`;
+    };
+
+    async function refresh() {
+      try {
+        const previousProject = selectedProject;
+        const query = selectedProject ? `?project=${encodeURIComponent(selectedProject)}` : "";
+        const response = await fetch(`/api/tasks${query}`, { cache: "no-store" });
+        const payload = await response.json();
+        if (payload.selected_project && payload.selected_project.key) {
+          selectedProject = payload.selected_project.key;
+        }
+        const tasks = payload.tasks || [];
+        renderProjectPicker(payload.projects || [], selectedProject);
+        const project = payload.selected_project || {};
+        const label = project.name ? `${project.name} • ${project.repo_root}` : "unknown project";
+        const initState = payload.timeline_initialized ? "initialized" : "not initialized";
+        byId("meta").textContent = `project: ${label} • ${initState} • updated: ${new Date(payload.generated_at_utc).toLocaleString()} • total: ${tasks.length}`;
+        renderSummary(tasks);
+        renderTasks(tasks);
+        if (selectedProject !== previousProject) {
+          resetTimeline();
+          await refreshTimeline(true);
+        }
+      } catch (error) {
+        byId("meta").textContent = `failed to load tasks: ${error}`;
+      }
+    }
+
+    async function refreshTimeline(resetPage) {
+      if (timelineLoading) return;
+      if (resetPage) {
+        resetTimeline();
+      }
+      timelineLoading = true;
+      byId("loadOlder").disabled = true;
+      try {
+        const query = new URLSearchParams();
+        if (selectedProject) query.set("project", selectedProject);
+        if (selectedBranch) query.set("branch", selectedBranch);
+        query.set("limit", String(TIMELINE_PAGE_SIZE));
+        query.set("offset", String(timelineOffset));
+        const response = await fetch(`/api/timeline?${query.toString()}`, { cache: "no-store" });
+        const payload = await response.json();
+        if (payload.selected_project && payload.selected_project.key) {
+          selectedProject = payload.selected_project.key;
+        }
+        if (!payload.timeline_initialized) {
+          selectedBranch = "";
+          renderBranchPicker([], "", "");
+          timelineRows = [];
+          timelineHasMore = false;
+          byId("timelineMeta").textContent = "timeline not initialized for this project";
+          renderTimeline(payload);
+          return;
+        }
+        selectedBranch = payload.branch || selectedBranch;
+        renderProjectPicker(payload.projects || [], selectedProject);
+        renderBranchPicker(payload.branches || [], payload.active_branch || "", selectedBranch);
+        const rows = payload.events || [];
+        if (resetPage) {
+          timelineRows = rows;
+        } else {
+          timelineRows = timelineRows.concat(rows);
+        }
+        timelineHasMore = Boolean(payload.has_more);
+        timelineOffset = Number(payload.next_offset || timelineRows.length || 0);
+        syncUrl();
+        renderTimeline(payload);
+      } catch (error) {
+        byId("timelineMeta").textContent = `failed to load timeline: ${error}`;
+      } finally {
+        timelineLoading = false;
+        byId("loadOlder").disabled = !timelineHasMore;
+      }
+    }
+
+    byId("refreshTimeline").onclick = () => {
+      refreshTimeline(true);
+    };
+    byId("loadOlder").onclick = () => {
+      if (timelineHasMore) {
+        refreshTimeline(false);
+      }
+    };
+
+    refresh().then(() => refreshTimeline(true));
+    setInterval(refresh, 1200);
+  </script>
+</body>
+</html>"#
+}
+
+fn cmd_mcp(repo_root: &Path, args: McpArgs) -> Result<()> {
+    match args.action {
+        McpAction::Serve => run_mcp_stdio(repo_root),
+    }
+}
+
+fn run_mcp_stdio(repo_root: &Path) -> Result<()> {
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut reader = BufReader::new(stdin.lock());
+    let mut writer = stdout.lock();
+
+    while let Some(message) = read_mcp_message(&mut reader)? {
+        let method = message
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let id = message.get("id").cloned();
+        if id.is_none() {
+            // Notification: no response required.
+            if method == "notifications/initialized" {
+                continue;
+            }
+            continue;
+        }
+        let id = id.unwrap_or(json!(null));
+        let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
+        let response = match method.as_str() {
+            "initialize" => json_rpc_ok(
+                id,
+                json!({
+                    "protocolVersion": "2024-11-05",
+                    "serverInfo": { "name": "fugit", "version": "0.2.0" },
+                    "capabilities": { "tools": { "listChanged": false } }
+                }),
+            ),
+            "tools/list" => json_rpc_ok(
+                id,
+                json!({
+                    "tools": mcp_tools_manifest()
+                }),
+            ),
+            "tools/call" => match mcp_handle_tool_call(repo_root, &params) {
+                Ok(result) => json_rpc_ok(id, result),
+                Err(err) => json_rpc_err(id, -32000, err.to_string()),
+            },
+            _ => json_rpc_err(id, -32601, format!("unsupported method: {}", method)),
+        };
+        write_mcp_message(&mut writer, &response)?;
+    }
+    Ok(())
+}
+
+fn mcp_tools_manifest() -> Vec<serde_json::Value> {
+    vec![
+        json!({
+            "name": "fugit_status",
+            "description": "Get timeline status summary for the repository.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "minimum": 1 },
+                    "strict_hash": { "type": "boolean" },
+                    "hash_jobs": { "type": "integer", "minimum": 1 },
+                    "burst": { "type": "boolean" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_checkpoint",
+            "description": "Create a timeline checkpoint with summary/agent/tags.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["summary"],
+                "properties": {
+                    "summary": { "type": "string" },
+                    "agent": { "type": "string" },
+                    "tags": { "type": "array", "items": { "type": "string" } },
+                    "files": { "type": "array", "items": { "type": "string" } },
+                    "strict_hash": { "type": "boolean" },
+                    "ignore_locks": { "type": "boolean" },
+                    "hash_jobs": { "type": "integer", "minimum": 1 },
+                    "object_jobs": { "type": "integer", "minimum": 1 },
+                    "burst": { "type": "boolean" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_log",
+            "description": "Read timeline events.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "minimum": 1 },
+                    "branch": { "type": "string" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_checkout",
+            "description": "Materialize a target event or branch head into working tree.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "event": { "type": "string" },
+                    "branch": { "type": "string" },
+                    "dry_run": { "type": "boolean" },
+                    "force": { "type": "boolean" },
+                    "strict_hash": { "type": "boolean" },
+                    "move_head": { "type": "boolean" },
+                    "hash_jobs": { "type": "integer", "minimum": 1 },
+                    "burst": { "type": "boolean" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_lock_add",
+            "description": "Add a lock pattern for multi-agent coordination.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["pattern"],
+                "properties": {
+                    "pattern": { "type": "string" },
+                    "agent": { "type": "string" },
+                    "ttl_minutes": { "type": "integer" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_lock_list",
+            "description": "List active lock entries.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "fugit_task_add",
+            "description": "Create a persistent task in the shared queue.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["title"],
+                "properties": {
+                    "title": { "type": "string" },
+                    "detail": { "type": "string" },
+                    "agent": { "type": "string" },
+                    "priority": { "type": "integer" },
+                    "tags": { "type": "array", "items": { "type": "string" } },
+                    "depends_on": { "type": "array", "items": { "type": "string" } }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_task_list",
+            "description": "List tasks from the persistent queue.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "status": { "type": "string", "enum": ["open", "claimed", "done"] },
+                    "agent": { "type": "string" },
+                    "ready_only": { "type": "boolean" },
+                    "limit": { "type": "integer", "minimum": 1 }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_task_request",
+            "description": "Request the next best task for an agent with dependency-aware ordering and work stealing.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent": { "type": "string" },
+                    "tags": { "type": "array", "items": { "type": "string" } },
+                    "claim_ttl_minutes": { "type": "integer" },
+                    "steal_after_minutes": { "type": "integer" },
+                    "no_steal": { "type": "boolean" },
+                    "no_claim": { "type": "boolean" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_task_claim",
+            "description": "Claim a specific task by id.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["task_id"],
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "agent": { "type": "string" },
+                    "claim_ttl_minutes": { "type": "integer" },
+                    "steal": { "type": "boolean" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_task_done",
+            "description": "Mark a task as completed.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["task_id"],
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "agent": { "type": "string" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_task_release",
+            "description": "Release a claimed task back to open status.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["task_id"],
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "agent": { "type": "string" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_task_gui_launch",
+            "description": "Launch the live task-board GUI in a separate window via background server.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string" },
+                    "host": { "type": "string" },
+                    "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+                    "open": { "type": "boolean" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_project_list",
+            "description": "List registered projects for multi-project coordination.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "fugit_project_add",
+            "description": "Register or update a project name -> repo_root mapping.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["name", "repo_root"],
+                "properties": {
+                    "name": { "type": "string" },
+                    "repo_root": { "type": "string" },
+                    "set_default": { "type": "boolean" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_project_use",
+            "description": "Set the default project for the task GUI.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                    "name": { "type": "string" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_project_remove",
+            "description": "Remove a project from the registry.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                    "name": { "type": "string" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_gc",
+            "description": "Prune unreferenced object blobs from .fugit/objects.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "dry_run": { "type": "boolean" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_skill_bundle",
+            "description": "Return the fugit skill package for onboarding new agents (SKILL.md + optional openai.yaml).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "include_skill_body": { "type": "boolean" },
+                    "include_openai_yaml": { "type": "boolean" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_skill_install_codex",
+            "description": "Install the bundled fugit skill into CODEX_HOME/skills/fugit for this machine.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "overwrite": { "type": "boolean" }
+                }
+            }
+        }),
+    ]
+}
+
+fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<serde_json::Value> {
+    let tool_name = params
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow!("tool call missing 'name'"))?;
+    let args = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+
+    let result = match tool_name {
+        "fugit_status" => {
+            let mut cli_args = vec!["status".to_string(), "--json".to_string()];
+            if let Some(limit) = args.get("limit").and_then(serde_json::Value::as_u64) {
+                cli_args.push("--limit".to_string());
+                cli_args.push(limit.to_string());
+            }
+            if args
+                .get("strict_hash")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--strict-hash".to_string());
+            }
+            if let Some(hash_jobs) = args.get("hash_jobs").and_then(serde_json::Value::as_u64) {
+                cli_args.push("--hash-jobs".to_string());
+                cli_args.push(hash_jobs.to_string());
+            }
+            if args
+                .get("burst")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--burst".to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_checkpoint" => {
+            let summary = args
+                .get("summary")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_checkpoint requires summary"))?;
+            let mut cli_args = vec![
+                "checkpoint".to_string(),
+                "--summary".to_string(),
+                summary.to_string(),
+            ];
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            if let Some(tags) = args.get("tags").and_then(serde_json::Value::as_array) {
+                for tag in tags {
+                    if let Some(tag) = tag.as_str() {
+                        cli_args.push("--tag".to_string());
+                        cli_args.push(tag.to_string());
+                    }
+                }
+            }
+            if let Some(files) = args.get("files").and_then(serde_json::Value::as_array) {
+                for file in files {
+                    if let Some(file) = file.as_str() {
+                        cli_args.push("--file".to_string());
+                        cli_args.push(file.to_string());
+                    }
+                }
+            }
+            if args
+                .get("strict_hash")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--strict-hash".to_string());
+            }
+            if args
+                .get("ignore_locks")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--ignore-locks".to_string());
+            }
+            if let Some(hash_jobs) = args.get("hash_jobs").and_then(serde_json::Value::as_u64) {
+                cli_args.push("--hash-jobs".to_string());
+                cli_args.push(hash_jobs.to_string());
+            }
+            if let Some(object_jobs) = args.get("object_jobs").and_then(serde_json::Value::as_u64) {
+                cli_args.push("--object-jobs".to_string());
+                cli_args.push(object_jobs.to_string());
+            }
+            if args
+                .get("burst")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--burst".to_string());
+            }
+            let _ = run_self_cli_text(repo_root, &cli_args)?;
+            run_self_cli_json(
+                repo_root,
+                &[
+                    "log".to_string(),
+                    "--json".to_string(),
+                    "--limit".to_string(),
+                    "1".to_string(),
+                ],
+            )?
+        }
+        "fugit_log" => {
+            let mut cli_args = vec!["log".to_string(), "--json".to_string()];
+            if let Some(limit) = args.get("limit").and_then(serde_json::Value::as_u64) {
+                cli_args.push("--limit".to_string());
+                cli_args.push(limit.to_string());
+            }
+            if let Some(branch) = args.get("branch").and_then(serde_json::Value::as_str) {
+                cli_args.push("--branch".to_string());
+                cli_args.push(branch.to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_checkout" => {
+            let mut cli_args = vec!["checkout".to_string()];
+            if let Some(event) = args.get("event").and_then(serde_json::Value::as_str) {
+                cli_args.push("--event".to_string());
+                cli_args.push(event.to_string());
+            }
+            if let Some(branch) = args.get("branch").and_then(serde_json::Value::as_str) {
+                cli_args.push("--branch".to_string());
+                cli_args.push(branch.to_string());
+            }
+            if args
+                .get("dry_run")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--dry-run".to_string());
+            }
+            if args
+                .get("force")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--force".to_string());
+            }
+            if args
+                .get("strict_hash")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--strict-hash".to_string());
+            }
+            if args
+                .get("move_head")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--move-head".to_string());
+            }
+            if let Some(hash_jobs) = args.get("hash_jobs").and_then(serde_json::Value::as_u64) {
+                cli_args.push("--hash-jobs".to_string());
+                cli_args.push(hash_jobs.to_string());
+            }
+            if args
+                .get("burst")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--burst".to_string());
+            }
+            let text = run_self_cli_text(repo_root, &cli_args)?;
+            json!({ "checkout": text.trim() })
+        }
+        "fugit_lock_add" => {
+            let pattern = args
+                .get("pattern")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_lock_add requires pattern"))?;
+            let mut cli_args = vec![
+                "lock".to_string(),
+                "add".to_string(),
+                "--pattern".to_string(),
+                pattern.to_string(),
+            ];
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            if let Some(ttl) = args.get("ttl_minutes").and_then(serde_json::Value::as_i64) {
+                cli_args.push("--ttl-minutes".to_string());
+                cli_args.push(ttl.to_string());
+            }
+            let _ = run_self_cli_text(repo_root, &cli_args)?;
+            run_self_cli_json(
+                repo_root,
+                &["lock".to_string(), "list".to_string(), "--json".to_string()],
+            )?
+        }
+        "fugit_lock_list" => run_self_cli_json(
+            repo_root,
+            &["lock".to_string(), "list".to_string(), "--json".to_string()],
+        )?,
+        "fugit_task_add" => {
+            let title = args
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_task_add requires title"))?;
+            let mut cli_args = vec![
+                "task".to_string(),
+                "add".to_string(),
+                "--title".to_string(),
+                title.to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(detail) = args.get("detail").and_then(serde_json::Value::as_str) {
+                cli_args.push("--detail".to_string());
+                cli_args.push(detail.to_string());
+            }
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            if let Some(priority) = args.get("priority").and_then(serde_json::Value::as_i64) {
+                cli_args.push("--priority".to_string());
+                cli_args.push(priority.to_string());
+            }
+            if let Some(tags) = args.get("tags").and_then(serde_json::Value::as_array) {
+                for tag in tags {
+                    if let Some(tag_value) = tag.as_str() {
+                        cli_args.push("--tag".to_string());
+                        cli_args.push(tag_value.to_string());
+                    }
+                }
+            }
+            if let Some(depends_on) = args.get("depends_on").and_then(serde_json::Value::as_array) {
+                for dependency in depends_on {
+                    if let Some(dep_value) = dependency.as_str() {
+                        cli_args.push("--depends-on".to_string());
+                        cli_args.push(dep_value.to_string());
+                    }
+                }
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_task_list" => {
+            let mut cli_args = vec!["task".to_string(), "list".to_string(), "--json".to_string()];
+            if let Some(status) = args.get("status").and_then(serde_json::Value::as_str) {
+                cli_args.push("--status".to_string());
+                cli_args.push(status.to_string());
+            }
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            if args
+                .get("ready_only")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--ready-only".to_string());
+            }
+            if let Some(limit) = args.get("limit").and_then(serde_json::Value::as_u64) {
+                cli_args.push("--limit".to_string());
+                cli_args.push(limit.to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_task_request" => {
+            let mut cli_args = vec![
+                "task".to_string(),
+                "request".to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            if let Some(tags) = args.get("tags").and_then(serde_json::Value::as_array) {
+                for tag in tags {
+                    if let Some(tag_value) = tag.as_str() {
+                        cli_args.push("--tag".to_string());
+                        cli_args.push(tag_value.to_string());
+                    }
+                }
+            }
+            if let Some(ttl) = args
+                .get("claim_ttl_minutes")
+                .and_then(serde_json::Value::as_i64)
+            {
+                cli_args.push("--claim-ttl-minutes".to_string());
+                cli_args.push(ttl.to_string());
+            }
+            if let Some(steal_after) = args
+                .get("steal_after_minutes")
+                .and_then(serde_json::Value::as_i64)
+            {
+                cli_args.push("--steal-after-minutes".to_string());
+                cli_args.push(steal_after.to_string());
+            }
+            if args
+                .get("no_steal")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--no-steal".to_string());
+            }
+            if args
+                .get("no_claim")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--no-claim".to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_task_claim" => {
+            let task_id = args
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_task_claim requires task_id"))?;
+            let mut cli_args = vec![
+                "task".to_string(),
+                "claim".to_string(),
+                "--task-id".to_string(),
+                task_id.to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            if let Some(ttl) = args
+                .get("claim_ttl_minutes")
+                .and_then(serde_json::Value::as_i64)
+            {
+                cli_args.push("--claim-ttl-minutes".to_string());
+                cli_args.push(ttl.to_string());
+            }
+            if args
+                .get("steal")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--steal".to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_task_done" => {
+            let task_id = args
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_task_done requires task_id"))?;
+            let mut cli_args = vec![
+                "task".to_string(),
+                "done".to_string(),
+                "--task-id".to_string(),
+                task_id.to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_task_release" => {
+            let task_id = args
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_task_release requires task_id"))?;
+            let mut cli_args = vec![
+                "task".to_string(),
+                "release".to_string(),
+                "--task-id".to_string(),
+                task_id.to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_task_gui_launch" => {
+            let mut cli_args = vec![
+                "task".to_string(),
+                "gui".to_string(),
+                "--background".to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(project) = args.get("project").and_then(serde_json::Value::as_str) {
+                cli_args.push("--project".to_string());
+                cli_args.push(project.to_string());
+            }
+            if let Some(host) = args.get("host").and_then(serde_json::Value::as_str) {
+                cli_args.push("--host".to_string());
+                cli_args.push(host.to_string());
+            }
+            if let Some(port) = args.get("port").and_then(serde_json::Value::as_u64) {
+                cli_args.push("--port".to_string());
+                cli_args.push(port.to_string());
+            }
+            let open = args
+                .get("open")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            if !open {
+                cli_args.push("--no-open".to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_project_list" => run_self_cli_json(
+            repo_root,
+            &[
+                "project".to_string(),
+                "list".to_string(),
+                "--json".to_string(),
+            ],
+        )?,
+        "fugit_project_add" => {
+            let name = args
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_project_add requires name"))?;
+            let root = args
+                .get("repo_root")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_project_add requires repo_root"))?;
+            let mut cli_args = vec![
+                "project".to_string(),
+                "add".to_string(),
+                "--name".to_string(),
+                name.to_string(),
+                "--repo-root".to_string(),
+                root.to_string(),
+                "--json".to_string(),
+            ];
+            if args
+                .get("set_default")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--set-default".to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_project_use" => {
+            let name = args
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_project_use requires name"))?;
+            run_self_cli_json(
+                repo_root,
+                &[
+                    "project".to_string(),
+                    "use".to_string(),
+                    "--name".to_string(),
+                    name.to_string(),
+                    "--json".to_string(),
+                ],
+            )?
+        }
+        "fugit_project_remove" => {
+            let name = args
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_project_remove requires name"))?;
+            run_self_cli_json(
+                repo_root,
+                &[
+                    "project".to_string(),
+                    "remove".to_string(),
+                    "--name".to_string(),
+                    name.to_string(),
+                    "--json".to_string(),
+                ],
+            )?
+        }
+        "fugit_gc" => {
+            let mut cli_args = vec!["gc".to_string(), "--json".to_string()];
+            if args
+                .get("dry_run")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--dry-run".to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_skill_bundle" => {
+            let include_skill_body = args
+                .get("include_skill_body")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            let include_openai_yaml = args
+                .get("include_openai_yaml")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            fugit_skill_bundle(include_skill_body, include_openai_yaml)
+        }
+        "fugit_skill_install_codex" => {
+            let overwrite = args
+                .get("overwrite")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let installed = install_fugit_skill_to_codex(overwrite)?;
+            json!({
+                "schema_version": "fugit.skill.install.v1",
+                "generated_at_utc": now_utc(),
+                "skill_id": FUGIT_SKILL_ID,
+                "installed_path": installed.display().to_string(),
+                "overwrite": overwrite
+            })
+        }
+        _ => bail!("unsupported tool: {}", tool_name),
+    };
+
+    Ok(json!({
+        "content": [
+            {
+                "type": "text",
+                "text": serde_json::to_string_pretty(&result)?
+            }
+        ],
+        "structuredContent": result,
+        "isError": false
+    }))
+}
+
+fn run_self_cli_json(repo_root: &Path, args: &[String]) -> Result<serde_json::Value> {
+    let text = run_self_cli_text(repo_root, args)?;
+    let parsed: serde_json::Value = serde_json::from_str(text.trim()).with_context(|| {
+        format!(
+            "expected JSON output from fugit subprocess for args: {}",
+            args.join(" ")
+        )
+    })?;
+    Ok(parsed)
+}
+
+fn run_self_cli_text(repo_root: &Path, args: &[String]) -> Result<String> {
+    let current_exe =
+        std::env::current_exe().with_context(|| "failed resolving current executable")?;
+    let mut cmd = ProcessCommand::new(current_exe);
+    cmd.arg("--repo-root").arg(repo_root).args(args);
+    let output = cmd.output().with_context(|| {
+        format!(
+            "failed running fugit subprocess for args: {}",
+            args.join(" ")
+        )
+    })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        bail!(
+            "fugit subprocess failed for args: {}\nstdout: {}\nstderr: {}",
+            args.join(" "),
+            stdout.trim(),
+            stderr.trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn json_rpc_ok(id: serde_json::Value, result: serde_json::Value) -> serde_json::Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result
+    })
+}
+
+fn json_rpc_err(id: serde_json::Value, code: i64, message: String) -> serde_json::Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": code,
+            "message": message
+        }
+    })
+}
+
+fn read_mcp_message(reader: &mut dyn BufRead) -> Result<Option<serde_json::Value>> {
+    let mut content_length: Option<usize> = None;
+    loop {
+        let mut line = String::new();
+        let read = reader
+            .read_line(&mut line)
+            .with_context(|| "failed reading MCP header line")?;
+        if read == 0 {
+            return Ok(None);
+        }
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+        if let Some(rest) = line.trim().strip_prefix("Content-Length:") {
+            let len = rest
+                .trim()
+                .parse::<usize>()
+                .with_context(|| format!("invalid Content-Length header '{}'", line.trim()))?;
+            content_length = Some(len);
+        }
+    }
+    let len = content_length.ok_or_else(|| anyhow!("missing Content-Length header"))?;
+    let mut payload = vec![0_u8; len];
+    reader
+        .read_exact(&mut payload)
+        .with_context(|| "failed reading MCP payload bytes")?;
+    let message = serde_json::from_slice::<serde_json::Value>(&payload)
+        .with_context(|| "invalid MCP JSON payload")?;
+    Ok(Some(message))
+}
+
+fn write_mcp_message(writer: &mut dyn Write, message: &serde_json::Value) -> Result<()> {
+    let payload = serde_json::to_vec(message).with_context(|| "failed serializing MCP message")?;
+    writer
+        .write_all(format!("Content-Length: {}\r\n\r\n", payload.len()).as_bytes())
+        .with_context(|| "failed writing MCP header")?;
+    writer
+        .write_all(&payload)
+        .with_context(|| "failed writing MCP payload")?;
+    writer
+        .flush()
+        .with_context(|| "failed flushing MCP response")
+}
+
+fn build_bridge_commit_message(events: &[TimelineEvent]) -> (String, String) {
+    let subject = format!(
+        "timeline sync: {} ({} event{})",
+        Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
+        events.len(),
+        if events.len() == 1 { "" } else { "s" }
+    );
+    let mut lines = Vec::<String>::new();
+    lines.push("Timeline events included in this sync:".to_string());
+    for event in events {
+        lines.push(format!(
+            "- {} {} [{}] {}",
+            event.created_at_utc, event.event_id, event.agent_id, event.summary
+        ));
+    }
+    if events.is_empty() {
+        lines.push("- no timeline events found (manual sync)".to_string());
+    }
+    (subject, lines.join("\n"))
+}
+
+fn ensure_git_repo(repo_root: &Path) -> Result<()> {
+    let output = ProcessCommand::new("git")
+        .current_dir(repo_root)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .with_context(|| "failed invoking git")?;
+
+    if !output.status.success() {
+        bail!("git bridge requires a git work tree");
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout != "true" {
+        bail!("git bridge requires a git work tree");
+    }
+    Ok(())
+}
+
+fn run_git(repo_root: &Path, args: &[&str]) -> Result<()> {
+    let mut cmd = ProcessCommand::new("git");
+    cmd.current_dir(repo_root).args(args);
+    run_process(cmd, &format!("git command failed: git {}", args.join(" ")))
+}
+
+fn run_git_with_configs(repo_root: &Path, configs: &[(&str, String)], args: &[&str]) -> Result<()> {
+    let mut cmd = ProcessCommand::new("git");
+    cmd.current_dir(repo_root);
+    for (key, value) in configs {
+        cmd.arg("-c").arg(format!("{key}={value}"));
+    }
+    cmd.args(args);
+    run_process(cmd, &format!("git command failed: git {}", args.join(" ")))
+}
+
+fn git_has_worktree_changes(repo_root: &Path) -> Result<bool> {
+    let output = ProcessCommand::new("git")
+        .current_dir(repo_root)
+        .args(["status", "--porcelain"])
+        .output()
+        .with_context(|| "failed checking git worktree status")?;
+    if !output.status.success() {
+        bail!("failed checking git worktree status");
+    }
+    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+}
+
+fn run_process(mut cmd: ProcessCommand, context_msg: &str) -> Result<()> {
+    let output = cmd.output().with_context(|| context_msg.to_string())?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        bail!("{}\nstdout: {}\nstderr: {}", context_msg, stdout, stderr);
+    }
+    Ok(())
+}
+
+fn load_initialized_state(repo_root: &Path) -> Result<(TimelineConfig, BranchesState)> {
+    let config = load_json_optional::<TimelineConfig>(&timeline_config_path(repo_root))?
+        .ok_or_else(|| {
+            anyhow!(
+                "timeline not initialized: missing {}",
+                timeline_config_path(repo_root).display()
+            )
+        })?;
+    let branches = load_json_optional::<BranchesState>(&timeline_branches_path(repo_root))?
+        .ok_or_else(|| {
+            anyhow!(
+                "timeline not initialized: missing {}",
+                timeline_branches_path(repo_root).display()
+            )
+        })?;
+    if !branches.branches.contains_key(&branches.active_branch) {
+        bail!("timeline branch metadata invalid: active branch pointer missing");
+    }
+    Ok((config, branches))
+}
+
+fn detect_git_branch(repo_root: &Path) -> Option<String> {
+    let output = ProcessCommand::new("git")
+        .current_dir(repo_root)
+        .args(["branch", "--show-current"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch)
+    }
+}
+
+fn load_branch_index(repo_root: &Path, branch: &str) -> Result<BTreeMap<String, FileRecord>> {
+    let index_path = timeline_branch_index_path(repo_root, branch);
+    Ok(load_json_optional::<BTreeMap<String, FileRecord>>(&index_path)?.unwrap_or_default())
+}
+
+fn read_branch_events(repo_root: &Path, branch: &str) -> Result<Vec<TimelineEvent>> {
+    let path = timeline_branch_events_path(repo_root, branch);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let file = fs::File::open(&path)
+        .with_context(|| format!("failed opening timeline events {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut out = Vec::<TimelineEvent>::new();
+    for (idx, line) in reader.lines().enumerate() {
+        let line = line.with_context(|| format!("failed reading line {}", idx + 1))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event: TimelineEvent = serde_json::from_str(&line).with_context(|| {
+            format!(
+                "failed parsing timeline event at {}:{}",
+                path.display(),
+                idx + 1
+            )
+        })?;
+        out.push(event);
+    }
+    Ok(out)
+}
+
+fn read_branch_events_tail(
+    repo_root: &Path,
+    branch: &str,
+    limit: usize,
+) -> Result<Vec<TimelineEvent>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let path = timeline_branch_events_path(repo_root, branch);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let file = fs::File::open(&path)
+        .with_context(|| format!("failed opening timeline events {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut tail = VecDeque::<TimelineEvent>::new();
+    for (idx, line) in reader.lines().enumerate() {
+        let line = line.with_context(|| format!("failed reading line {}", idx + 1))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event: TimelineEvent = serde_json::from_str(&line).with_context(|| {
+            format!(
+                "failed parsing timeline event at {}:{}",
+                path.display(),
+                idx + 1
+            )
+        })?;
+        tail.push_back(event);
+        if tail.len() > limit {
+            let _ = tail.pop_front();
+        }
+    }
+    Ok(tail.into_iter().collect())
+}
+
+fn reconstruct_index_at_event(
+    events: &[TimelineEvent],
+    head_index: &BTreeMap<String, FileRecord>,
+    event_id: &str,
+) -> Result<BTreeMap<String, FileRecord>> {
+    let mut target_idx = None;
+    for (idx, event) in events.iter().enumerate() {
+        if event.event_id == event_id {
+            target_idx = Some(idx);
+            break;
+        }
+    }
+    let target_idx =
+        target_idx.ok_or_else(|| anyhow!("event not found on branch: {}", event_id))?;
+
+    let mut index = head_index.clone();
+    for event in events.iter().skip(target_idx + 1).rev() {
+        for change in event.changes.iter().rev() {
+            match change.kind {
+                ChangeKind::Added => {
+                    index.remove(&change.path);
+                }
+                ChangeKind::Modified | ChangeKind::Deleted => {
+                    let old_hash = change.old_hash.as_ref().ok_or_else(|| {
+                        anyhow!(
+                            "cannot reconstruct event {}; missing old_hash for {}",
+                            event.event_id,
+                            change.path
+                        )
+                    })?;
+                    let old_size_bytes = change.old_size_bytes.unwrap_or(0);
+                    let modified_unix_secs = index
+                        .get(&change.path)
+                        .map(|row| row.modified_unix_secs)
+                        .unwrap_or(0);
+                    index.insert(
+                        change.path.clone(),
+                        FileRecord {
+                            schema_version: SCHEMA_FILE_RECORD.to_string(),
+                            hash: old_hash.clone(),
+                            size_bytes: old_size_bytes,
+                            modified_unix_secs,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(index)
+}
+
+fn append_jsonl<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("failed opening {} for append", path.display()))?;
+    serde_json::to_writer(&mut file, value)
+        .with_context(|| format!("failed serializing jsonl row for {}", path.display()))?;
+    file.write_all(b"\n")
+        .with_context(|| format!("failed writing newline for {}", path.display()))?;
+    Ok(())
+}
+
+fn store_object(repo_root: &Path, hash: &str, source_path: &Path) -> Result<()> {
+    let object_path = timeline_objects_dir(repo_root).join(hash);
+    if object_path.exists() {
+        return Ok(());
+    }
+    fs::copy(source_path, &object_path).with_context(|| {
+        format!(
+            "failed storing timeline object {} from {}",
+            object_path.display(),
+            source_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn store_objects(
+    repo_root: &Path,
+    objects: &[(String, PathBuf)],
+    object_jobs: usize,
+) -> Result<()> {
+    if objects.is_empty() {
+        return Ok(());
+    }
+
+    if object_jobs <= 1 || objects.len() <= 1 {
+        for (hash, source_path) in objects {
+            store_object(repo_root, hash, source_path)?;
+        }
+        return Ok(());
+    }
+
+    let parallel_jobs = object_jobs.min(objects.len());
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(parallel_jobs)
+        .build()
+        .with_context(|| format!("failed building object-store thread pool ({parallel_jobs})"))?;
+    let rows = objects.to_vec();
+    let result: Result<Vec<()>> = pool.install(|| {
+        rows.into_par_iter()
+            .map(|(hash, source_path)| store_object(repo_root, &hash, &source_path))
+            .collect()
+    });
+    result?;
+    Ok(())
+}
+
+fn resolve_parallel_jobs(requested_jobs: Option<usize>, burst: bool) -> usize {
+    if burst {
+        return std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1);
+    }
+    requested_jobs.unwrap_or(1).max(1)
+}
+
+fn load_lock_state(repo_root: &Path) -> Result<LockState> {
+    let path = timeline_locks_path(repo_root);
+    let mut state = load_json_optional::<LockState>(&path)?.unwrap_or(LockState {
+        schema_version: SCHEMA_LOCKS.to_string(),
+        locks: Vec::new(),
+    });
+    if state.schema_version.trim().is_empty() {
+        state.schema_version = SCHEMA_LOCKS.to_string();
+    }
+    Ok(state)
+}
+
+fn prune_expired_locks(state: &mut LockState) -> Result<bool> {
+    let mut changed = false;
+    if state.schema_version != SCHEMA_LOCKS {
+        state.schema_version = SCHEMA_LOCKS.to_string();
+        changed = true;
+    }
+
+    let now = Utc::now();
+    let before = state.locks.len();
+    state.locks.retain(|lock| {
+        let Some(expires_at_utc) = lock.expires_at_utc.as_deref() else {
+            return true;
+        };
+        match DateTime::parse_from_rfc3339(expires_at_utc) {
+            Ok(expiry) => expiry.with_timezone(&Utc) > now,
+            Err(_) => false,
+        }
+    });
+    if state.locks.len() != before {
+        changed = true;
+    }
+    Ok(changed)
+}
+
+fn lock_pattern_matches_path(pattern: &str, path: &str) -> bool {
+    let normalized_pattern = normalize_user_path(pattern);
+    let normalized_path = normalize_user_path(path);
+    if normalized_pattern.is_empty() || normalized_path.is_empty() {
+        return false;
+    }
+
+    if let Ok(glob) = Glob::new(&normalized_pattern) {
+        let matcher = glob.compile_matcher();
+        if matcher.is_match(&normalized_path) {
+            return true;
+        }
+    }
+
+    normalized_path == normalized_pattern
+        || normalized_path.starts_with(&format!("{}/", normalized_pattern))
+}
+
+fn collect_lock_conflicts(
+    repo_root: &Path,
+    changes: &[ChangeRecord],
+    current_agent_id: &str,
+) -> Result<Vec<FileLock>> {
+    if changes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut state = load_lock_state(repo_root)?;
+    let state_changed = prune_expired_locks(&mut state)?;
+    if state_changed {
+        write_pretty_json(&timeline_locks_path(repo_root), &state)?;
+    }
+
+    let mut conflicts = Vec::<FileLock>::new();
+    let mut seen = BTreeSet::<String>::new();
+    for lock in &state.locks {
+        if lock.agent_id == current_agent_id {
+            continue;
+        }
+        let has_conflict = changes
+            .iter()
+            .any(|change| lock_pattern_matches_path(&lock.pattern, &change.path));
+        if has_conflict && seen.insert(lock.lock_id.clone()) {
+            conflicts.push(lock.clone());
+        }
+    }
+    Ok(conflicts)
+}
+
+fn load_task_state(repo_root: &Path) -> Result<TaskState> {
+    let path = timeline_tasks_path(repo_root);
+    let mut state = load_json_optional::<TaskState>(&path)?.unwrap_or(TaskState {
+        schema_version: SCHEMA_TASKS.to_string(),
+        updated_at_utc: now_utc(),
+        tasks: Vec::new(),
+    });
+    if state.schema_version.trim().is_empty() {
+        state.schema_version = SCHEMA_TASKS.to_string();
+    }
+    Ok(state)
+}
+
+fn resolve_fugit_home() -> Result<PathBuf> {
+    if let Ok(path) = std::env::var("FUGIT_HOME")
+        && !path.trim().is_empty()
+    {
+        return Ok(PathBuf::from(path.trim()));
+    }
+    if let Ok(home) = std::env::var("HOME")
+        && !home.trim().is_empty()
+    {
+        return Ok(PathBuf::from(home.trim()).join(".fugit"));
+    }
+    if let Ok(profile) = std::env::var("USERPROFILE")
+        && !profile.trim().is_empty()
+    {
+        return Ok(PathBuf::from(profile.trim()).join(".fugit"));
+    }
+    bail!("unable to resolve FUGIT_HOME; set FUGIT_HOME, HOME, or USERPROFILE")
+}
+
+fn fugit_projects_registry_path() -> Result<PathBuf> {
+    Ok(resolve_fugit_home()?.join("projects.json"))
+}
+
+fn load_project_registry() -> Result<ProjectRegistry> {
+    let path = fugit_projects_registry_path()?;
+    let mut registry = load_json_optional::<ProjectRegistry>(&path)?.unwrap_or(ProjectRegistry {
+        schema_version: SCHEMA_PROJECTS.to_string(),
+        updated_at_utc: now_utc(),
+        default_project: None,
+        projects: Vec::new(),
+    });
+    if registry.schema_version.trim().is_empty() {
+        registry.schema_version = SCHEMA_PROJECTS.to_string();
+    }
+    registry
+        .projects
+        .sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
+    Ok(registry)
+}
+
+fn write_project_registry(registry: &ProjectRegistry) -> Result<()> {
+    let path = fugit_projects_registry_path()?;
+    write_pretty_json(&path, registry)
+}
+
+fn validate_project_name(name: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        bail!("project name cannot be empty");
+    }
+    for ch in name.chars() {
+        let allowed = ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.');
+        if !allowed {
+            bail!(
+                "project name '{}' contains unsupported character '{}': use [a-zA-Z0-9._-]",
+                name,
+                ch
+            );
+        }
+    }
+    Ok(())
+}
+
+fn collect_task_gui_projects(current_repo_root: &Path) -> Result<Vec<TaskGuiProject>> {
+    let registry = load_project_registry()?;
+    let current = current_repo_root.display().to_string();
+    let default_project = registry.default_project.clone();
+    let mut projects = Vec::<TaskGuiProject>::new();
+    let mut seen_repo_roots = BTreeSet::<String>::new();
+    for project in registry.projects {
+        let is_current_repo = project.repo_root == current;
+        seen_repo_roots.insert(project.repo_root.clone());
+        projects.push(TaskGuiProject {
+            key: project.name.clone(),
+            name: project.name.clone(),
+            repo_root: project.repo_root.clone(),
+            is_default: default_project.as_deref() == Some(project.name.as_str()),
+            is_current_repo,
+        });
+    }
+
+    if !seen_repo_roots.contains(&current) {
+        projects.push(TaskGuiProject {
+            key: "@current".to_string(),
+            name: "current".to_string(),
+            repo_root: current,
+            is_default: projects.is_empty(),
+            is_current_repo: true,
+        });
+    }
+
+    projects.sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
+    Ok(projects)
+}
+
+fn resolve_selected_task_gui_project<'a>(
+    projects: &'a [TaskGuiProject],
+    selector: Option<&str>,
+) -> Option<&'a TaskGuiProject> {
+    if projects.is_empty() {
+        return None;
+    }
+    if let Some(token) = selector.map(str::trim).filter(|token| !token.is_empty()) {
+        if let Some(project) = projects.iter().find(|project| project.key == token) {
+            return Some(project);
+        }
+        if let Some(project) = projects.iter().find(|project| project.name == token) {
+            return Some(project);
+        }
+    }
+    if let Some(project) = projects.iter().find(|project| project.is_default) {
+        return Some(project);
+    }
+    projects
+        .iter()
+        .find(|project| project.is_current_repo)
+        .or_else(|| projects.first())
+}
+
+fn prune_expired_task_claims(state: &mut TaskState) -> Result<bool> {
+    let mut changed = false;
+    if state.schema_version != SCHEMA_TASKS {
+        state.schema_version = SCHEMA_TASKS.to_string();
+        changed = true;
+    }
+
+    let now = Utc::now();
+    let now_text = format_utc(now);
+    for task in &mut state.tasks {
+        if task.status != TaskStatus::Claimed {
+            continue;
+        }
+        if task_claim_is_expired(task, now) {
+            task.status = TaskStatus::Open;
+            task.updated_at_utc = now_text.clone();
+            task.claimed_by_agent_id = None;
+            task.claim_started_at_utc = None;
+            task.claim_expires_at_utc = None;
+            changed = true;
+        }
+    }
+    if changed {
+        state.updated_at_utc = now_text;
+    }
+    Ok(changed)
+}
+
+fn task_status_map(state: &TaskState) -> BTreeMap<String, TaskStatus> {
+    let mut map = BTreeMap::<String, TaskStatus>::new();
+    for task in &state.tasks {
+        map.insert(task.task_id.clone(), task.status.clone());
+    }
+    map
+}
+
+fn task_blocked_by(task: &FugitTask, status_map: &BTreeMap<String, TaskStatus>) -> Vec<String> {
+    let mut blocked_by = Vec::<String>::new();
+    for dependency in &task.depends_on {
+        match status_map.get(dependency) {
+            Some(TaskStatus::Done) => {}
+            _ => blocked_by.push(dependency.clone()),
+        }
+    }
+    blocked_by
+}
+
+fn task_matches_tag_filters(task: &FugitTask, required_tags: &[String]) -> bool {
+    if required_tags.is_empty() {
+        return true;
+    }
+    required_tags
+        .iter()
+        .all(|required| task.tags.iter().any(|task_tag| task_tag == required))
+}
+
+fn select_task_for_agent(
+    state: &TaskState,
+    agent_id: &str,
+    required_tags: &[String],
+    allow_steal: bool,
+    steal_after_minutes: i64,
+    now: DateTime<Utc>,
+) -> Option<(usize, TaskDispatchKind)> {
+    let status_map = task_status_map(state);
+    let mut owned_claims = Vec::<usize>::new();
+    let mut open_tasks = Vec::<usize>::new();
+    let mut stealable_tasks = Vec::<usize>::new();
+
+    for (idx, task) in state.tasks.iter().enumerate() {
+        if task.status == TaskStatus::Done {
+            continue;
+        }
+        if !task_matches_tag_filters(task, required_tags) {
+            continue;
+        }
+        if !task_blocked_by(task, &status_map).is_empty() {
+            continue;
+        }
+        match task.status {
+            TaskStatus::Open => open_tasks.push(idx),
+            TaskStatus::Claimed => {
+                if task.claimed_by_agent_id.as_deref() == Some(agent_id) {
+                    owned_claims.push(idx);
+                } else if allow_steal && task_claim_is_stale(task, now, steal_after_minutes) {
+                    stealable_tasks.push(idx);
+                }
+            }
+            TaskStatus::Done => {}
+        }
+    }
+
+    sort_task_indices(state, &mut owned_claims);
+    sort_task_indices(state, &mut open_tasks);
+    sort_task_indices(state, &mut stealable_tasks);
+
+    if let Some(idx) = owned_claims.first().copied() {
+        return Some((idx, TaskDispatchKind::OwnedClaim));
+    }
+    if let Some(idx) = open_tasks.first().copied() {
+        return Some((idx, TaskDispatchKind::Open));
+    }
+    if let Some(idx) = stealable_tasks.first().copied() {
+        return Some((idx, TaskDispatchKind::Steal));
+    }
+    None
+}
+
+fn apply_task_claim(
+    task: &mut FugitTask,
+    agent_id: &str,
+    claim_ttl_minutes: i64,
+    now: DateTime<Utc>,
+) {
+    let now_text = format_utc(now);
+    task.status = TaskStatus::Claimed;
+    task.updated_at_utc = now_text.clone();
+    task.claimed_by_agent_id = Some(agent_id.to_string());
+    task.claim_started_at_utc = Some(now_text.clone());
+    task.claim_expires_at_utc = if claim_ttl_minutes <= 0 {
+        None
+    } else {
+        Some(format_utc(now + Duration::minutes(claim_ttl_minutes)))
+    };
+    task.completed_at_utc = None;
+    task.completed_by_agent_id = None;
+}
+
+fn task_claim_is_expired(task: &FugitTask, now: DateTime<Utc>) -> bool {
+    if task.status != TaskStatus::Claimed {
+        return false;
+    }
+    let Some(expires_at) = task.claim_expires_at_utc.as_deref() else {
+        return false;
+    };
+    match parse_rfc3339_utc(expires_at) {
+        Some(parsed) => parsed <= now,
+        None => true,
+    }
+}
+
+fn task_claim_is_stale(task: &FugitTask, now: DateTime<Utc>, steal_after_minutes: i64) -> bool {
+    if task_claim_is_expired(task, now) {
+        return true;
+    }
+    let stale_window = steal_after_minutes.max(0);
+    let Some(started_at) = task
+        .claim_started_at_utc
+        .as_deref()
+        .and_then(parse_rfc3339_utc)
+    else {
+        return true;
+    };
+    started_at + Duration::minutes(stale_window) <= now
+}
+
+fn sort_task_indices(state: &TaskState, indices: &mut [usize]) {
+    indices.sort_by(|lhs, rhs| {
+        let left = &state.tasks[*lhs];
+        let right = &state.tasks[*rhs];
+        right
+            .priority
+            .cmp(&left.priority)
+            .then_with(|| compare_timestamp_text(&left.created_at_utc, &right.created_at_utc))
+            .then_with(|| left.task_id.cmp(&right.task_id))
+    });
+}
+
+fn compare_timestamp_text(left: &str, right: &str) -> Ordering {
+    let left_parsed = parse_rfc3339_utc(left);
+    let right_parsed = parse_rfc3339_utc(right);
+    match (left_parsed, right_parsed) {
+        (Some(a), Some(b)) => a.cmp(&b),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => left.cmp(right),
+    }
+}
+
+fn parse_rfc3339_utc(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|parsed| parsed.with_timezone(&Utc))
+}
+
+fn scan_repo(
+    repo_root: &Path,
+    previous_index: Option<&BTreeMap<String, FileRecord>>,
+    strict_hash: bool,
+    hash_jobs: usize,
+) -> Result<BTreeMap<String, FileRecord>> {
+    let mut index = BTreeMap::<String, FileRecord>::new();
+    let mut files_to_hash = Vec::<(String, PathBuf, u64, u64)>::new();
+    let ignore_matcher = build_ignore_matcher(repo_root)?;
+
+    let walker = WalkDir::new(repo_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| should_descend(repo_root, entry.path(), &ignore_matcher));
+
+    for entry in walker {
+        let entry = entry.with_context(|| "failed walking repo tree")?;
+        if entry.file_type().is_dir() {
+            continue;
+        }
+
+        let abs_path = entry.path();
+        if !abs_path.is_file() {
+            continue;
+        }
+
+        let rel_path = abs_path
+            .strip_prefix(repo_root)
+            .with_context(|| format!("failed strip-prefix for {}", abs_path.display()))?;
+        let rel_norm = normalize_relpath(rel_path);
+        if rel_norm.is_empty() {
+            continue;
+        }
+        if ignore_matcher.matched(rel_path, false).is_ignore() {
+            continue;
+        }
+
+        let metadata = fs::metadata(abs_path)
+            .with_context(|| format!("failed reading metadata {}", abs_path.display()))?;
+        let size_bytes = metadata.len();
+        let modified_unix_secs = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+
+        if !strict_hash
+            && let Some(prev) = previous_index.and_then(|rows| rows.get(&rel_norm))
+            && prev.size_bytes == size_bytes
+            && prev.modified_unix_secs == modified_unix_secs
+        {
+            index.insert(
+                rel_norm,
+                FileRecord {
+                    schema_version: SCHEMA_FILE_RECORD.to_string(),
+                    hash: prev.hash.clone(),
+                    size_bytes,
+                    modified_unix_secs,
+                },
+            );
+            continue;
+        }
+
+        files_to_hash.push((
+            rel_norm,
+            abs_path.to_path_buf(),
+            size_bytes,
+            modified_unix_secs,
+        ));
+    }
+
+    if hash_jobs <= 1 || files_to_hash.len() <= 1 {
+        for (rel_norm, abs_path, size_bytes, modified_unix_secs) in files_to_hash {
+            index.insert(
+                rel_norm,
+                FileRecord {
+                    schema_version: SCHEMA_FILE_RECORD.to_string(),
+                    hash: hash_file(&abs_path)?,
+                    size_bytes,
+                    modified_unix_secs,
+                },
+            );
+        }
+    } else {
+        let parallel_jobs = hash_jobs.min(files_to_hash.len());
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(parallel_jobs)
+            .build()
+            .with_context(|| format!("failed building hash thread pool ({parallel_jobs})"))?;
+        let hashed_rows: Result<Vec<(String, FileRecord)>> = pool.install(|| {
+            files_to_hash
+                .into_par_iter()
+                .map(
+                    |(rel_norm, abs_path, size_bytes, modified_unix_secs)| -> Result<(String, FileRecord)> {
+                        let hash = hash_file(&abs_path)?;
+                        Ok((
+                            rel_norm,
+                            FileRecord {
+                                schema_version: SCHEMA_FILE_RECORD.to_string(),
+                                hash,
+                                size_bytes,
+                                modified_unix_secs,
+                            },
+                        ))
+                    },
+                )
+                .collect()
+        });
+        for (rel_norm, row) in hashed_rows? {
+            index.insert(rel_norm, row);
+        }
+    }
+
+    Ok(index)
+}
+
+fn diff_indexes(
+    old_index: &BTreeMap<String, FileRecord>,
+    new_index: &BTreeMap<String, FileRecord>,
+) -> Vec<ChangeRecord> {
+    let keys = old_index
+        .keys()
+        .chain(new_index.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    let mut changes = Vec::<ChangeRecord>::new();
+
+    for key in keys {
+        let old = old_index.get(&key);
+        let new = new_index.get(&key);
+        match (old, new) {
+            (None, Some(new_row)) => changes.push(ChangeRecord {
+                path: key,
+                kind: ChangeKind::Added,
+                old_hash: None,
+                new_hash: Some(new_row.hash.clone()),
+                old_size_bytes: None,
+                new_size_bytes: Some(new_row.size_bytes),
+            }),
+            (Some(old_row), None) => changes.push(ChangeRecord {
+                path: key,
+                kind: ChangeKind::Deleted,
+                old_hash: Some(old_row.hash.clone()),
+                new_hash: None,
+                old_size_bytes: Some(old_row.size_bytes),
+                new_size_bytes: None,
+            }),
+            (Some(old_row), Some(new_row)) if old_row.hash != new_row.hash => {
+                changes.push(ChangeRecord {
+                    path: key,
+                    kind: ChangeKind::Modified,
+                    old_hash: Some(old_row.hash.clone()),
+                    new_hash: Some(new_row.hash.clone()),
+                    old_size_bytes: Some(old_row.size_bytes),
+                    new_size_bytes: Some(new_row.size_bytes),
+                })
+            }
+            _ => {}
+        }
+    }
+
+    changes
+}
+
+fn hash_file(path: &Path) -> Result<String> {
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("failed opening file for hashing {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 16 * 1024];
+
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("failed reading file for hashing {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+
+    let digest = hasher.finalize();
+    Ok(format!("{:x}", digest))
+}
+
+fn build_ignore_matcher(repo_root: &Path) -> Result<Gitignore> {
+    let mut builder = GitignoreBuilder::new(repo_root);
+    let root_gitignore = repo_root.join(".gitignore");
+    if root_gitignore.exists() {
+        builder.add(root_gitignore);
+    }
+    let root_fugitignore = repo_root.join(".fugitignore");
+    if root_fugitignore.exists() {
+        builder.add(root_fugitignore);
+    }
+    let git_info_exclude = repo_root.join(".git").join("info").join("exclude");
+    if git_info_exclude.exists() {
+        builder.add(git_info_exclude);
+    }
+    builder
+        .build()
+        .with_context(|| format!("failed building ignore matcher for {}", repo_root.display()))
+}
+
+fn should_descend(repo_root: &Path, path: &Path, ignore_matcher: &Gitignore) -> bool {
+    if path == repo_root {
+        return true;
+    }
+    let Ok(rel) = path.strip_prefix(repo_root) else {
+        return false;
+    };
+    let mut components = rel.components();
+    let Some(first) = components.next() else {
+        return false;
+    };
+    let first = first.as_os_str().to_string_lossy().to_string();
+    if IGNORE_ROOT_ENTRIES.iter().any(|entry| *entry == first) {
+        return false;
+    }
+    !ignore_matcher.matched(rel, true).is_ignore()
+}
+
+fn normalize_relpath(path: &Path) -> String {
+    let mut out = Vec::<String>::new();
+    for component in path.components() {
+        let token = component.as_os_str().to_string_lossy().trim().to_string();
+        if token.is_empty() || token == "." {
+            continue;
+        }
+        out.push(token);
+    }
+    out.join("/")
+}
+
+fn normalize_user_path(path: &str) -> String {
+    let replaced = path.replace('\\', "/");
+    let tokens = replaced
+        .split('/')
+        .filter(|token| !token.trim().is_empty() && *token != ".")
+        .map(|token| token.trim().to_string())
+        .collect::<Vec<_>>();
+    tokens.join("/")
+}
+
+fn validate_branch_name(name: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        bail!("branch name cannot be empty");
+    }
+    if name.starts_with('/') || name.ends_with('/') {
+        bail!("branch name cannot start or end with '/'");
+    }
+    if name.contains("..") {
+        bail!("branch name cannot contain '..'");
+    }
+    if name.contains("//") {
+        bail!("branch name cannot contain empty path segments");
+    }
+
+    for ch in name.chars() {
+        let allowed = ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/');
+        if !allowed {
+            bail!(
+                "branch name '{}' contains unsupported character '{}': use [a-zA-Z0-9._/-]",
+                name,
+                ch
+            );
+        }
+    }
+    Ok(())
+}
+
+fn default_agent_id() -> String {
+    if let Ok(token) = std::env::var("FUGIT_AGENT_ID")
+        && !token.trim().is_empty()
+    {
+        return token.trim().to_string();
+    }
+    if let Ok(token) = std::env::var("AGENT_ID")
+        && !token.trim().is_empty()
+    {
+        return token.trim().to_string();
+    }
+    if let Ok(token) = std::env::var("USER")
+        && !token.trim().is_empty()
+    {
+        return token.trim().to_string();
+    }
+    "agent.unknown".to_string()
+}
+
+fn dedupe_keep_order(values: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::<String>::new();
+    let mut out = Vec::<String>::new();
+    for value in values {
+        let token = value.trim().to_string();
+        if token.is_empty() {
+            continue;
+        }
+        if seen.insert(token.clone()) {
+            out.push(token);
+        }
+    }
+    out
+}
+
+fn resolve_repo_root(path: &Path) -> Result<PathBuf> {
+    let root = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .with_context(|| "failed reading current directory")?
+            .join(path)
+    };
+
+    if !root.exists() {
+        bail!("repo root does not exist: {}", root.display());
+    }
+
+    root.canonicalize()
+        .with_context(|| format!("failed canonicalizing {}", root.display()))
+}
+
+fn now_utc() -> String {
+    Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+fn format_utc(value: DateTime<Utc>) -> String {
+    value.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+fn default_backend_mode() -> String {
+    BACKEND_MODE_GIT_BRIDGE.to_string()
+}
+
+fn timeline_is_initialized(repo_root: &Path) -> bool {
+    timeline_config_path(repo_root).exists() && timeline_branches_path(repo_root).exists()
+}
+
+fn write_pretty_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed creating {}", parent.display()))?;
+    }
+    let bytes = serde_json::to_vec_pretty(value)
+        .with_context(|| format!("failed serializing {}", path.display()))?;
+    fs::write(path, bytes).with_context(|| format!("failed writing {}", path.display()))
+}
+
+fn load_json_optional<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(path).with_context(|| format!("failed reading {}", path.display()))?;
+    let value = serde_json::from_slice::<T>(&bytes)
+        .with_context(|| format!("invalid json {}", path.display()))?;
+    Ok(Some(value))
+}
+
+fn timeline_root(repo_root: &Path) -> PathBuf {
+    repo_root.join(TIMELINE_ROOT_DIR)
+}
+
+fn timeline_config_path(repo_root: &Path) -> PathBuf {
+    timeline_root(repo_root).join("config.json")
+}
+
+fn timeline_branches_path(repo_root: &Path) -> PathBuf {
+    timeline_root(repo_root).join("branches.json")
+}
+
+fn timeline_objects_dir(repo_root: &Path) -> PathBuf {
+    timeline_root(repo_root).join("objects")
+}
+
+fn timeline_locks_path(repo_root: &Path) -> PathBuf {
+    timeline_root(repo_root).join("locks.json")
+}
+
+fn timeline_tasks_path(repo_root: &Path) -> PathBuf {
+    timeline_root(repo_root).join("tasks.json")
+}
+
+fn timeline_bridge_auth_path(repo_root: &Path) -> PathBuf {
+    timeline_root(repo_root).join("bridge_auth.json")
+}
+
+fn timeline_branch_root(repo_root: &Path, branch: &str) -> PathBuf {
+    timeline_root(repo_root).join("branches").join(branch)
+}
+
+fn timeline_branch_events_path(repo_root: &Path, branch: &str) -> PathBuf {
+    timeline_branch_root(repo_root, branch).join("events.jsonl")
+}
+
+fn timeline_branch_index_path(repo_root: &Path, branch: &str) -> PathBuf {
+    timeline_branch_root(repo_root, branch).join("index.json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_user_path_collapses_tokens() {
+        let raw = "./src//core\\utils/../index.rs";
+        let normalized = normalize_user_path(raw);
+        assert_eq!(normalized, "src/core/utils/../index.rs");
+    }
+
+    #[test]
+    fn parse_git_host_handles_https_and_ssh_forms() {
+        assert_eq!(
+            parse_git_host("https://github.com/org/repo.git").as_deref(),
+            Some("github.com")
+        );
+        assert_eq!(
+            parse_git_host("git@github.com:org/repo.git").as_deref(),
+            Some("github.com")
+        );
+        assert_eq!(
+            parse_git_host("ssh://git@internal.example.com:2222/team/repo.git").as_deref(),
+            Some("internal.example.com")
+        );
+    }
+
+    #[test]
+    fn parse_git_credential_output_extracts_username_and_password() {
+        let raw = "protocol=https\nhost=github.com\nusername=x-access-token\npassword=abc123\n";
+        let parsed = parse_git_credential_output(raw).expect("expected parsed credentials");
+        assert_eq!(parsed.username.as_deref(), Some("x-access-token"));
+        assert_eq!(parsed.password.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn resolve_parallel_jobs_defaults_and_requested_values() {
+        assert_eq!(resolve_parallel_jobs(None, false), 1);
+        assert_eq!(resolve_parallel_jobs(Some(4), false), 4);
+        assert_eq!(resolve_parallel_jobs(Some(0), false), 1);
+        assert!(resolve_parallel_jobs(None, true) >= 1);
+    }
+
+    #[test]
+    fn lock_pattern_match_supports_glob_and_prefix_paths() {
+        assert!(lock_pattern_matches_path("src/**", "src/main.rs"));
+        assert!(lock_pattern_matches_path("docs", "docs/plan.md"));
+        assert!(!lock_pattern_matches_path("docs/**", "src/docs/plan.md"));
+    }
+
+    #[test]
+    fn task_blockers_clear_when_dependencies_are_done() {
+        let mut state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![
+                FugitTask {
+                    task_id: "task_dep".to_string(),
+                    title: "dependency".to_string(),
+                    detail: None,
+                    priority: 0,
+                    tags: vec![],
+                    depends_on: vec![],
+                    status: TaskStatus::Open,
+                    created_at_utc: now_utc(),
+                    updated_at_utc: now_utc(),
+                    created_by_agent_id: "agent.a".to_string(),
+                    claimed_by_agent_id: None,
+                    claim_started_at_utc: None,
+                    claim_expires_at_utc: None,
+                    completed_at_utc: None,
+                    completed_by_agent_id: None,
+                },
+                FugitTask {
+                    task_id: "task_child".to_string(),
+                    title: "child".to_string(),
+                    detail: None,
+                    priority: 1,
+                    tags: vec![],
+                    depends_on: vec!["task_dep".to_string()],
+                    status: TaskStatus::Open,
+                    created_at_utc: now_utc(),
+                    updated_at_utc: now_utc(),
+                    created_by_agent_id: "agent.a".to_string(),
+                    claimed_by_agent_id: None,
+                    claim_started_at_utc: None,
+                    claim_expires_at_utc: None,
+                    completed_at_utc: None,
+                    completed_by_agent_id: None,
+                },
+            ],
+        };
+
+        let status_map = task_status_map(&state);
+        assert_eq!(
+            task_blocked_by(&state.tasks[1], &status_map),
+            vec!["task_dep".to_string()]
+        );
+
+        state.tasks[0].status = TaskStatus::Done;
+        let status_map = task_status_map(&state);
+        assert!(task_blocked_by(&state.tasks[1], &status_map).is_empty());
+    }
+
+    #[test]
+    fn task_request_prefers_ready_high_priority_tasks() {
+        let state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![
+                FugitTask {
+                    task_id: "task_dep_done".to_string(),
+                    title: "dep done".to_string(),
+                    detail: None,
+                    priority: 0,
+                    tags: vec![],
+                    depends_on: vec![],
+                    status: TaskStatus::Done,
+                    created_at_utc: "2026-03-01T00:00:00Z".to_string(),
+                    updated_at_utc: now_utc(),
+                    created_by_agent_id: "agent.a".to_string(),
+                    claimed_by_agent_id: None,
+                    claim_started_at_utc: None,
+                    claim_expires_at_utc: None,
+                    completed_at_utc: Some(now_utc()),
+                    completed_by_agent_id: Some("agent.a".to_string()),
+                },
+                FugitTask {
+                    task_id: "task_simple".to_string(),
+                    title: "simple".to_string(),
+                    detail: None,
+                    priority: 2,
+                    tags: vec!["ui".to_string()],
+                    depends_on: vec![],
+                    status: TaskStatus::Open,
+                    created_at_utc: "2026-03-02T00:00:00Z".to_string(),
+                    updated_at_utc: now_utc(),
+                    created_by_agent_id: "agent.a".to_string(),
+                    claimed_by_agent_id: None,
+                    claim_started_at_utc: None,
+                    claim_expires_at_utc: None,
+                    completed_at_utc: None,
+                    completed_by_agent_id: None,
+                },
+                FugitTask {
+                    task_id: "task_priority_ready".to_string(),
+                    title: "priority ready".to_string(),
+                    detail: None,
+                    priority: 10,
+                    tags: vec!["ui".to_string()],
+                    depends_on: vec!["task_dep_done".to_string()],
+                    status: TaskStatus::Open,
+                    created_at_utc: "2026-03-03T00:00:00Z".to_string(),
+                    updated_at_utc: now_utc(),
+                    created_by_agent_id: "agent.a".to_string(),
+                    claimed_by_agent_id: None,
+                    claim_started_at_utc: None,
+                    claim_expires_at_utc: None,
+                    completed_at_utc: None,
+                    completed_by_agent_id: None,
+                },
+                FugitTask {
+                    task_id: "task_blocked".to_string(),
+                    title: "blocked".to_string(),
+                    detail: None,
+                    priority: 100,
+                    tags: vec!["ui".to_string()],
+                    depends_on: vec!["task_simple".to_string()],
+                    status: TaskStatus::Open,
+                    created_at_utc: "2026-03-01T00:00:00Z".to_string(),
+                    updated_at_utc: now_utc(),
+                    created_by_agent_id: "agent.a".to_string(),
+                    claimed_by_agent_id: None,
+                    claim_started_at_utc: None,
+                    claim_expires_at_utc: None,
+                    completed_at_utc: None,
+                    completed_by_agent_id: None,
+                },
+            ],
+        };
+
+        let selected = select_task_for_agent(
+            &state,
+            "agent.worker",
+            &["ui".to_string()],
+            true,
+            90,
+            Utc::now(),
+        );
+        let (idx, dispatch_kind) = selected.expect("expected selected task");
+        assert_eq!(dispatch_kind, TaskDispatchKind::Open);
+        assert_eq!(state.tasks[idx].task_id, "task_priority_ready");
+    }
+
+    #[test]
+    fn task_request_can_steal_stale_claims() {
+        let now = Utc::now();
+        let state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![FugitTask {
+                task_id: "task_claimed".to_string(),
+                title: "claimed".to_string(),
+                detail: None,
+                priority: 5,
+                tags: vec![],
+                depends_on: vec![],
+                status: TaskStatus::Claimed,
+                created_at_utc: "2026-03-01T00:00:00Z".to_string(),
+                updated_at_utc: now_utc(),
+                created_by_agent_id: "agent.a".to_string(),
+                claimed_by_agent_id: Some("agent.other".to_string()),
+                claim_started_at_utc: Some(format_utc(now - Duration::minutes(60))),
+                claim_expires_at_utc: None,
+                completed_at_utc: None,
+                completed_by_agent_id: None,
+            }],
+        };
+
+        let selection = select_task_for_agent(&state, "agent.worker", &[], true, 30, now)
+            .expect("expected steal candidate");
+        assert_eq!(selection.1, TaskDispatchKind::Steal);
+        assert_eq!(state.tasks[selection.0].task_id, "task_claimed");
+
+        let blocked = select_task_for_agent(&state, "agent.worker", &[], false, 30, now);
+        assert!(blocked.is_none());
+    }
+
+    #[test]
+    fn task_gui_url_maps_wildcard_host_for_browser() {
+        assert_eq!(task_gui_url("0.0.0.0", 7788, None), "http://127.0.0.1:7788");
+        assert_eq!(
+            task_gui_url("127.0.0.1", 7788, None),
+            "http://127.0.0.1:7788"
+        );
+        assert_eq!(
+            task_gui_url("127.0.0.1", 7788, Some("proj-a")),
+            "http://127.0.0.1:7788/?project=proj-a"
+        );
+    }
+
+    #[test]
+    fn parse_http_target_extracts_target_and_query() {
+        let request = "GET /api/tasks?project=alpha+one HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let parsed = parse_http_target(request).expect("expected parse");
+        assert_eq!(parsed.path, "/api/tasks");
+        assert_eq!(
+            parsed.query.get("project").map(String::as_str),
+            Some("alpha one")
+        );
+    }
+
+    #[test]
+    fn resolve_selected_task_gui_project_prefers_selector_then_default() {
+        let projects = vec![
+            TaskGuiProject {
+                key: "alpha".to_string(),
+                name: "alpha".to_string(),
+                repo_root: "/tmp/alpha".to_string(),
+                is_default: false,
+                is_current_repo: false,
+            },
+            TaskGuiProject {
+                key: "beta".to_string(),
+                name: "beta".to_string(),
+                repo_root: "/tmp/beta".to_string(),
+                is_default: true,
+                is_current_repo: false,
+            },
+        ];
+        let selected =
+            resolve_selected_task_gui_project(&projects, Some("alpha")).expect("selector");
+        assert_eq!(selected.key, "alpha");
+        let fallback = resolve_selected_task_gui_project(&projects, None).expect("default");
+        assert_eq!(fallback.key, "beta");
+    }
+
+    #[test]
+    fn timeline_events_page_returns_newest_first_with_offset() {
+        let make_event = |id: &str| TimelineEvent {
+            schema_version: SCHEMA_EVENT.to_string(),
+            event_id: id.to_string(),
+            created_at_utc: "2026-03-01T00:00:00Z".to_string(),
+            branch: "trunk".to_string(),
+            parent_event_id: None,
+            agent_id: "agent.a".to_string(),
+            summary: format!("event {}", id),
+            tags: Vec::new(),
+            metrics: EventMetrics {
+                tracked_file_count: 0,
+                changed_file_count: 0,
+                added_count: 0,
+                modified_count: 0,
+                deleted_count: 0,
+                changed_bytes_total: 0,
+            },
+            changes: Vec::new(),
+        };
+        let events = vec![
+            make_event("evt_1"),
+            make_event("evt_2"),
+            make_event("evt_3"),
+            make_event("evt_4"),
+            make_event("evt_5"),
+        ];
+
+        let first = timeline_events_page(&events, 0, 2);
+        assert_eq!(
+            first
+                .iter()
+                .map(|event| event.event_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["evt_5", "evt_4"]
+        );
+
+        let second = timeline_events_page(&events, 2, 2);
+        assert_eq!(
+            second
+                .iter()
+                .map(|event| event.event_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["evt_3", "evt_2"]
+        );
+
+        let last = timeline_events_page(&events, 4, 2);
+        assert_eq!(
+            last.iter()
+                .map(|event| event.event_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["evt_1"]
+        );
+
+        assert!(timeline_events_page(&events, 5, 2).is_empty());
+    }
+
+    #[test]
+    fn task_timeline_tags_include_action_and_task_id() {
+        let task = FugitTask {
+            task_id: "task_abc".to_string(),
+            title: "do thing".to_string(),
+            detail: None,
+            priority: 1,
+            tags: vec!["parser".to_string()],
+            depends_on: Vec::new(),
+            status: TaskStatus::Done,
+            created_at_utc: now_utc(),
+            updated_at_utc: now_utc(),
+            created_by_agent_id: "agent.a".to_string(),
+            claimed_by_agent_id: None,
+            claim_started_at_utc: None,
+            claim_expires_at_utc: None,
+            completed_at_utc: Some(now_utc()),
+            completed_by_agent_id: Some("agent.a".to_string()),
+        };
+
+        let tags = task_timeline_tags("done", &task, Some(TaskDispatchKind::Open));
+        assert!(tags.iter().any(|tag| tag == "task"));
+        assert!(tags.iter().any(|tag| tag == "task_action:done"));
+        assert!(tags.iter().any(|tag| tag == "task_id:task_abc"));
+        assert!(tags.iter().any(|tag| tag == "task_dispatch:open"));
+        assert!(tags.iter().any(|tag| tag == "task_tag:parser"));
+    }
+}
