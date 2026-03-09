@@ -17576,6 +17576,7 @@ fn task_blocked_by(task: &FugitTask, status_map: &BTreeMap<String, TaskStatus>) 
     blocked_by
 }
 
+#[allow(clippy::too_many_arguments)]
 fn select_task_for_agent(
     state: &TaskState,
     agent_id: &str,
@@ -17759,6 +17760,7 @@ fn specific_task_unavailable_reason(
     "not_dispatchable".to_string()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn select_auto_replenish_candidates_for_agent(
     state: &TaskState,
     agent_id: &str,
