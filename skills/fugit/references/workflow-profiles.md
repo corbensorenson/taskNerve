@@ -19,11 +19,13 @@ Use when multiple agents should coordinate by pulling from a shared queue.
 
 - `fugit --repo-root . task import --file /path/to/tasks.tsv`
 - `fugit --repo-root . task list --ready-only`
+- `fugit --repo-root . task start --agent <agent_id> --claim-ttl-minutes 30 --steal-after-minutes 90`
+- `fugit task start --repo-root . --agent <agent_id> --json`
 - `fugit --repo-root . task request --agent <agent_id> --focus compiler --claim-ttl-minutes 30 --steal-after-minutes 90`
 - `fugit --repo-root . task request --agent <agent_id> --title-contains "compiler" --json`
 - `fugit --repo-root . task request --agent <agent_id> --task-id <task_id> --json`
 - `fugit --repo-root . task edit --task-id <task_id> --title "Updated X"`
-- `fugit --repo-root . task show --task-id <task_id>`
+- `fugit --repo-root . task show <task_id>`
 - `fugit --repo-root . task list --jsonl --fields task_id,title,status`
 - `fugit --repo-root . task list --agent <agent_id> --mine --json`
 - `fugit --repo-root . task status --agent <agent_id> --json`
@@ -34,15 +36,16 @@ Use when multiple agents should coordinate by pulling from a shared queue.
 - `fugit --repo-root . task approve --all-pending-auto-replenish --agent <agent_id>`
 - `fugit --repo-root . bridge auto-sync show --json`
 - `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --summary "done summary" --regression "<test command>"`
-- `fugit --repo-root . task progress --task-id <task_id> --agent <agent_id> --note "implemented parser wiring"`
-- `fugit --repo-root . task note --task-id <task_id> --agent <agent_id> --artifact artifacts/report.json`
-- `fugit --repo-root . task claim --task-id <task_id> --agent <agent_id> --extend-only --claim-ttl-minutes 60`
+- `fugit --repo-root . task progress <task_id> --agent <agent_id> --note "implemented parser wiring"`
+- `fugit --repo-root . task note <task_id> --agent <agent_id> --artifact artifacts/report.json`
+- `fugit --repo-root . task claim <task_id> --agent <agent_id> --extend-only --claim-ttl-minutes 60`
 - `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --claim-next --regression "<test command>"`
 - `fugit --repo-root . check run --json`
 - `fugit --repo-root . check deprecate --check-id <check_id> --reason "obsolete"`
 
 Characteristics:
 - dependency-aware ordering via `--depends-on`,
+- one-command resume-or-claim flow via `task start`,
 - lease-based claims with default stale-claim work stealing,
 - default-on date-gate filtering for tasks with `not_before:` tags or date windows in their text,
 - default-on auto-replenish scout tasks when no real work is dispatchable,

@@ -130,9 +130,9 @@ After migration, use fugit for daily coordination (`task`, `checkpoint`, `log`),
 ```bash
 fugit --repo-root . task import --file /path/to/tasks.tsv
 fugit --repo-root . task sync --plan /path/to/the_final_plan.md
-fugit --repo-root . task request --agent agent.worker --focus compiler
-fugit --repo-root . task request --agent agent.worker --title-contains "Phase B"
-fugit --repo-root . task request --agent agent.worker --task-id <task_id>
+fugit --repo-root . task start --agent agent.worker
+fugit task start --repo-root . --agent agent.worker --focus compiler
+fugit --repo-root . task start --agent agent.worker --task-id <task_id>
 fugit --repo-root . task progress --task-id <task_id> --agent agent.worker --note "landed parser wiring"
 fugit --repo-root . task note --task-id <task_id> --agent agent.worker --artifact artifacts/report.json
 fugit --repo-root . checkpoint --summary "implemented feature X" --agent agent.worker --tag feature
@@ -145,6 +145,8 @@ When you are only adding one task, use:
 ```bash
 fugit --repo-root . task add --title "Implement feature X" --priority 10 --tag feature
 ```
+
+`task start` is the normal agent entrypoint: it resumes the agent's current claim if one exists, otherwise it claims the next best task. Use `task request` when you want preview mode (`--no-claim`, `--max`), explicit scheduling diagnostics, or to bypass your current claim with `--skip-owned`.
 
 Task lifecycle operations (`add`, `edit`, `claim`, `done`, `reopen`, `release`, `remove`) are mirrored into timeline events.
 
@@ -286,16 +288,17 @@ Task maintenance from CLI:
 
 ```bash
 fugit project discover --json
-fugit --repo-root . task show --task-id <task_id>
+fugit --repo-root . task show <task_id>
+fugit task start --repo-root . --agent <agent_id> --json
 fugit --repo-root . task current --agent <agent_id> --json
 fugit --repo-root . task status --agent <agent_id> --json
 fugit --repo-root . task list --agent <agent_id> --mine --json
 fugit --repo-root . task list --jsonl --fields task_id,title,status
 fugit --repo-root . task list --status in_progress --json
 fugit --repo-root . task edit --task-id <task_id> --title "Updated title" --tag compiler
-fugit --repo-root . task claim --task-id <task_id> --agent <agent_id> --extend-only --claim-ttl-minutes 60
-fugit --repo-root . task progress --task-id <task_id> --note "waiting on benchmark rerun"
-fugit --repo-root . task note --task-id <task_id> --artifact artifacts/report.json --artifact artifacts/trace.log
+fugit --repo-root . task claim <task_id> --agent <agent_id> --extend-only --claim-ttl-minutes 60
+fugit --repo-root . task progress <task_id> --note "waiting on benchmark rerun"
+fugit --repo-root . task note <task_id> --artifact artifacts/report.json --artifact artifacts/trace.log
 fugit --repo-root . task remove --task-id <task_id>
 fugit --repo-root . task approve --all-pending-auto-replenish --agent reviewer
 fugit --repo-root . task policy show --json

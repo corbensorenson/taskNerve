@@ -43,7 +43,11 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . task edit --task-id <task_id> --title "Updated X"`
 - `fugit --repo-root . task remove --task-id <task_id>`
 
-5. Request next task (work-stealing by default on stale claims):
+5. Start work with one command (resume current claim or request the next ready task):
+- `fugit --repo-root . task start --agent <agent_id> --claim-ttl-minutes 30 --steal-after-minutes 90`
+- `fugit task start --repo-root . --agent <agent_id> --json`
+- `task start` resumes the agent's current claim if one exists; otherwise it claims the next best task.
+- Use `task request` when you need preview mode (`--no-claim`, `--max`), explicit scheduling diagnostics, or `--skip-owned`.
 - `fugit --repo-root . task request --agent <agent_id> --claim-ttl-minutes 30 --steal-after-minutes 90`
 - Optional routing hints: `--focus <token>`, `--prefix <token>`, `--contains <token>`, `--title-contains <token>`, plus `--tag <tag>`
 - When the queue is genuinely exhausted, `task request` will auto-seed per-agent scout tasks by default so agents can replenish backlog instead of stalling.
@@ -68,13 +72,13 @@ Use this skill when any of the following are true:
 7. Mark tasks done or release claim:
 - `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --summary "<what finished>" --regression "<test command>"`
 - To leave a lightweight execution breadcrumb without changing task state:
-- `fugit --repo-root . task progress --task-id <task_id> --agent <agent_id> --note "<what changed>"`
+- `fugit --repo-root . task progress <task_id> --agent <agent_id> --note "<what changed>"`
 - To attach machine-readable artifact breadcrumbs for handoff/resume:
-- `fugit --repo-root . task note --task-id <task_id> --agent <agent_id> --artifact <path>`
+- `fugit --repo-root . task note <task_id> --agent <agent_id> --artifact <path>`
 - To close work and pull the next ready item in one round trip:
 - `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --claim-next --regression "<test command>"`
 - To renew ownership on a long-running claim without re-claim side effects:
-- `fugit --repo-root . task claim --task-id <task_id> --agent <agent_id> --extend-only --claim-ttl-minutes 60`
+- `fugit --repo-root . task claim <task_id> --agent <agent_id> --extend-only --claim-ttl-minutes 60`
 - Default quality gate is on: every completed task should carry at least one regression or benchmark check, and active checks run before bridge sync.
 - Register or retire checks explicitly when needed:
 - `fugit --repo-root . check add --kind regression --task-id <task_id> --command "<test command>"`
@@ -95,7 +99,9 @@ Use this skill when any of the following are true:
 8. Review event history:
 - `fugit --repo-root . log --limit 20`
 - Inspect one task directly:
-- `fugit --repo-root . task show --task-id <task_id>`
+- `fugit --repo-root . task show <task_id>`
+- Resume or claim work in one step:
+- `fugit --repo-root . task start --agent <agent_id> --json`
 - Inspect your active claim directly:
 - `fugit --repo-root . task current --agent <agent_id> --json`
 - Inspect your queue/ownership summary directly:
@@ -202,7 +208,7 @@ Use this when the user has an existing Git project and wants to switch day-to-da
 Use this contract to keep task execution deterministic across agents.
 
 1. Before starting implementation, request work:
-- `fugit --repo-root . task request --agent <agent_id>`
+- `fugit --repo-root . task start --agent <agent_id> --json`
 
 2. If no task is returned, first check whether auto-replenish is waiting for approval:
 - `fugit --repo-root . task policy show --json`
@@ -225,7 +231,7 @@ Use this contract to keep task execution deterministic across agents.
 - Markdown import consumes unchecked lines (`- [ ]` / `* [ ]`) and ignores checked lines (`[x]`).
 
 4. Keep ownership explicit:
-- claim specific work when needed: `fugit --repo-root . task claim --task-id <task_id> --agent <agent_id>`
+- claim specific work when needed: `fugit --repo-root . task claim <task_id> --agent <agent_id>`
 - release immediately on context switch: `fugit --repo-root . task release --task-id <task_id> --agent <agent_id>`
 
 5. Close the loop:

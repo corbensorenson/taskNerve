@@ -77,7 +77,7 @@ const IGNORE_ROOT_ENTRIES: &[&str] = &[
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Timeline-first versioning with GitHub bridge for multi-agent work")]
 struct Cli {
-    #[arg(long, default_value = ".")]
+    #[arg(long, global = true, default_value = ".")]
     repo_root: PathBuf,
     #[command(subcommand)]
     command: Command,
@@ -1233,6 +1233,20 @@ struct AutoReplenishEnsureResult {
 }
 
 #[derive(Debug, Clone)]
+struct TaskRequestExecutionOptions {
+    agent_id: String,
+    requested_task_id: Option<String>,
+    filters: TaskQueryFilter,
+    max: usize,
+    claim_ttl_minutes: i64,
+    steal_after_minutes: i64,
+    allow_steal: bool,
+    skip_owned: bool,
+    respect_date_gates: bool,
+    no_claim: bool,
+}
+
+#[derive(Debug, Clone)]
 struct MissingTimelineObject {
     scope: String,
     branch: String,
@@ -1453,10 +1467,42 @@ enum TaskAction {
     },
     Show {
         #[arg(long)]
-        task_id: String,
+        task_id: Option<String>,
+        #[arg(value_name = "TASK_ID")]
+        task_id_arg: Option<String>,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(visible_aliases = ["work", "continue"])]
+    Start {
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        task_id: Option<String>,
+        #[arg(value_name = "TASK_ID")]
+        task_id_arg: Option<String>,
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        #[arg(long)]
+        focus: Option<String>,
+        #[arg(long)]
+        prefix: Option<String>,
+        #[arg(long)]
+        contains: Option<String>,
+        #[arg(long)]
+        title_contains: Option<String>,
+        #[arg(long, default_value_t = 30)]
+        claim_ttl_minutes: i64,
+        #[arg(long, default_value_t = 90)]
+        steal_after_minutes: i64,
+        #[arg(long, default_value_t = false)]
+        no_steal: bool,
+        #[arg(long, default_value_t = false)]
+        ignore_date_gates: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    #[command(visible_alias = "resume")]
     Current {
         #[arg(long)]
         agent: Option<String>,
@@ -1481,7 +1527,9 @@ enum TaskAction {
     },
     Edit {
         #[arg(long)]
-        task_id: String,
+        task_id: Option<String>,
+        #[arg(value_name = "TASK_ID")]
+        task_id_arg: Option<String>,
         #[arg(long)]
         title: Option<String>,
         #[arg(long)]
@@ -1505,7 +1553,9 @@ enum TaskAction {
     },
     Remove {
         #[arg(long)]
-        task_id: String,
+        task_id: Option<String>,
+        #[arg(value_name = "TASK_ID")]
+        task_id_arg: Option<String>,
         #[arg(long)]
         agent: Option<String>,
         #[arg(long, default_value_t = false)]
@@ -1555,6 +1605,7 @@ enum TaskAction {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(visible_alias = "next")]
     Request {
         #[arg(long)]
         agent: Option<String>,
@@ -1589,7 +1640,9 @@ enum TaskAction {
     },
     Claim {
         #[arg(long)]
-        task_id: String,
+        task_id: Option<String>,
+        #[arg(value_name = "TASK_ID")]
+        task_id_arg: Option<String>,
         #[arg(long)]
         agent: Option<String>,
         #[arg(long, default_value_t = 30)]
@@ -1603,7 +1656,9 @@ enum TaskAction {
     },
     Done {
         #[arg(long)]
-        task_id: String,
+        task_id: Option<String>,
+        #[arg(value_name = "TASK_ID")]
+        task_id_arg: Option<String>,
         #[arg(long)]
         agent: Option<String>,
         #[arg(long)]
@@ -1629,7 +1684,9 @@ enum TaskAction {
     },
     Progress {
         #[arg(long)]
-        task_id: String,
+        task_id: Option<String>,
+        #[arg(value_name = "TASK_ID")]
+        task_id_arg: Option<String>,
         #[arg(long)]
         note: String,
         #[arg(long)]
@@ -1639,7 +1696,9 @@ enum TaskAction {
     },
     Note {
         #[arg(long)]
-        task_id: String,
+        task_id: Option<String>,
+        #[arg(value_name = "TASK_ID")]
+        task_id_arg: Option<String>,
         #[arg(long = "artifact")]
         artifacts: Vec<String>,
         #[arg(long)]
@@ -1649,7 +1708,9 @@ enum TaskAction {
     },
     Reopen {
         #[arg(long)]
-        task_id: String,
+        task_id: Option<String>,
+        #[arg(value_name = "TASK_ID")]
+        task_id_arg: Option<String>,
         #[arg(long)]
         agent: Option<String>,
         #[arg(long, default_value_t = false)]
@@ -1657,7 +1718,9 @@ enum TaskAction {
     },
     Release {
         #[arg(long)]
-        task_id: String,
+        task_id: Option<String>,
+        #[arg(value_name = "TASK_ID")]
+        task_id_arg: Option<String>,
         #[arg(long)]
         agent: Option<String>,
         #[arg(long, default_value_t = false)]
@@ -2327,6 +2390,7 @@ fn fugit_skill_bundle(include_skill_body: bool, include_openai_yaml: bool) -> se
                 "fugit_task_import",
                 "fugit_task_list",
                 "fugit_task_request",
+                "fugit_task_start",
                 "fugit_task_claim",
                 "fugit_task_done",
                 "fugit_task_reopen",
@@ -4618,8 +4682,9 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!(
-                    "[fugit-task-status] agent={} mine={} ready_open={} blocked_open={} date_gated_open={} next={}",
+                    "[fugit-task-status] agent={} current={} mine={} ready_open={} blocked_open={} date_gated_open={} next={}",
                     payload["agent_id"].as_str().unwrap_or("unknown"),
+                    payload["current"]["task_id"].as_str().unwrap_or("none"),
                     payload["counts"]["mine_claimed"].as_u64().unwrap_or(0),
                     payload["counts"]["ready_open"].as_u64().unwrap_or(0),
                     payload["counts"]["blocked_open"].as_u64().unwrap_or(0),
@@ -4631,11 +4696,16 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 );
             }
         }
-        TaskAction::Show { task_id, json } => {
+        TaskAction::Show {
+            task_id,
+            task_id_arg,
+            json,
+        } => {
             if state_changed {
                 state.updated_at_utc = now_utc();
                 write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
             }
+            let task_id = resolve_required_task_id(task_id, task_id_arg, "task show")?;
             let status_map = task_status_map(&state);
             let task = state
                 .tasks
@@ -4646,37 +4716,100 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             let _ = json;
             println!("{}", serde_json::to_string_pretty(&payload)?);
         }
+        TaskAction::Start {
+            agent,
+            task_id,
+            task_id_arg,
+            tags,
+            focus,
+            prefix,
+            contains,
+            title_contains,
+            claim_ttl_minutes,
+            steal_after_minutes,
+            no_steal,
+            ignore_date_gates,
+            json,
+        } => {
+            let agent_id = agent.unwrap_or_else(default_agent_id);
+            let named_task_id = normalize_optional_text(task_id, "task id")?;
+            let positional_task_id = normalize_optional_text(task_id_arg, "task id")?;
+            let requested_task_id = match (named_task_id, positional_task_id) {
+                (Some(left), Some(right)) if left != right => {
+                    bail!(
+                        "task start received conflicting task ids: {} vs {}",
+                        left,
+                        right
+                    )
+                }
+                (Some(task_id), Some(_)) | (Some(task_id), None) => Some(task_id),
+                (None, Some(task_id)) => Some(task_id),
+                (None, None) => None,
+            };
+            if requested_task_id.is_none() {
+                if state_changed {
+                    state.updated_at_utc = now_utc();
+                    write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+                }
+                let current = task_current_payload(&state, &agent_id);
+                if current["found"].as_bool().unwrap_or(false) {
+                    let payload = json!({
+                        "schema_version": "fugit.task.start.v1",
+                        "generated_at_utc": now_utc(),
+                        "agent_id": agent_id,
+                        "start_mode": "resume_current",
+                        "assigned": true,
+                        "assigned_count": current["count"].as_u64().unwrap_or(0),
+                        "claimed": false,
+                        "dispatch_kind": "owned_claim",
+                        "selection_reason": "resume_current",
+                        "task": current["task"].clone(),
+                        "tasks": current["tasks"].clone()
+                    });
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&payload)?);
+                    } else {
+                        println!(
+                            "[fugit-task] start=resume_current claimed=false task_id={} title={}",
+                            payload["task"]["task_id"].as_str().unwrap_or("unknown"),
+                            payload["task"]["title"].as_str().unwrap_or("untitled")
+                        );
+                    }
+                    return Ok(());
+                }
+            }
+            let filters =
+                normalize_task_query_filter(tags, focus, prefix, contains, title_contains)?;
+            let mut payload = execute_task_request(
+                repo_root,
+                &mut state,
+                state_changed,
+                &TaskRequestExecutionOptions {
+                    agent_id,
+                    requested_task_id,
+                    filters,
+                    max: 1,
+                    claim_ttl_minutes,
+                    steal_after_minutes,
+                    allow_steal: !no_steal,
+                    skip_owned: false,
+                    respect_date_gates: !ignore_date_gates,
+                    no_claim: false,
+                },
+            )?;
+            if let Some(object) = payload.as_object_mut() {
+                object.insert("schema_version".to_string(), json!("fugit.task.start.v1"));
+                object.insert("start_mode".to_string(), json!("request_next"));
+            }
+            print_task_request_payload(&payload, json)?;
+        }
         TaskAction::Current { agent, json } => {
             if state_changed {
                 state.updated_at_utc = now_utc();
                 write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
             }
             let agent_id = agent.unwrap_or_else(default_agent_id);
-            let status_map = task_status_map(&state);
-            let mut indices = state
-                .tasks
-                .iter()
-                .enumerate()
-                .filter(|(_, task)| {
-                    task.status == TaskStatus::Claimed
-                        && task.claimed_by_agent_id.as_deref() == Some(agent_id.as_str())
-                })
-                .map(|(idx, _)| idx)
-                .collect::<Vec<_>>();
-            sort_task_indices(&state, &mut indices);
-            let rows = indices
-                .iter()
-                .map(|idx| task_to_json_payload(&state.tasks[*idx], &status_map))
-                .collect::<Vec<_>>();
-            let payload = json!({
-                "schema_version": "fugit.task.current.v1",
-                "generated_at_utc": now_utc(),
-                "agent_id": agent_id,
-                "found": !rows.is_empty(),
-                "count": rows.len(),
-                "task": rows.first().cloned().unwrap_or(serde_json::Value::Null),
-                "tasks": rows
-            });
+            let payload = task_current_payload(&state, &agent_id);
             if json {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else if let Some(task) = payload.get("task").and_then(|row| row.as_object()) {
@@ -4732,6 +4865,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
         }
         TaskAction::Edit {
             task_id,
+            task_id_arg,
             title,
             detail,
             clear_detail,
@@ -4744,6 +4878,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             json,
         } => {
             let agent_id = normalize_agent_id(agent);
+            let task_id = resolve_required_task_id(task_id, task_id_arg, "task edit")?;
             let patch = TaskEditPatch {
                 title,
                 detail: resolve_task_text_patch(detail, clear_detail)?,
@@ -4762,10 +4897,12 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
         }
         TaskAction::Remove {
             task_id,
+            task_id_arg,
             agent,
             json,
         } => {
             let agent_id = normalize_agent_id(agent);
+            let task_id = resolve_required_task_id(task_id, task_id_arg, "task remove")?;
             let task = remove_task_from_state(&mut state, &task_id, &agent_id)?;
             write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
             append_task_timeline_event(repo_root, &task, &agent_id, "remove", None)?;
@@ -5197,323 +5334,28 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             let requested_task_id = normalize_optional_text(task_id, "task id")?;
             let filters =
                 normalize_task_query_filter(tags, focus, prefix, contains, title_contains)?;
-            let max = max.max(1);
-            if max > 1 && !no_claim {
-                bail!("task request --max > 1 requires --no-claim");
-            }
-            let now = Utc::now();
-            let respect_date_gates = !ignore_date_gates;
-            let config = load_timeline_config_or_default(repo_root)?;
-            let advisor = if requested_task_id.is_none() {
-                maybe_queue_auto_advisor_runs(repo_root, &state).unwrap_or_else(|err| {
-                    json!({
-                        "enabled": true,
-                        "triggered": false,
-                        "status": "error",
-                        "error": err.to_string()
-                    })
-                })
-            } else {
-                json!({
-                    "enabled": true,
-                    "triggered": false,
-                    "status": "task_id_request_bypassed"
-                })
-            };
-            let requested_task_index = requested_task_id
-                .as_deref()
-                .and_then(|task_id| state.tasks.iter().position(|task| task.task_id == task_id));
-            let mut candidates = if let Some(task_id) = requested_task_id.as_deref() {
-                select_specific_task_candidate(
-                    &state,
-                    task_id,
-                    &agent_id,
-                    !no_steal,
-                    respect_date_gates,
-                    steal_after_minutes,
-                    now,
-                )
-                .into_iter()
-                .collect::<Vec<_>>()
-            } else {
-                select_task_candidates_for_agent(
-                    &state,
-                    &agent_id,
-                    &filters,
-                    !no_steal,
-                    !skip_owned,
-                    respect_date_gates,
-                    steal_after_minutes,
-                    now,
+            let payload = execute_task_request(
+                repo_root,
+                &mut state,
+                state_changed,
+                &TaskRequestExecutionOptions {
+                    agent_id,
+                    requested_task_id,
+                    filters,
                     max,
-                )
-            };
-            let mut auto_replenish = AutoReplenishEnsureResult::default();
-            let should_seed_auto_replenish = requested_task_id.is_none()
-                && candidates.is_empty()
-                && config.auto_replenish_enabled
-                && !agent_has_available_standard_work(
-                    &state,
-                    &agent_id,
-                    !no_steal,
-                    respect_date_gates,
-                    steal_after_minutes,
-                    now,
-                );
-            if should_seed_auto_replenish {
-                auto_replenish = ensure_auto_replenish_tasks(&mut state, &config, &agent_id);
-                candidates = select_auto_replenish_candidates_for_agent(
-                    &state,
-                    &agent_id,
-                    !no_steal,
-                    !skip_owned,
-                    respect_date_gates,
-                    steal_after_minutes,
-                    now,
-                    max,
-                );
-            }
-
-            let mut timeline_events =
-                Vec::<(String, String, String, Option<TaskDispatchKind>)>::new();
-            for task_id in &auto_replenish.created_task_ids {
-                timeline_events.push((
-                    task_id.clone(),
-                    SYSTEM_AGENT_ID.to_string(),
-                    "add".to_string(),
-                    None,
-                ));
-            }
-            for task_id in &auto_replenish.updated_task_ids {
-                timeline_events.push((
-                    task_id.clone(),
-                    SYSTEM_AGENT_ID.to_string(),
-                    "edit".to_string(),
-                    None,
-                ));
-            }
-
-            let Some((task_index, dispatch_kind)) = candidates.first().copied() else {
-                let request_reason_value = if requested_task_id.is_some() {
-                    Some(match requested_task_index {
-                        None => "task_not_found".to_string(),
-                        Some(task_index) => specific_task_unavailable_reason(
-                            &state,
-                            task_index,
-                            &agent_id,
-                            !no_steal,
-                            respect_date_gates,
-                            steal_after_minutes,
-                            now,
-                        ),
-                    })
-                } else {
-                    None
-                };
-                let date_gate_filtered = respect_date_gates
-                    && requested_task_id.is_none()
-                    && task_request_has_date_gated_match(
-                        &state,
-                        &agent_id,
-                        &filters,
-                        !no_steal,
-                        !skip_owned,
-                        steal_after_minutes,
-                        now,
-                    );
-                let selection_reason = task_request_failure_reason(
-                    requested_task_id.as_deref(),
-                    request_reason_value.as_deref(),
-                    !auto_replenish.pending_confirmation_task_ids.is_empty(),
-                    date_gate_filtered,
-                );
-                if state_changed
-                    || !auto_replenish.created_task_ids.is_empty()
-                    || !auto_replenish.updated_task_ids.is_empty()
-                {
-                    state.updated_at_utc = now_utc();
-                    write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
-                    for (task_id, event_agent_id, action, dispatch) in timeline_events {
-                        if let Some(task) = state.tasks.iter().find(|task| task.task_id == task_id)
-                        {
-                            append_task_timeline_event(
-                                repo_root,
-                                task,
-                                &event_agent_id,
-                                &action,
-                                dispatch,
-                            )?;
-                        }
-                    }
-                }
-                let payload = json!({
-                    "schema_version": "fugit.task.request.v1",
-                    "generated_at_utc": now_utc(),
-                    "agent_id": agent_id,
-                    "assigned": false,
-                    "assigned_count": 0,
-                    "claimed": false,
-                    "max": max,
-                    "requested_task_id": requested_task_id,
-                    "skip_owned": skip_owned,
-                    "selection_reason": selection_reason,
-                    "request_reason": request_reason_value,
-                    "filters": {
-                        "tags": filters.required_tags,
-                        "focus": filters.focus,
-                        "prefix": filters.prefix,
-                        "contains": filters.contains,
-                        "title_contains": filters.title_contains
-                    },
-                    "respect_date_gates": respect_date_gates,
-                    "auto_replenish": {
-                        "enabled": config.auto_replenish_enabled,
-                        "triggered": should_seed_auto_replenish,
-                        "confirmation_required": config.auto_replenish_require_confirmation,
-                        "agent_ids": auto_replenish.agent_ids,
-                        "created_task_ids": auto_replenish.created_task_ids,
-                        "updated_task_ids": auto_replenish.updated_task_ids,
-                        "pending_confirmation_task_ids": auto_replenish.pending_confirmation_task_ids
-                    },
-                    "advisor": advisor,
-                    "tasks": [],
-                    "task": requested_task_index.map(|task_index| {
-                        task_to_json_payload(&state.tasks[task_index], &task_status_map(&state))
-                    })
-                });
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&payload)?);
-                } else {
-                    if let Some(requested_task_id) = payload["requested_task_id"].as_str() {
-                        println!(
-                            "[fugit-task] requested task is not dispatchable task_id={} reason={}",
-                            requested_task_id,
-                            payload["request_reason"].as_str().unwrap_or("unavailable")
-                        );
-                    } else if payload["auto_replenish"]["triggered"]
-                        .as_bool()
-                        .unwrap_or(false)
-                        && payload["auto_replenish"]["pending_confirmation_task_ids"]
-                            .as_array()
-                            .map(|rows| !rows.is_empty())
-                            .unwrap_or(false)
-                    {
-                        println!(
-                            "[fugit-task] auto-replenish is waiting for confirmation for agent={}",
-                            payload["agent_id"]
-                        );
-                    } else {
-                        println!(
-                            "[fugit-task] no ready tasks available for agent={}",
-                            payload["agent_id"]
-                        );
-                    }
-                }
-                return Ok(());
-            };
-
-            let mut claimed = false;
-            if !no_claim {
-                apply_task_claim(
-                    &mut state.tasks[task_index],
-                    &agent_id,
                     claim_ttl_minutes,
-                    Utc::now(),
-                );
-                state.updated_at_utc = now_utc();
-                write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
-                claimed = true;
-                timeline_events.push((
-                    state.tasks[task_index].task_id.clone(),
-                    agent_id.clone(),
-                    "claim".to_string(),
-                    Some(dispatch_kind),
-                ));
-            }
-            if state_changed
-                || !auto_replenish.created_task_ids.is_empty()
-                || !auto_replenish.updated_task_ids.is_empty()
-                || claimed
-            {
-                state.updated_at_utc = now_utc();
-                write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
-                for (task_id, event_agent_id, action, dispatch) in timeline_events {
-                    if let Some(task) = state.tasks.iter().find(|task| task.task_id == task_id) {
-                        append_task_timeline_event(
-                            repo_root,
-                            task,
-                            &event_agent_id,
-                            &action,
-                            dispatch,
-                        )?;
-                    }
-                }
-            }
-            let task = state.tasks[task_index].clone();
-            let status_map = task_status_map(&state);
-            let task_rows = candidates
-                .iter()
-                .map(|(idx, dispatch)| {
-                    json!({
-                        "dispatch_kind": dispatch.as_str(),
-                        "task": task_to_json_payload(&state.tasks[*idx], &status_map)
-                    })
-                })
-                .collect::<Vec<_>>();
-            let payload = json!({
-                "schema_version": "fugit.task.request.v1",
-                "generated_at_utc": now_utc(),
-                "agent_id": agent_id,
-                "assigned": true,
-                "assigned_count": task_rows.len(),
-                "claimed": claimed,
-                "max": max,
-                "requested_task_id": requested_task_id,
-                "skip_owned": skip_owned,
-                "dispatch_kind": dispatch_kind.as_str(),
-                "selection_reason": task_request_selection_reason(
-                    &task,
-                    dispatch_kind,
-                    requested_task_id.as_deref(),
-                ),
-                "filters": {
-                    "tags": filters.required_tags,
-                    "focus": filters.focus,
-                    "prefix": filters.prefix,
-                    "contains": filters.contains,
-                    "title_contains": filters.title_contains
+                    steal_after_minutes,
+                    allow_steal: !no_steal,
+                    skip_owned,
+                    respect_date_gates: !ignore_date_gates,
+                    no_claim,
                 },
-                "respect_date_gates": respect_date_gates,
-                "auto_replenish": {
-                    "enabled": config.auto_replenish_enabled,
-                    "triggered": should_seed_auto_replenish,
-                    "confirmation_required": config.auto_replenish_require_confirmation,
-                    "agent_ids": auto_replenish.agent_ids,
-                    "created_task_ids": auto_replenish.created_task_ids,
-                    "updated_task_ids": auto_replenish.updated_task_ids,
-                    "pending_confirmation_task_ids": auto_replenish.pending_confirmation_task_ids
-                },
-                "advisor": advisor,
-                "tasks": task_rows,
-                "task": task_to_json_payload(&task, &status_map)
-            });
-            if json {
-                println!("{}", serde_json::to_string_pretty(&payload)?);
-            } else {
-                let task_id = payload["task"]["task_id"].as_str().unwrap_or("unknown");
-                let title = payload["task"]["title"].as_str().unwrap_or("untitled");
-                println!(
-                    "[fugit-task] dispatch={} claimed={} max={} task_id={} title={}",
-                    dispatch_kind.as_str(),
-                    claimed,
-                    max,
-                    task_id,
-                    title
-                );
-            }
+            )?;
+            print_task_request_payload(&payload, json)?;
         }
         TaskAction::Claim {
             task_id,
+            task_id_arg,
             agent,
             claim_ttl_minutes,
             steal,
@@ -5522,6 +5364,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
         } => {
             let agent_id = agent.unwrap_or_else(default_agent_id);
             let now = Utc::now();
+            let task_id = resolve_required_task_id(task_id, task_id_arg, "task claim")?;
             let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id)
             else {
                 bail!("task not found: {}", task_id);
@@ -5593,6 +5436,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
         }
         TaskAction::Done {
             task_id,
+            task_id_arg,
             agent,
             summary,
             notes,
@@ -5606,6 +5450,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             json,
         } => {
             let agent_id = agent.unwrap_or_else(default_agent_id);
+            let task_id = resolve_required_task_id(task_id, task_id_arg, "task done")?;
             let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id)
             else {
                 bail!("task not found: {}", task_id);
@@ -5823,11 +5668,13 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
         }
         TaskAction::Progress {
             task_id,
+            task_id_arg,
             note,
             agent,
             json,
         } => {
             let agent_id = normalize_agent_id(agent);
+            let task_id = resolve_required_task_id(task_id, task_id_arg, "task progress")?;
             let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id)
             else {
                 bail!("task not found: {}", task_id);
@@ -5865,11 +5712,13 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
         }
         TaskAction::Note {
             task_id,
+            task_id_arg,
             artifacts,
             agent,
             json,
         } => {
             let agent_id = normalize_agent_id(agent);
+            let task_id = resolve_required_task_id(task_id, task_id_arg, "task note")?;
             let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id)
             else {
                 bail!("task not found: {}", task_id);
@@ -5907,10 +5756,12 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
         }
         TaskAction::Reopen {
             task_id,
+            task_id_arg,
             agent,
             json,
         } => {
             let agent_id = agent.unwrap_or_else(default_agent_id);
+            let task_id = resolve_required_task_id(task_id, task_id_arg, "task reopen")?;
             let task = reopen_task_in_state(&mut state, &task_id, &agent_id)?;
             write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
             append_task_timeline_event(repo_root, &task, &agent_id, "reopen", None)?;
@@ -5922,10 +5773,12 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
         }
         TaskAction::Release {
             task_id,
+            task_id_arg,
             agent,
             json,
         } => {
             let agent_id = agent.unwrap_or_else(default_agent_id);
+            let task_id = resolve_required_task_id(task_id, task_id_arg, "task release")?;
             let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id)
             else {
                 bail!("task not found: {}", task_id);
@@ -9522,6 +9375,26 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
+            "name": "fugit_task_start",
+            "description": "Resume the agent's current claim if it exists, otherwise claim the next best task in one step.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent": { "type": "string" },
+                    "task_id": { "type": "string" },
+                    "tags": { "type": "array", "items": { "type": "string" } },
+                    "focus": { "type": "string" },
+                    "prefix": { "type": "string" },
+                    "contains": { "type": "string" },
+                    "title_contains": { "type": "string" },
+                    "claim_ttl_minutes": { "type": "integer" },
+                    "steal_after_minutes": { "type": "integer" },
+                    "no_steal": { "type": "boolean" },
+                    "ignore_date_gates": { "type": "boolean" }
+                }
+            }
+        }),
+        json!({
             "name": "fugit_task_claim",
             "description": "Claim a specific task by id.",
             "inputSchema": {
@@ -10517,6 +10390,77 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
                 cli_args.push("--agent".to_string());
                 cli_args.push(agent.to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_task_start" => {
+            let mut cli_args = vec![
+                "task".to_string(),
+                "start".to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            if let Some(task_id) = args.get("task_id").and_then(serde_json::Value::as_str) {
+                cli_args.push("--task-id".to_string());
+                cli_args.push(task_id.to_string());
+            }
+            if let Some(tags) = args.get("tags").and_then(serde_json::Value::as_array) {
+                for tag in tags {
+                    if let Some(tag_value) = tag.as_str() {
+                        cli_args.push("--tag".to_string());
+                        cli_args.push(tag_value.to_string());
+                    }
+                }
+            }
+            if let Some(focus) = args.get("focus").and_then(serde_json::Value::as_str) {
+                cli_args.push("--focus".to_string());
+                cli_args.push(focus.to_string());
+            }
+            if let Some(prefix) = args.get("prefix").and_then(serde_json::Value::as_str) {
+                cli_args.push("--prefix".to_string());
+                cli_args.push(prefix.to_string());
+            }
+            if let Some(contains) = args.get("contains").and_then(serde_json::Value::as_str) {
+                cli_args.push("--contains".to_string());
+                cli_args.push(contains.to_string());
+            }
+            if let Some(title_contains) = args
+                .get("title_contains")
+                .and_then(serde_json::Value::as_str)
+            {
+                cli_args.push("--title-contains".to_string());
+                cli_args.push(title_contains.to_string());
+            }
+            if let Some(ttl) = args
+                .get("claim_ttl_minutes")
+                .and_then(serde_json::Value::as_i64)
+            {
+                cli_args.push("--claim-ttl-minutes".to_string());
+                cli_args.push(ttl.to_string());
+            }
+            if let Some(steal_after) = args
+                .get("steal_after_minutes")
+                .and_then(serde_json::Value::as_i64)
+            {
+                cli_args.push("--steal-after-minutes".to_string());
+                cli_args.push(steal_after.to_string());
+            }
+            if args
+                .get("no_steal")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--no-steal".to_string());
+            }
+            if args
+                .get("ignore_date_gates")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--ignore-date-gates".to_string());
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
@@ -14956,6 +14900,29 @@ fn normalize_optional_text(value: Option<String>, field_name: &str) -> Result<Op
     }
 }
 
+fn resolve_required_task_id(
+    named: Option<String>,
+    positional: Option<String>,
+    action_name: &str,
+) -> Result<String> {
+    let named = normalize_optional_text(named, "task id")?;
+    let positional = normalize_optional_text(positional, "task id")?;
+    match (named, positional) {
+        (Some(left), Some(right)) if left != right => bail!(
+            "{} received conflicting task ids: {} vs {}",
+            action_name,
+            left,
+            right
+        ),
+        (Some(task_id), Some(_)) | (Some(task_id), None) => Ok(task_id),
+        (None, Some(task_id)) => Ok(task_id),
+        (None, None) => bail!(
+            "{} requires --task-id <task_id> or a positional TASK_ID",
+            action_name
+        ),
+    }
+}
+
 fn normalize_required_text(value: String, field_name: &str) -> Result<String> {
     normalize_optional_text(Some(value), field_name)?
         .ok_or_else(|| anyhow!("{} cannot be empty", field_name))
@@ -16294,6 +16261,364 @@ fn task_status_summary_payload(
         },
         "next_task": next_task
     })
+}
+
+fn task_current_payload(state: &TaskState, agent_id: &str) -> serde_json::Value {
+    let status_map = task_status_map(state);
+    let mut indices = state
+        .tasks
+        .iter()
+        .enumerate()
+        .filter(|(_, task)| {
+            task.status == TaskStatus::Claimed
+                && task.claimed_by_agent_id.as_deref() == Some(agent_id)
+        })
+        .map(|(idx, _)| idx)
+        .collect::<Vec<_>>();
+    sort_task_indices(state, &mut indices);
+    let rows = indices
+        .iter()
+        .map(|idx| task_to_json_payload(&state.tasks[*idx], &status_map))
+        .collect::<Vec<_>>();
+    json!({
+        "schema_version": "fugit.task.current.v1",
+        "generated_at_utc": now_utc(),
+        "agent_id": agent_id,
+        "found": !rows.is_empty(),
+        "count": rows.len(),
+        "task": rows.first().cloned().unwrap_or(serde_json::Value::Null),
+        "tasks": rows
+    })
+}
+
+fn execute_task_request(
+    repo_root: &Path,
+    state: &mut TaskState,
+    state_changed: bool,
+    options: &TaskRequestExecutionOptions,
+) -> Result<serde_json::Value> {
+    let max = options.max.max(1);
+    if max > 1 && !options.no_claim {
+        bail!("task request --max > 1 requires --no-claim");
+    }
+
+    let now = Utc::now();
+    let config = load_timeline_config_or_default(repo_root)?;
+    let advisor = if options.requested_task_id.is_none() {
+        maybe_queue_auto_advisor_runs(repo_root, state).unwrap_or_else(|err| {
+            json!({
+                "enabled": true,
+                "triggered": false,
+                "status": "error",
+                "error": err.to_string()
+            })
+        })
+    } else {
+        json!({
+            "enabled": true,
+            "triggered": false,
+            "status": "task_id_request_bypassed"
+        })
+    };
+    let requested_task_index = options
+        .requested_task_id
+        .as_deref()
+        .and_then(|task_id| state.tasks.iter().position(|task| task.task_id == task_id));
+    let mut candidates = if let Some(task_id) = options.requested_task_id.as_deref() {
+        select_specific_task_candidate(
+            state,
+            task_id,
+            &options.agent_id,
+            options.allow_steal,
+            options.respect_date_gates,
+            options.steal_after_minutes,
+            now,
+        )
+        .into_iter()
+        .collect::<Vec<_>>()
+    } else {
+        select_task_candidates_for_agent(
+            state,
+            &options.agent_id,
+            &options.filters,
+            options.allow_steal,
+            !options.skip_owned,
+            options.respect_date_gates,
+            options.steal_after_minutes,
+            now,
+            max,
+        )
+    };
+    let mut auto_replenish = AutoReplenishEnsureResult::default();
+    let should_seed_auto_replenish = options.requested_task_id.is_none()
+        && candidates.is_empty()
+        && config.auto_replenish_enabled
+        && !agent_has_available_standard_work(
+            state,
+            &options.agent_id,
+            options.allow_steal,
+            options.respect_date_gates,
+            options.steal_after_minutes,
+            now,
+        );
+    if should_seed_auto_replenish {
+        auto_replenish = ensure_auto_replenish_tasks(state, &config, &options.agent_id);
+        candidates = select_auto_replenish_candidates_for_agent(
+            state,
+            &options.agent_id,
+            options.allow_steal,
+            !options.skip_owned,
+            options.respect_date_gates,
+            options.steal_after_minutes,
+            now,
+            max,
+        );
+    }
+
+    let mut timeline_events = Vec::<(String, String, String, Option<TaskDispatchKind>)>::new();
+    for task_id in &auto_replenish.created_task_ids {
+        timeline_events.push((
+            task_id.clone(),
+            SYSTEM_AGENT_ID.to_string(),
+            "add".to_string(),
+            None,
+        ));
+    }
+    for task_id in &auto_replenish.updated_task_ids {
+        timeline_events.push((
+            task_id.clone(),
+            SYSTEM_AGENT_ID.to_string(),
+            "edit".to_string(),
+            None,
+        ));
+    }
+
+    let Some((task_index, dispatch_kind)) = candidates.first().copied() else {
+        let request_reason_value = if options.requested_task_id.is_some() {
+            Some(match requested_task_index {
+                None => "task_not_found".to_string(),
+                Some(task_index) => specific_task_unavailable_reason(
+                    state,
+                    task_index,
+                    &options.agent_id,
+                    options.allow_steal,
+                    options.respect_date_gates,
+                    options.steal_after_minutes,
+                    now,
+                ),
+            })
+        } else {
+            None
+        };
+        let date_gate_filtered = options.respect_date_gates
+            && options.requested_task_id.is_none()
+            && task_request_has_date_gated_match(
+                state,
+                &options.agent_id,
+                &options.filters,
+                options.allow_steal,
+                !options.skip_owned,
+                options.steal_after_minutes,
+                now,
+            );
+        let selection_reason = task_request_failure_reason(
+            options.requested_task_id.as_deref(),
+            request_reason_value.as_deref(),
+            !auto_replenish.pending_confirmation_task_ids.is_empty(),
+            date_gate_filtered,
+        );
+        if state_changed
+            || !auto_replenish.created_task_ids.is_empty()
+            || !auto_replenish.updated_task_ids.is_empty()
+        {
+            state.updated_at_utc = now_utc();
+            write_pretty_json(&timeline_tasks_path(repo_root), state)?;
+            for (task_id, event_agent_id, action, dispatch) in timeline_events {
+                if let Some(task) = state.tasks.iter().find(|task| task.task_id == task_id) {
+                    append_task_timeline_event(
+                        repo_root,
+                        task,
+                        &event_agent_id,
+                        &action,
+                        dispatch,
+                    )?;
+                }
+            }
+        }
+        return Ok(json!({
+            "schema_version": "fugit.task.request.v1",
+            "generated_at_utc": now_utc(),
+            "agent_id": options.agent_id.clone(),
+            "assigned": false,
+            "assigned_count": 0,
+            "claimed": false,
+            "max": max,
+            "requested_task_id": options.requested_task_id.clone(),
+            "skip_owned": options.skip_owned,
+            "selection_reason": selection_reason,
+            "request_reason": request_reason_value,
+            "filters": {
+                "tags": options.filters.required_tags.clone(),
+                "focus": options.filters.focus.clone(),
+                "prefix": options.filters.prefix.clone(),
+                "contains": options.filters.contains.clone(),
+                "title_contains": options.filters.title_contains.clone()
+            },
+            "respect_date_gates": options.respect_date_gates,
+            "auto_replenish": {
+                "enabled": config.auto_replenish_enabled,
+                "triggered": should_seed_auto_replenish,
+                "confirmation_required": config.auto_replenish_require_confirmation,
+                "agent_ids": auto_replenish.agent_ids,
+                "created_task_ids": auto_replenish.created_task_ids,
+                "updated_task_ids": auto_replenish.updated_task_ids,
+                "pending_confirmation_task_ids": auto_replenish.pending_confirmation_task_ids
+            },
+            "advisor": advisor,
+            "tasks": [],
+            "task": requested_task_index.map(|task_index| {
+                task_to_json_payload(&state.tasks[task_index], &task_status_map(state))
+            })
+        }));
+    };
+
+    let mut claimed = false;
+    if !options.no_claim {
+        apply_task_claim(
+            &mut state.tasks[task_index],
+            &options.agent_id,
+            options.claim_ttl_minutes,
+            now,
+        );
+        claimed = true;
+        timeline_events.push((
+            state.tasks[task_index].task_id.clone(),
+            options.agent_id.clone(),
+            "claim".to_string(),
+            Some(dispatch_kind),
+        ));
+    }
+    if state_changed
+        || !auto_replenish.created_task_ids.is_empty()
+        || !auto_replenish.updated_task_ids.is_empty()
+        || claimed
+    {
+        state.updated_at_utc = now_utc();
+        write_pretty_json(&timeline_tasks_path(repo_root), state)?;
+        for (task_id, event_agent_id, action, dispatch) in timeline_events {
+            if let Some(task) = state.tasks.iter().find(|task| task.task_id == task_id) {
+                append_task_timeline_event(repo_root, task, &event_agent_id, &action, dispatch)?;
+            }
+        }
+    }
+    let task = state.tasks[task_index].clone();
+    let status_map = task_status_map(state);
+    let task_rows = candidates
+        .iter()
+        .map(|(idx, dispatch)| {
+            json!({
+                "dispatch_kind": dispatch.as_str(),
+                "task": task_to_json_payload(&state.tasks[*idx], &status_map)
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "schema_version": "fugit.task.request.v1",
+        "generated_at_utc": now_utc(),
+        "agent_id": options.agent_id.clone(),
+        "assigned": true,
+        "assigned_count": task_rows.len(),
+        "claimed": claimed,
+        "max": max,
+        "requested_task_id": options.requested_task_id.clone(),
+        "skip_owned": options.skip_owned,
+        "dispatch_kind": dispatch_kind.as_str(),
+        "selection_reason": task_request_selection_reason(
+            &task,
+            dispatch_kind,
+            options.requested_task_id.as_deref(),
+        ),
+        "filters": {
+            "tags": options.filters.required_tags.clone(),
+            "focus": options.filters.focus.clone(),
+            "prefix": options.filters.prefix.clone(),
+            "contains": options.filters.contains.clone(),
+            "title_contains": options.filters.title_contains.clone()
+        },
+        "respect_date_gates": options.respect_date_gates,
+        "auto_replenish": {
+            "enabled": config.auto_replenish_enabled,
+            "triggered": should_seed_auto_replenish,
+            "confirmation_required": config.auto_replenish_require_confirmation,
+            "agent_ids": auto_replenish.agent_ids,
+            "created_task_ids": auto_replenish.created_task_ids,
+            "updated_task_ids": auto_replenish.updated_task_ids,
+            "pending_confirmation_task_ids": auto_replenish.pending_confirmation_task_ids
+        },
+        "advisor": advisor,
+        "tasks": task_rows,
+        "task": task_to_json_payload(&task, &status_map)
+    }))
+}
+
+fn print_task_request_payload(payload: &serde_json::Value, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(payload)?);
+        return Ok(());
+    }
+
+    let start_prefix = payload
+        .get("start_mode")
+        .and_then(serde_json::Value::as_str)
+        .map(|mode| format!("start={} ", mode))
+        .unwrap_or_default();
+    if payload
+        .get("assigned")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        let task_id = payload["task"]["task_id"].as_str().unwrap_or("unknown");
+        let title = payload["task"]["title"].as_str().unwrap_or("untitled");
+        println!(
+            "[fugit-task] {}dispatch={} claimed={} max={} task_id={} title={}",
+            start_prefix,
+            payload["dispatch_kind"].as_str().unwrap_or("unknown"),
+            payload["claimed"].as_bool().unwrap_or(false),
+            payload["max"].as_u64().unwrap_or(1),
+            task_id,
+            title
+        );
+        return Ok(());
+    }
+
+    if let Some(requested_task_id) = payload["requested_task_id"].as_str() {
+        println!(
+            "[fugit-task] {}requested task is not dispatchable task_id={} reason={}",
+            start_prefix,
+            requested_task_id,
+            payload["request_reason"].as_str().unwrap_or("unavailable")
+        );
+    } else if payload["auto_replenish"]["triggered"]
+        .as_bool()
+        .unwrap_or(false)
+        && payload["auto_replenish"]["pending_confirmation_task_ids"]
+            .as_array()
+            .map(|rows| !rows.is_empty())
+            .unwrap_or(false)
+    {
+        println!(
+            "[fugit-task] {}auto-replenish is waiting for confirmation for agent={}",
+            start_prefix,
+            payload["agent_id"].as_str().unwrap_or("unknown")
+        );
+    } else {
+        println!(
+            "[fugit-task] {}no ready tasks available for agent={}",
+            start_prefix,
+            payload["agent_id"].as_str().unwrap_or("unknown")
+        );
+    }
+    Ok(())
 }
 
 fn add_task_progress_entry(
@@ -18528,6 +18853,47 @@ mod tests {
             approved_at_utc: None,
             approved_by_agent_id: None,
         }
+    }
+
+    #[test]
+    fn resolve_required_task_id_accepts_named_or_positional() {
+        assert_eq!(
+            resolve_required_task_id(Some("task_named".to_string()), None, "task claim")
+                .expect("named task id"),
+            "task_named"
+        );
+        assert_eq!(
+            resolve_required_task_id(None, Some("task_positional".to_string()), "task claim")
+                .expect("positional task id"),
+            "task_positional"
+        );
+        let err = resolve_required_task_id(
+            Some("task_a".to_string()),
+            Some("task_b".to_string()),
+            "task claim",
+        )
+        .expect_err("conflicting task ids should fail");
+        assert!(err.to_string().contains("conflicting task ids"));
+    }
+
+    #[test]
+    fn task_current_payload_returns_owned_claim_summary() {
+        let mut claimed = sample_task("task_claimed", "claimed task", 10, TaskStatus::Claimed);
+        claimed.claimed_by_agent_id = Some("agent.runner".to_string());
+        claimed.claim_started_at_utc = Some(now_utc());
+        claimed.claim_expires_at_utc = Some(now_utc());
+        let state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![claimed],
+        };
+        let payload = task_current_payload(&state, "agent.runner");
+        assert_eq!(payload["found"], serde_json::Value::Bool(true));
+        assert_eq!(payload["count"], serde_json::Value::from(1_u64));
+        assert_eq!(
+            payload["task"]["task_id"],
+            serde_json::Value::from("task_claimed")
+        );
     }
 
     #[test]

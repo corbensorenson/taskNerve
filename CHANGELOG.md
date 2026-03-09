@@ -18,6 +18,7 @@
 - Added plan reconciliation with `task sync --plan ...` and manual reopening via `task reopen`.
 - Added `task current`, `in_progress` as a status alias for `claimed`, and `bridge sync-github --repair-journal` for lossy recovery from malformed event journal lines.
 - Added `task request --skip-owned` so agents can pull the next ready task without re-dispatching their current claim.
+- Added `task start` as the fast agent entrypoint: it resumes the current claim or claims the next task in one step, while `--repo-root` now works before or after subcommands and common task commands accept positional `TASK_ID` arguments.
 - Added `task status`, `task progress`, `task list --mine`, date-gated task filtering with `task request --ignore-date-gates`, and `task done --claim-next` for tighter agent execution loops.
 - Added `task claim --extend-only`, `task note --artifact ...`, and machine-readable `selection_reason` on `task request --json` for cleaner long-running agent loops and handoff breadcrumbs.
 - Added `status --summary-only` / `--no-changes`, and included consistent claim lease metadata on task claim/request/show/list JSON payloads.
