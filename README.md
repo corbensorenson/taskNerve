@@ -80,12 +80,13 @@ Unix installer behavior:
 ### 3. Verify
 
 ```bash
+fugit --version
 fugit --help
 fugit task --help
 fugit skill doctor
 ```
 
-`fugit task --help` should include `import`. If not, reinstall using the installer for this repo.
+`fugit task --help` should include `sync` and `reopen`. If not, reinstall using the installer for this repo and run `hash -r` or open a new shell if the old binary is still cached.
 
 ### 4. Agent Skill Setup
 
@@ -127,6 +128,7 @@ After migration, use fugit for daily coordination (`task`, `checkpoint`, `log`),
 
 ```bash
 fugit --repo-root . task import --file /path/to/tasks.tsv
+fugit --repo-root . task sync --plan /path/to/the_final_plan.md
 fugit --repo-root . task request --agent agent.worker --focus compiler
 fugit --repo-root . checkpoint --summary "implemented feature X" --agent agent.worker --tag feature
 fugit --repo-root . task done --task-id <task_id> --agent agent.worker --summary "validated feature X" --command "cargo test"
@@ -139,7 +141,7 @@ When you are only adding one task, use:
 fugit --repo-root . task add --title "Implement feature X" --priority 10 --tag feature
 ```
 
-Task lifecycle operations (`add`, `edit`, `claim`, `done`, `release`, `remove`) are mirrored into timeline events.
+Task lifecycle operations (`add`, `edit`, `claim`, `done`, `reopen`, `release`, `remove`) are mirrored into timeline events.
 
 ## Bulk Task Import
 
@@ -153,6 +155,12 @@ Direct import from markdown checklist plans:
 
 ```bash
 fugit --repo-root . task import --file /path/to/the_final_plan.md --format markdown
+```
+
+Reconcile a living plan file with the queue:
+
+```bash
+fugit --repo-root . task sync --plan /path/to/the_final_plan.md --json
 ```
 
 TSV format (tab-separated):
@@ -191,10 +199,14 @@ Task maintenance from CLI:
 
 ```bash
 fugit --repo-root . task show --task-id <task_id>
+fugit --repo-root . task current --agent <agent_id> --json
 fugit --repo-root . task list --jsonl --fields task_id,title,status
+fugit --repo-root . task list --status in_progress --json
 fugit --repo-root . task edit --task-id <task_id> --title "Updated title" --tag compiler
 fugit --repo-root . task remove --task-id <task_id>
+fugit --repo-root . task sync --plan the_final_plan.md --json
 fugit --repo-root . task request --agent agent.worker --no-claim --max 3 --json
+fugit --repo-root . task reopen --task-id <task_id>
 ```
 
 Recoverability repair:
@@ -203,6 +215,8 @@ Recoverability repair:
 fugit --repo-root . doctor --fix
 fugit --repo-root . checkpoint --summary "..." --repair auto
 fugit --repo-root . checkpoint --summary "..." --repair lossy
+fugit --repo-root . checkpoint --summary "..." --json
+fugit --repo-root . bridge sync-github --no-push --repair-journal
 ```
 
 ## Core Commands
@@ -214,7 +228,7 @@ fugit --repo-root . checkpoint --summary "..." --repair lossy
 - `fugit checkout --event <event_id> --force`
 - `fugit branch list|create|switch`
 - `fugit lock add|list|remove`
-- `fugit task add|show|edit|remove|import|list|request|claim|done|release|gui`
+- `fugit task add|show|current|edit|remove|sync|import|list|request|claim|done|reopen|release|gui`
 - `fugit project add|list|use|remove`
 - `fugit backend show|set`
 - `fugit bridge summary|auth|sync-github|pull-github`
@@ -226,7 +240,7 @@ fugit --repo-root . checkpoint --summary "..." --repair lossy
 Key tools include:
 - `fugit_status`, `fugit_checkpoint`, `fugit_log`, `fugit_checkout`
 - `fugit_lock_add`, `fugit_lock_list`
-- `fugit_task_show`, `fugit_task_add`, `fugit_task_edit`, `fugit_task_remove`, `fugit_task_list`, `fugit_task_request`, `fugit_task_claim`, `fugit_task_done`, `fugit_task_release`, `fugit_task_gui_launch`
+- `fugit_task_show`, `fugit_task_current`, `fugit_task_add`, `fugit_task_edit`, `fugit_task_remove`, `fugit_task_sync`, `fugit_task_list`, `fugit_task_request`, `fugit_task_claim`, `fugit_task_done`, `fugit_task_reopen`, `fugit_task_release`, `fugit_task_gui_launch`
 - `fugit_task_import` (supports file/tsv/markdown payload import)
 - `fugit_project_list`, `fugit_project_add`, `fugit_project_use`, `fugit_project_remove`
 - `fugit_gc`

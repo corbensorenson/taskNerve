@@ -177,4 +177,14 @@ fi
 
 echo
 "$INSTALL_DIR/$BIN_NAME" --help >/dev/null
+INSTALLED_VERSION="$("$INSTALL_DIR/$BIN_NAME" --version 2>/dev/null || true)"
+if [[ -n "$INSTALLED_VERSION" ]]; then
+  echo "[installer] installed version: $INSTALLED_VERSION"
+fi
+RESOLVED_BIN="$(command -v "$BIN_NAME" || true)"
+if [[ -n "$RESOLVED_BIN" && "$RESOLVED_BIN" != "$INSTALL_DIR/$BIN_NAME" ]]; then
+  echo "[installer] warning: PATH currently resolves $BIN_NAME to: $RESOLVED_BIN"
+  echo "[installer] expected active binary: $INSTALL_DIR/$BIN_NAME"
+  echo "[installer] open a new shell or run: hash -r"
+fi
 echo "[installer] done"

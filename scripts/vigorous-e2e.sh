@@ -140,6 +140,10 @@ PY
 json_assert "$TMP_ROOT/task-request-preview.json" 'payload.get("assigned_count", 0) >= 1 and isinstance(payload.get("tasks"), list)' "task request preview should return a prioritized slice"
 "$BIN" --repo-root "$REPO_A" task request --agent agent.runner --focus root --json >"$TMP_ROOT/task-request-1.json"
 json_assert "$TMP_ROOT/task-request-1.json" 'payload.get("assigned") is True and payload.get("task",{}).get("task_id") is not None' "task request should assign a task"
+"$BIN" --repo-root "$REPO_A" task current --agent agent.runner --json >"$TMP_ROOT/task-current.json"
+json_assert "$TMP_ROOT/task-current.json" 'payload.get("found") is True and payload.get("task",{}).get("task_id") == "'"$TASK_A"'"' "task current should return the active claim for the agent"
+"$BIN" --repo-root "$REPO_A" task list --status in_progress --json >"$TMP_ROOT/task-in-progress.json"
+json_assert "$TMP_ROOT/task-in-progress.json" 'any(row.get("task_id") == "'"$TASK_A"'" for row in payload)' "task list should accept in_progress as a claimed-task alias"
 "$BIN" --repo-root "$REPO_A" task done --task-id "$TASK_A" --agent agent.runner --summary "root lane complete" --artifact "$TMP_ROOT/task-a-edit.json" --command "cargo test" >/dev/null
 "$BIN" --repo-root "$REPO_A" task request --agent agent.runner --json >"$TMP_ROOT/task-request-2.json"
 json_assert "$TMP_ROOT/task-request-2.json" 'payload.get("assigned") is True' "second task request should assign dependent task after completion"
@@ -148,6 +152,29 @@ json_assert "$TMP_ROOT/task-a-done.json" 'payload.get("completed_summary") == "r
 "$BIN" --repo-root "$REPO_A" log --limit 50 --json >"$TMP_ROOT/log-task.json"
 json_assert "$TMP_ROOT/log-task.json" 'any("task done:" in row.get("summary","") for row in payload)' "task actions should be mirrored into timeline events"
 json_assert "$TMP_ROOT/log-task.json" 'any("task edit:" in row.get("summary","") for row in payload) and any("task remove:" in row.get("summary","") for row in payload)' "edit/remove actions should be mirrored into timeline events"
+
+echo "[vigorous-e2e] task sync + reopen"
+cat >"$REPO_A/the_final_plan.md" <<'EOF'
+- [ ] `A-01` Define compiler contract
+- [ ] `A-02` Add checkpoint json payloads
+EOF
+"$BIN" --repo-root "$REPO_A" task sync --plan "$REPO_A/the_final_plan.md" --json >"$TMP_ROOT/task-sync-1.json"
+json_assert "$TMP_ROOT/task-sync-1.json" 'payload.get("schema_version") == "fugit.task.sync.v1" and len(payload.get("created", [])) == 2' "task sync should create plan-backed tasks"
+SYNC_TASK_ID="$(python3 - "$TMP_ROOT/task-sync-1.json" <<'PY'
+import json,sys
+payload=json.load(open(sys.argv[1]))
+print(payload["created"][1]["task_id"])
+PY
+)"
+"$BIN" --repo-root "$REPO_A" task done --task-id "$SYNC_TASK_ID" --agent agent.sync >/dev/null
+"$BIN" --repo-root "$REPO_A" task reopen --task-id "$SYNC_TASK_ID" --agent agent.sync --json >"$TMP_ROOT/task-reopen.json"
+json_assert "$TMP_ROOT/task-reopen.json" 'payload.get("status") == "open" and payload.get("completed_at_utc") is None' "task reopen should clear completion metadata"
+cat >"$REPO_A/the_final_plan.md" <<'EOF'
+- [ ] `A-02` Add checkpoint json payloads
+- [ ] `A-03` Add plan sync
+EOF
+"$BIN" --repo-root "$REPO_A" task sync --plan "$REPO_A/the_final_plan.md" --json >"$TMP_ROOT/task-sync-2.json"
+json_assert "$TMP_ROOT/task-sync-2.json" 'len(payload.get("removed", [])) >= 1 and any(row.get("source_key") == "A-03" for row in payload.get("created", []))' "task sync should remove stale plan tasks and create new ones"
 
 echo "[vigorous-e2e] project registry"
 "$BIN" project add --name proj-a --repo-root "$REPO_A" --set-default --json >"$TMP_ROOT/project-add-a.json"
@@ -226,6 +253,38 @@ rm -f "$REPO_A/.fugit/objects/$INDEX_HASH"
 "$BIN" --repo-root "$REPO_A" doctor --fix --json >"$TMP_ROOT/doctor-fix.json"
 json_assert "$TMP_ROOT/doctor-fix.json" 'payload.get("repair",{}).get("requested") is True and payload.get("repair",{}).get("repaired_count", 0) >= 1 and payload.get("summary",{}).get("pass") is True' "doctor --fix should repair missing timeline objects"
 
+echo "[vigorous-e2e] checkpoint json errors"
+REPO_C="$TMP_ROOT/repo-c"
+create_git_repo "$REPO_C"
+echo "alpha" >"$REPO_C/tracked.txt"
+git -C "$REPO_C" add tracked.txt
+git -C "$REPO_C" commit -m "seed repo-c" >/dev/null
+"$BIN" --repo-root "$REPO_C" init --branch trunk >/dev/null
+echo "beta" >"$REPO_C/tracked.txt"
+"$BIN" --repo-root "$REPO_C" checkpoint --summary "beta" --json >"$TMP_ROOT/checkpoint-ok.json"
+json_assert "$TMP_ROOT/checkpoint-ok.json" 'payload.get("ok") is True and payload.get("event_id") is not None' "checkpoint --json should emit structured success payload"
+INDEX_HASH_C="$(python3 - "$REPO_C/.fugit/branches/trunk/index.json" <<'PY'
+import json, sys
+index = json.load(open(sys.argv[1]))
+print(index["tracked.txt"]["hash"])
+PY
+)"
+rm -f "$REPO_C/.fugit/objects/$INDEX_HASH_C"
+echo "gamma" >"$REPO_C/tracked.txt"
+if "$BIN" --repo-root "$REPO_C" checkpoint --summary "gamma" --json >"$TMP_ROOT/checkpoint-error.json"; then
+  echo "[vigorous-e2e] expected checkpoint --json failure when old object blob is missing" >&2
+  exit 1
+fi
+json_assert "$TMP_ROOT/checkpoint-error.json" 'payload.get("ok") is False and payload.get("error", {}).get("code") == "missing_old_objects" and len(payload.get("error", {}).get("missing_blobs", [])) >= 1' "checkpoint --json should emit structured failure payload"
+printf '{"broken":\n' >>"$REPO_C/.fugit/branches/trunk/events.jsonl"
+echo "delta" >>"$REPO_C/tracked.txt"
+"$BIN" --repo-root "$REPO_C" bridge sync-github --no-push --repair-journal >/dev/null
+BACKUP_COUNT="$(find "$REPO_C/.fugit/branches/trunk" -maxdepth 1 -name 'events.jsonl.bak.*' | wc -l | tr -d ' ')"
+if [[ "${BACKUP_COUNT:-0}" -lt 1 ]]; then
+  echo "[vigorous-e2e] expected bridge sync --repair-journal to create a journal backup" >&2
+  exit 1
+fi
+
 echo "[vigorous-e2e] quickstart flow"
 REPO_Q="$TMP_ROOT/repo-quickstart"
 create_git_repo "$REPO_Q"
@@ -282,10 +341,16 @@ if not any(t.get("name") == "fugit_task_request" for t in tools):
     raise RuntimeError("missing fugit_task_request in MCP tools")
 if not any(t.get("name") == "fugit_task_show" for t in tools):
     raise RuntimeError("missing fugit_task_show in MCP tools")
+if not any(t.get("name") == "fugit_task_current" for t in tools):
+    raise RuntimeError("missing fugit_task_current in MCP tools")
 if not any(t.get("name") == "fugit_task_edit" for t in tools):
     raise RuntimeError("missing fugit_task_edit in MCP tools")
 if not any(t.get("name") == "fugit_task_remove" for t in tools):
     raise RuntimeError("missing fugit_task_remove in MCP tools")
+if not any(t.get("name") == "fugit_task_sync" for t in tools):
+    raise RuntimeError("missing fugit_task_sync in MCP tools")
+if not any(t.get("name") == "fugit_task_reopen" for t in tools):
+    raise RuntimeError("missing fugit_task_reopen in MCP tools")
 
 send({
     "jsonrpc":"2.0",
@@ -354,6 +419,50 @@ resp = recv()
 shown = resp.get("result", {}).get("structuredContent", {})
 if "result" not in resp or shown.get("task_id") != mcp_task_id:
     raise RuntimeError(f"fugit_task_show MCP call failed: {resp}")
+
+send({
+    "jsonrpc":"2.0",
+    "id":74,
+    "method":"tools/call",
+    "params":{"name":"fugit_task_current","arguments":{"agent":"agent.runner"}}}
+)
+resp = recv()
+current_payload = resp.get("result", {}).get("structuredContent", {})
+if "result" not in resp or current_payload.get("found") is not True:
+    raise RuntimeError(f"fugit_task_current MCP call failed: {resp}")
+
+send({
+    "jsonrpc":"2.0",
+    "id":71,
+    "method":"tools/call",
+    "params":{"name":"fugit_task_sync","arguments":{"markdown":"- [ ] `MCP-01` Add mcp synced task","agent":"agent.mcp"}}}
+)
+resp = recv()
+sync_payload = resp.get("result", {}).get("structuredContent", {})
+if "result" not in resp or not sync_payload.get("created"):
+    raise RuntimeError(f"fugit_task_sync MCP call failed: {resp}")
+sync_task_id = sync_payload["created"][0]["task_id"]
+
+send({
+    "jsonrpc":"2.0",
+    "id":72,
+    "method":"tools/call",
+    "params":{"name":"fugit_task_done","arguments":{"task_id":sync_task_id,"agent":"agent.mcp","summary":"done via mcp"}}}
+)
+resp = recv()
+if "result" not in resp:
+    raise RuntimeError(f"fugit_task_done MCP call failed: {resp}")
+
+send({
+    "jsonrpc":"2.0",
+    "id":73,
+    "method":"tools/call",
+    "params":{"name":"fugit_task_reopen","arguments":{"task_id":sync_task_id,"agent":"agent.mcp"}}}
+)
+resp = recv()
+reopened = resp.get("result", {}).get("structuredContent", {})
+if "result" not in resp or reopened.get("status") != "open":
+    raise RuntimeError(f"fugit_task_reopen MCP call failed: {resp}")
 
 send({
     "jsonrpc":"2.0",

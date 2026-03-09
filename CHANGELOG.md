@@ -14,6 +14,10 @@
 - Added `task show`, request focus filters, richer completion metadata on `task done`, and `--version` for faster agent-side capability detection.
 - Added compact queue inspection with `task list --jsonl --fields ...` and preview scheduling with `task request --no-claim --max N --json`.
 - Added explicit recoverability repair UX: `doctor --fix` and `checkpoint --repair auto|strict|lossy`.
+- Added structured checkpoint payloads via `checkpoint --json`, including machine-readable `missing_blobs[]` on recoverability failures.
+- Added plan reconciliation with `task sync --plan ...` and manual reopening via `task reopen`.
+- Added `task current`, `in_progress` as a status alias for `claimed`, and `bridge sync-github --repair-journal` for lossy recovery from malformed event journal lines.
+- Improved the Unix installer to print the installed version and warn when `PATH` still resolves to a different `fugit` binary.
 - Added multi-project registry (`project add|list|use|remove`) and GUI project switching to keep task streams isolated across repos.
 - Hardened release validation script to run dependency advisory checks with `cargo-audit` when available.
 - Removed project-specific identifiers from README examples to keep docs fingerprint-neutral.

@@ -35,6 +35,8 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . task import --file /path/to/tasks.tsv`
 - For markdown checklist plans, import directly:
 - `fugit --repo-root . task import --file /path/to/the_final_plan.md --format markdown`
+- For a living plan file, reconcile queue state directly:
+- `fugit --repo-root . task sync --plan /path/to/the_final_plan.md --json`
 - Edit or remove tasks when plans change:
 - `fugit --repo-root . task edit --task-id <task_id> --title "Updated X"`
 - `fugit --repo-root . task remove --task-id <task_id>`
@@ -46,18 +48,25 @@ Use this skill when any of the following are true:
 
 6. Capture progress as checkpoints:
 - `fugit --repo-root . checkpoint --summary "<what changed>" --agent <agent_id> --tag <tag>`
+- For agent-safe automation or failure handling:
+- `fugit --repo-root . checkpoint --summary "<what changed>" --json`
 
 7. Mark tasks done or release claim:
 - `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --summary "<what finished>"`
+- Reopen only when work is intentionally back on the queue:
+- `fugit --repo-root . task reopen --task-id <task_id> --agent <agent_id>`
 - `fugit --repo-root . task release --task-id <task_id> --agent <agent_id>`
-- Note: task lifecycle mutations (`add`, `edit`, `claim`, `done`, `release`, `remove`) are mirrored into timeline events automatically.
+- Note: task lifecycle mutations (`add`, `edit`, `claim`, `done`, `reopen`, `release`, `remove`) are mirrored into timeline events automatically.
 
 8. Review event history:
 - `fugit --repo-root . log --limit 20`
 - Inspect one task directly:
 - `fugit --repo-root . task show --task-id <task_id>`
+- Inspect your active claim directly:
+- `fugit --repo-root . task current --agent <agent_id> --json`
 - For compact queue scans:
 - `fugit --repo-root . task list --jsonl --fields task_id,title,status`
+- `fugit --repo-root . task list --status in_progress --json`
 - For preview scheduling without claiming:
 - `fugit --repo-root . task request --agent <agent_id> --no-claim --max 3 --json`
 
@@ -80,6 +89,8 @@ Recoverability repair:
 - `fugit --repo-root . doctor --fix`
 - `fugit --repo-root . checkpoint --summary "..." --repair auto`
 - `fugit --repo-root . checkpoint --summary "..." --repair lossy`
+- For malformed event journals during bridge export:
+- `fugit --repo-root . bridge sync-github --no-push --repair-journal`
 
 13. Optional live task board window:
 - CLI foreground: `fugit --repo-root . task gui`
@@ -175,13 +186,16 @@ Expose these tools to agents via MCP:
 - `fugit_lock_list`
 - `fugit_task_add`
 - `fugit_task_show`
+- `fugit_task_current`
 - `fugit_task_edit`
 - `fugit_task_remove`
+- `fugit_task_sync`
 - `fugit_task_import`
 - `fugit_task_list`
 - `fugit_task_request`
 - `fugit_task_claim`
 - `fugit_task_done`
+- `fugit_task_reopen`
 - `fugit_task_release`
 - `fugit_task_gui_launch`
 - `fugit_project_list`

@@ -1,11 +1,11 @@
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
-    process::{Command as ProcessCommand, Stdio},
+    process::{Command as ProcessCommand, ExitCode, Stdio},
     time::UNIX_EPOCH,
 };
 
@@ -181,6 +181,8 @@ struct CheckpointArgs {
     repair: CheckpointRepairModeArg,
     #[arg(long, hide = true, default_value_t = false)]
     allow_lossy_repair: bool,
+    #[arg(long, default_value_t = false)]
+    json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -274,6 +276,8 @@ enum BridgeAction {
         pack_threads: Option<usize>,
         #[arg(long, default_value_t = false)]
         burst_push: bool,
+        #[arg(long, default_value_t = false)]
+        repair_journal: bool,
     },
     PullGithub {
         #[arg(long)]
@@ -405,6 +409,10 @@ struct FugitTask {
     completion_artifacts: Vec<String>,
     #[serde(default)]
     completion_commands: Vec<String>,
+    #[serde(default)]
+    source_key: Option<String>,
+    #[serde(default)]
+    source_plan: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -417,6 +425,7 @@ struct TaskState {
 #[derive(Debug, Clone)]
 struct TaskImportRow {
     key: String,
+    source_key: Option<String>,
     title: String,
     detail: Option<String>,
     priority: Option<i32>,
@@ -480,6 +489,46 @@ impl MissingTimelineObject {
             _ => format!("{}:{} ({})", self.scope, self.path, self.hash),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CheckpointMissingBlob {
+    path: String,
+    hash: String,
+    change_kind: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TaskSyncBlockedTask {
+    action: String,
+    task_id: String,
+    title: String,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TaskSyncTaskRecord {
+    task_id: String,
+    title: String,
+    status: String,
+    source_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TaskSyncReport {
+    schema_version: String,
+    generated_at_utc: String,
+    plan: String,
+    format: String,
+    dry_run: bool,
+    keep_missing: bool,
+    created: Vec<TaskSyncTaskRecord>,
+    updated: Vec<TaskSyncTaskRecord>,
+    reopened: Vec<TaskSyncTaskRecord>,
+    removed: Vec<TaskSyncTaskRecord>,
+    unchanged: Vec<TaskSyncTaskRecord>,
+    matched_by_title: Vec<TaskSyncTaskRecord>,
+    blocked: Vec<TaskSyncBlockedTask>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -590,6 +639,12 @@ enum TaskAction {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    Current {
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     Add {
         #[arg(long)]
         title: String,
@@ -635,6 +690,22 @@ enum TaskAction {
         task_id: String,
         #[arg(long)]
         agent: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Sync {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        default_priority: i32,
+        #[arg(long, value_enum, default_value_t = TaskImportFormatArg::Auto)]
+        format: TaskImportFormatArg,
+        #[arg(long, default_value_t = false)]
+        keep_missing: bool,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -704,6 +775,14 @@ enum TaskAction {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    Reopen {
+        #[arg(long)]
+        task_id: String,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     Release {
         #[arg(long)]
         task_id: String,
@@ -731,6 +810,7 @@ enum TaskAction {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum TaskStatusArg {
     Open,
+    #[value(alias = "in_progress")]
     Claimed,
     Done,
 }
@@ -748,6 +828,19 @@ enum CheckpointRepairModeArg {
     Strict,
     Lossy,
 }
+
+#[derive(Debug)]
+struct JsonCommandError {
+    payload: serde_json::Value,
+}
+
+impl std::fmt::Display for JsonCommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.payload)
+    }
+}
+
+impl std::error::Error for JsonCommandError {}
 
 impl TaskStatusArg {
     fn matches(self, status: &TaskStatus) -> bool {
@@ -900,7 +993,24 @@ struct BridgeAuthState {
     helper: String,
 }
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
+    match try_main() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            if let Some(json_err) = err.downcast_ref::<JsonCommandError>() {
+                match serde_json::to_string_pretty(&json_err.payload) {
+                    Ok(rendered) => println!("{rendered}"),
+                    Err(_) => println!("{}", json_err.payload),
+                }
+            } else {
+                eprintln!("Error: {err:#}");
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn try_main() -> Result<()> {
     let cli = Cli::parse();
     let repo_root = resolve_repo_root(&cli.repo_root)?;
 
@@ -1051,6 +1161,7 @@ fn cmd_quickstart(repo_root: &Path, args: QuickstartArgs) -> Result<()> {
             burst: false,
             repair: CheckpointRepairModeArg::Auto,
             allow_lossy_repair: false,
+            json: false,
         },
     )?;
     Ok(())
@@ -1248,14 +1359,17 @@ fn fugit_skill_bundle(include_skill_body: bool, include_openai_yaml: bool) -> se
                 "fugit_lock_add",
                 "fugit_lock_list",
                 "fugit_task_show",
+                "fugit_task_current",
                 "fugit_task_add",
                 "fugit_task_edit",
                 "fugit_task_remove",
+                "fugit_task_sync",
                 "fugit_task_import",
                 "fugit_task_list",
                 "fugit_task_request",
                 "fugit_task_claim",
                 "fugit_task_done",
+                "fugit_task_reopen",
                 "fugit_task_release",
                 "fugit_skill_bundle",
                 "fugit_skill_install_codex",
@@ -1462,8 +1576,84 @@ fn cmd_status(repo_root: &Path, args: StatusArgs) -> Result<()> {
     Ok(())
 }
 
+fn checkpoint_repair_mode_label(mode: CheckpointRepairModeArg) -> &'static str {
+    match mode {
+        CheckpointRepairModeArg::Auto => "auto",
+        CheckpointRepairModeArg::Strict => "strict",
+        CheckpointRepairModeArg::Lossy => "lossy",
+    }
+}
+
+fn checkpoint_json_error(
+    repo_root: &Path,
+    branch: Option<&str>,
+    summary: &str,
+    repair_mode: CheckpointRepairModeArg,
+    code: &str,
+    message: String,
+    missing_blobs: Vec<CheckpointMissingBlob>,
+    suggested_commands: Vec<String>,
+) -> anyhow::Error {
+    JsonCommandError {
+        payload: json!({
+            "schema_version": "fugit.checkpoint.v1",
+            "generated_at_utc": now_utc(),
+            "ok": false,
+            "repo_root": repo_root.display().to_string(),
+            "branch": branch,
+            "summary": summary,
+            "repair_mode": checkpoint_repair_mode_label(repair_mode),
+            "error": {
+                "code": code,
+                "message": message,
+                "missing_blobs": missing_blobs,
+                "suggested_commands": suggested_commands
+            }
+        }),
+    }
+    .into()
+}
+
+fn render_checkpoint_missing_blob_rows(
+    changes: &[ChangeRecord],
+    repo_root: &Path,
+) -> Vec<CheckpointMissingBlob> {
+    let mut rows = Vec::<CheckpointMissingBlob>::new();
+    for change in changes {
+        if !matches!(change.kind, ChangeKind::Modified | ChangeKind::Deleted) {
+            continue;
+        }
+        if let Some(old_hash) = change.old_hash.as_deref()
+            && !timeline_objects_dir(repo_root).join(old_hash).exists()
+        {
+            rows.push(CheckpointMissingBlob {
+                path: change.path.clone(),
+                hash: old_hash.to_string(),
+                change_kind: match change.kind {
+                    ChangeKind::Added => "added".to_string(),
+                    ChangeKind::Modified => "modified".to_string(),
+                    ChangeKind::Deleted => "deleted".to_string(),
+                },
+            });
+        }
+    }
+    rows
+}
+
 fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
     if args.summary.trim().is_empty() {
+        if args.json {
+            return Err(checkpoint_json_error(
+                repo_root,
+                None,
+                args.summary.trim(),
+                args.repair,
+                "invalid_summary",
+                "checkpoint summary cannot be empty".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ));
+        }
         bail!("checkpoint summary cannot be empty");
     }
 
@@ -1497,60 +1687,91 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
                     lock.lock_id, lock.pattern, lock.agent_id
                 ));
             }
-            bail!(
+            let message = format!(
                 "checkpoint blocked by active locks held by other agents:\n{}\nUse --ignore-locks to bypass.",
                 lines.join("\n")
             );
+            if args.json {
+                return Err(checkpoint_json_error(
+                    repo_root,
+                    Some(&active_branch),
+                    args.summary.trim(),
+                    repair_mode,
+                    "lock_conflict",
+                    message,
+                    Vec::new(),
+                    vec![
+                        "fugit lock list".to_string(),
+                        format!(
+                            "fugit --repo-root {} checkpoint --summary {:?} --ignore-locks",
+                            repo_root.display(),
+                            args.summary.trim()
+                        ),
+                    ],
+                ));
+            }
+            bail!("{message}");
         }
     }
 
-    let mut missing_old_objects = Vec::<String>::new();
-    for change in &changes {
-        if !matches!(change.kind, ChangeKind::Modified | ChangeKind::Deleted) {
-            continue;
-        }
-        if let Some(old_hash) = change.old_hash.as_deref() {
-            let object_path = timeline_objects_dir(repo_root).join(old_hash);
-            if !object_path.exists() {
-                missing_old_objects.push(format!("{} ({})", change.path, old_hash));
-            }
-        }
-    }
+    let mut missing_old_objects = render_checkpoint_missing_blob_rows(&changes, repo_root);
     let repaired_old_objects = if matches!(repair_mode, CheckpointRepairModeArg::Strict) {
         Vec::new()
     } else {
         repair_missing_change_objects_from_git(repo_root, &changes, false)?
     };
     if !repaired_old_objects.is_empty() {
-        missing_old_objects.retain(|row| {
-            let (_, hash) = row
-                .rsplit_once(" (")
-                .map(|(path, hash)| (path, hash.trim_end_matches(')')))
-                .unwrap_or(("", ""));
-            !timeline_objects_dir(repo_root).join(hash).exists()
-        });
+        missing_old_objects.retain(|row| !timeline_objects_dir(repo_root).join(&row.hash).exists());
     }
     if !missing_old_objects.is_empty() {
         if !matches!(repair_mode, CheckpointRepairModeArg::Lossy) {
-            bail!(
+            let rendered_missing = missing_old_objects
+                .iter()
+                .map(|row| format!("{} ({})", row.path, row.hash))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let message = format!(
                 "checkpoint would lose recoverability because old object blobs are missing:\n{}\nRecreate the baseline snapshot first (for new repos, run `fugit init` before edits).\nTry `fugit doctor --fix` for safe Git-backed repair, rerun with `--repair auto` to auto-heal during checkpoint, or use `--repair lossy` only when those blobs are irrecoverable.",
-                missing_old_objects.join("\n"),
+                rendered_missing,
+            );
+            if args.json {
+                return Err(checkpoint_json_error(
+                    repo_root,
+                    Some(&active_branch),
+                    args.summary.trim(),
+                    repair_mode,
+                    "missing_old_objects",
+                    message,
+                    missing_old_objects,
+                    vec![
+                        format!("fugit --repo-root {} doctor --fix", repo_root.display()),
+                        format!(
+                            "fugit --repo-root {} checkpoint --summary {:?} --repair auto",
+                            repo_root.display(),
+                            args.summary.trim()
+                        ),
+                        format!(
+                            "fugit --repo-root {} checkpoint --summary {:?} --repair lossy",
+                            repo_root.display(),
+                            args.summary.trim()
+                        ),
+                    ],
+                ));
+            }
+            bail!("{message}");
+        }
+        if !args.json {
+            println!(
+                "[fugit] warning=lossy_repair missing_old_objects={} historical_checkout_before_this_checkpoint_may_fail repair_mode=lossy",
+                missing_old_objects.len(),
             );
         }
-        println!(
-            "[fugit] warning=lossy_repair missing_old_objects={} historical_checkout_before_this_checkpoint_may_fail repair_mode=lossy",
-            missing_old_objects.len(),
-        );
     }
-    if !repaired_old_objects.is_empty() {
+    if !repaired_old_objects.is_empty() && !args.json {
         println!(
             "[fugit] repaired_missing_old_objects={} source=git_history repair_mode={}",
             repaired_old_objects.len(),
-            match repair_mode {
-                CheckpointRepairModeArg::Auto => "auto",
-                CheckpointRepairModeArg::Strict => "strict",
-                CheckpointRepairModeArg::Lossy => "lossy",
-            }
+            checkpoint_repair_mode_label(repair_mode)
         );
     }
 
@@ -1635,15 +1856,44 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
     }
     write_pretty_json(&timeline_branches_path(repo_root), &branches)?;
 
-    println!(
-        "[fugit] checkpoint={} branch={} changed={} summary={} hash_jobs={} object_jobs={}",
-        event_id,
-        active_branch,
-        event.metrics.changed_file_count,
-        event.summary,
-        hash_jobs,
-        object_jobs
-    );
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "schema_version": "fugit.checkpoint.v1",
+                "generated_at_utc": now_utc(),
+                "ok": true,
+                "repo_root": repo_root.display().to_string(),
+                "branch": active_branch,
+                "event_id": event_id,
+                "summary": event.summary,
+                "repair_mode": checkpoint_repair_mode_label(repair_mode),
+                "lossy_repair": matches!(repair_mode, CheckpointRepairModeArg::Lossy) && !missing_old_objects.is_empty(),
+                "repaired_old_objects": repaired_old_objects,
+                "metrics": {
+                    "tracked_file_count": event.metrics.tracked_file_count,
+                    "changed_file_count": event.metrics.changed_file_count,
+                    "added_count": event.metrics.added_count,
+                    "modified_count": event.metrics.modified_count,
+                    "deleted_count": event.metrics.deleted_count,
+                    "changed_bytes_total": event.metrics.changed_bytes_total,
+                    "hash_jobs": hash_jobs,
+                    "object_jobs": object_jobs
+                },
+                "changes": event.changes
+            }))?
+        );
+    } else {
+        println!(
+            "[fugit] checkpoint={} branch={} changed={} summary={} hash_jobs={} object_jobs={}",
+            event_id,
+            active_branch,
+            event.metrics.changed_file_count,
+            event.summary,
+            hash_jobs,
+            object_jobs
+        );
+    }
     Ok(())
 }
 
@@ -1909,6 +2159,7 @@ fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
             no_push,
             pack_threads,
             burst_push,
+            repair_journal,
         } => {
             ensure_git_repo(repo_root)?;
 
@@ -1925,6 +2176,27 @@ fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
                         "missing credentials for remote host '{}'; run `fugit bridge auth login --remote {}` first",
                         host,
                         remote
+                    );
+                }
+            }
+            if repair_journal {
+                let report = repair_branch_event_journal(repo_root, &branches.active_branch)?;
+                if report
+                    .get("repaired")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    println!(
+                        "[fugit-bridge] repaired_event_journal branch={} dropped_lines={} backup={}",
+                        branches.active_branch,
+                        report
+                            .get("dropped_count")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0),
+                        report
+                            .get("backup_file")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("unknown")
                     );
                 }
             }
@@ -3016,6 +3288,57 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             }
         }
+        TaskAction::Current { agent, json } => {
+            if state_changed {
+                state.updated_at_utc = now_utc();
+                write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+            }
+            let agent_id = agent.unwrap_or_else(default_agent_id);
+            let status_map = task_status_map(&state);
+            let mut indices = state
+                .tasks
+                .iter()
+                .enumerate()
+                .filter(|(_, task)| {
+                    task.status == TaskStatus::Claimed
+                        && task.claimed_by_agent_id.as_deref() == Some(agent_id.as_str())
+                })
+                .map(|(idx, _)| idx)
+                .collect::<Vec<_>>();
+            sort_task_indices(&state, &mut indices);
+            let rows = indices
+                .iter()
+                .map(|idx| task_to_json_payload(&state.tasks[*idx], &status_map))
+                .collect::<Vec<_>>();
+            let payload = json!({
+                "schema_version": "fugit.task.current.v1",
+                "generated_at_utc": now_utc(),
+                "agent_id": agent_id,
+                "found": !rows.is_empty(),
+                "count": rows.len(),
+                "task": rows.first().cloned().unwrap_or(serde_json::Value::Null),
+                "tasks": rows
+            });
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else if let Some(task) = payload.get("task").and_then(|row| row.as_object()) {
+                println!(
+                    "[fugit-task] current agent={} task_id={} title={}",
+                    payload["agent_id"].as_str().unwrap_or("unknown"),
+                    task.get("task_id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown"),
+                    task.get("title")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("untitled")
+                );
+            } else {
+                println!(
+                    "[fugit-task] no claimed task for agent={}",
+                    payload["agent_id"].as_str().unwrap_or("unknown")
+                );
+            }
+        }
         TaskAction::Add {
             title,
             detail,
@@ -3094,6 +3417,124 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 println!("[fugit-task] removed {} by {}", task.task_id, agent_id);
             }
         }
+        TaskAction::Sync {
+            plan,
+            agent,
+            default_priority,
+            format,
+            keep_missing,
+            dry_run,
+            json,
+        } => {
+            let plan_path = resolve_task_plan_path(repo_root, &plan)?;
+            let rows = parse_task_import_rows(&plan_path, format)?;
+            if rows.is_empty() {
+                bail!(
+                    "task sync file contains no task rows: {}",
+                    plan_path.display()
+                );
+            }
+            let plan_source = normalize_task_plan_source(repo_root, &plan_path);
+            let agent_id = normalize_agent_id(agent);
+
+            let mut next_state = state.clone();
+            let mut report = sync_plan_into_task_state(
+                &mut next_state,
+                rows,
+                &plan_source,
+                &agent_id,
+                default_priority,
+                keep_missing,
+            )?;
+            report.generated_at_utc = now_utc();
+            report.plan = plan_source.clone();
+            report.format = match format {
+                TaskImportFormatArg::Auto => "auto".to_string(),
+                TaskImportFormatArg::Tsv => "tsv".to_string(),
+                TaskImportFormatArg::Markdown => "markdown".to_string(),
+            };
+            report.dry_run = dry_run;
+
+            if !dry_run {
+                next_state.updated_at_utc = now_utc();
+                write_pretty_json(&timeline_tasks_path(repo_root), &next_state)?;
+                for task in &report.created {
+                    if let Some(full_task) = next_state
+                        .tasks
+                        .iter()
+                        .find(|row| row.task_id == task.task_id)
+                    {
+                        append_task_timeline_event(repo_root, full_task, &agent_id, "add", None)?;
+                    }
+                }
+                for task in &report.reopened {
+                    if let Some(full_task) = next_state
+                        .tasks
+                        .iter()
+                        .find(|row| row.task_id == task.task_id)
+                    {
+                        append_task_timeline_event(
+                            repo_root, full_task, &agent_id, "reopen", None,
+                        )?;
+                    }
+                }
+                for task in &report.updated {
+                    if let Some(full_task) = next_state
+                        .tasks
+                        .iter()
+                        .find(|row| row.task_id == task.task_id)
+                    {
+                        append_task_timeline_event(repo_root, full_task, &agent_id, "edit", None)?;
+                    }
+                }
+                for task in &report.removed {
+                    append_task_timeline_event(
+                        repo_root,
+                        &FugitTask {
+                            task_id: task.task_id.clone(),
+                            title: task.title.clone(),
+                            detail: None,
+                            priority: 0,
+                            tags: Vec::new(),
+                            depends_on: Vec::new(),
+                            status: TaskStatus::Open,
+                            created_at_utc: now_utc(),
+                            updated_at_utc: now_utc(),
+                            created_by_agent_id: agent_id.clone(),
+                            claimed_by_agent_id: None,
+                            claim_started_at_utc: None,
+                            claim_expires_at_utc: None,
+                            completed_at_utc: None,
+                            completed_by_agent_id: None,
+                            completed_summary: None,
+                            completion_notes: Vec::new(),
+                            completion_artifacts: Vec::new(),
+                            completion_commands: Vec::new(),
+                            source_key: task.source_key.clone(),
+                            source_plan: Some(plan_source.clone()),
+                        },
+                        &agent_id,
+                        "remove",
+                        None,
+                    )?;
+                }
+            }
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "[fugit-task] sync plan={} created={} updated={} reopened={} removed={} blocked={} dry_run={}",
+                    report.plan,
+                    report.created.len(),
+                    report.updated.len(),
+                    report.reopened.len(),
+                    report.removed.len(),
+                    report.blocked.len(),
+                    dry_run
+                );
+            }
+        }
         TaskAction::Import {
             file,
             agent,
@@ -3102,9 +3543,14 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             dry_run,
             json,
         } => {
-            let rows = parse_task_import_rows(&file, format)?;
+            let resolved_file = resolve_task_plan_path(repo_root, &file)?;
+            let plan_source = normalize_task_plan_source(repo_root, &resolved_file);
+            let rows = parse_task_import_rows(&resolved_file, format)?;
             if rows.is_empty() {
-                bail!("task import file contains no task rows: {}", file.display());
+                bail!(
+                    "task import file contains no task rows: {}",
+                    resolved_file.display()
+                );
             }
 
             let mut known_keys = BTreeSet::<String>::new();
@@ -3113,7 +3559,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     bail!(
                         "duplicate task import key '{}' in {}",
                         row.key,
-                        file.display()
+                        resolved_file.display()
                     );
                 }
             }
@@ -3177,6 +3623,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                             completion_notes: Vec::new(),
                             completion_artifacts: Vec::new(),
                             completion_commands: Vec::new(),
+                            source_key: row.source_key.clone(),
+                            source_plan: Some(plan_source.clone()),
                         };
                         key_to_task_id.insert(row.key.clone(), task.task_id.clone());
                         imported_records.push(json!({
@@ -3228,7 +3676,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             let payload = json!({
                 "schema_version": "fugit.task.import.v1",
                 "generated_at_utc": now_utc(),
-                "file": file.display().to_string(),
+                "file": resolved_file.display().to_string(),
+                "plan": plan_source,
                 "format": match format {
                     TaskImportFormatArg::Auto => "auto",
                     TaskImportFormatArg::Tsv => "tsv",
@@ -3482,6 +3931,21 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 );
             }
         }
+        TaskAction::Reopen {
+            task_id,
+            agent,
+            json,
+        } => {
+            let agent_id = agent.unwrap_or_else(default_agent_id);
+            let task = reopen_task_in_state(&mut state, &task_id, &agent_id)?;
+            write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+            append_task_timeline_event(repo_root, &task, &agent_id, "reopen", None)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&task)?);
+            } else {
+                println!("[fugit-task] reopened {} by {}", task.task_id, agent_id);
+            }
+        }
         TaskAction::Release {
             task_id,
             agent,
@@ -3667,6 +4131,7 @@ fn task_timeline_summary(
         ),
         ("claim", None) => format!("task claim: {} \"{}\"", task.task_id, title),
         ("done", _) => format!("task done: {} \"{}\"", task.task_id, title),
+        ("reopen", _) => format!("task reopen: {} \"{}\"", task.task_id, title),
         ("remove", _) => format!("task remove: {} \"{}\"", task.task_id, title),
         ("release", _) => format!("task release: {} \"{}\"", task.task_id, title),
         (other, _) => format!("task {}: {} \"{}\"", other, task.task_id, title),
@@ -5402,6 +5867,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "files": { "type": "array", "items": { "type": "string" } },
                     "strict_hash": { "type": "boolean" },
                     "ignore_locks": { "type": "boolean" },
+                    "repair": { "type": "string", "enum": ["auto", "strict", "lossy"] },
                     "hash_jobs": { "type": "integer", "minimum": 1 },
                     "object_jobs": { "type": "integer", "minimum": 1 },
                     "burst": { "type": "boolean" }
@@ -5466,6 +5932,16 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
+            "name": "fugit_task_current",
+            "description": "Return the current claimed task or tasks for an agent.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent": { "type": "string" }
+                }
+            }
+        }),
+        json!({
             "name": "fugit_task_add",
             "description": "Create a persistent task in the shared queue.",
             "inputSchema": {
@@ -5510,6 +5986,22 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                 "properties": {
                     "task_id": { "type": "string" },
                     "agent": { "type": "string" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_task_sync",
+            "description": "Reconcile a markdown/TSV plan file or markdown payload with the task queue.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "plan": { "type": "string" },
+                    "markdown": { "type": "string" },
+                    "format": { "type": "string", "enum": ["auto", "tsv", "markdown"] },
+                    "agent": { "type": "string" },
+                    "default_priority": { "type": "integer" },
+                    "keep_missing": { "type": "boolean" },
+                    "dry_run": { "type": "boolean" }
                 }
             }
         }),
@@ -5589,6 +6081,18 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "notes": { "type": "array", "items": { "type": "string" } },
                     "artifacts": { "type": "array", "items": { "type": "string" } },
                     "commands": { "type": "array", "items": { "type": "string" } }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_task_reopen",
+            "description": "Reopen a completed task and clear its completion metadata.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["task_id"],
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "agent": { "type": "string" }
                 }
             }
         }),
@@ -5737,6 +6241,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 "checkpoint".to_string(),
                 "--summary".to_string(),
                 summary.to_string(),
+                "--json".to_string(),
             ];
             if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
                 cli_args.push("--agent".to_string());
@@ -5772,6 +6277,10 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             {
                 cli_args.push("--ignore-locks".to_string());
             }
+            if let Some(repair) = args.get("repair").and_then(serde_json::Value::as_str) {
+                cli_args.push("--repair".to_string());
+                cli_args.push(repair.to_string());
+            }
             if let Some(hash_jobs) = args.get("hash_jobs").and_then(serde_json::Value::as_u64) {
                 cli_args.push("--hash-jobs".to_string());
                 cli_args.push(hash_jobs.to_string());
@@ -5787,16 +6296,7 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             {
                 cli_args.push("--burst".to_string());
             }
-            let _ = run_self_cli_text(repo_root, &cli_args)?;
-            run_self_cli_json(
-                repo_root,
-                &[
-                    "log".to_string(),
-                    "--json".to_string(),
-                    "--limit".to_string(),
-                    "1".to_string(),
-                ],
-            )?
+            run_self_cli_json(repo_root, &cli_args)?
         }
         "fugit_log" => {
             let mut cli_args = vec!["log".to_string(), "--json".to_string()];
@@ -5906,6 +6406,18 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                     "--json".to_string(),
                 ],
             )?
+        }
+        "fugit_task_current" => {
+            let mut cli_args = vec![
+                "task".to_string(),
+                "current".to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
         }
         "fugit_task_add" => {
             let title = args
@@ -6033,6 +6545,67 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 cli_args.push(agent.to_string());
             }
             run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_task_sync" => {
+            let mut cli_args = vec!["task".to_string(), "sync".to_string(), "--json".to_string()];
+            let mut temp_file_to_remove: Option<PathBuf> = None;
+            let mut inferred_format: Option<&str> = None;
+
+            let plan_file = if let Some(plan) = args.get("plan").and_then(serde_json::Value::as_str)
+            {
+                PathBuf::from(plan)
+            } else if let Some(markdown) = args.get("markdown").and_then(serde_json::Value::as_str)
+            {
+                inferred_format = Some("markdown");
+                let temp_path =
+                    write_mcp_task_import_temp_file(repo_root, "sync_markdown", markdown)?;
+                temp_file_to_remove = Some(temp_path.clone());
+                temp_path
+            } else {
+                bail!("fugit_task_sync requires one of: plan, markdown");
+            };
+
+            cli_args.push("--plan".to_string());
+            cli_args.push(plan_file.display().to_string());
+
+            if let Some(format) = args.get("format").and_then(serde_json::Value::as_str) {
+                cli_args.push("--format".to_string());
+                cli_args.push(format.to_string());
+            } else if let Some(format) = inferred_format {
+                cli_args.push("--format".to_string());
+                cli_args.push(format.to_string());
+            }
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            if let Some(priority) = args
+                .get("default_priority")
+                .and_then(serde_json::Value::as_i64)
+            {
+                cli_args.push("--default-priority".to_string());
+                cli_args.push(priority.to_string());
+            }
+            if args
+                .get("keep_missing")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--keep-missing".to_string());
+            }
+            if args
+                .get("dry_run")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--dry-run".to_string());
+            }
+
+            let sync_result = run_self_cli_json(repo_root, &cli_args);
+            if let Some(temp_file) = temp_file_to_remove {
+                let _ = fs::remove_file(&temp_file);
+            }
+            sync_result?
         }
         "fugit_task_import" => {
             let mut cli_args = vec![
@@ -6276,6 +6849,24 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
+        "fugit_task_reopen" => {
+            let task_id = args
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_task_reopen requires task_id"))?;
+            let mut cli_args = vec![
+                "task".to_string(),
+                "reopen".to_string(),
+                "--task-id".to_string(),
+                task_id.to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
         "fugit_task_release" => {
             let task_id = args
                 .get("task_id")
@@ -6441,7 +7032,30 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
 }
 
 fn run_self_cli_json(repo_root: &Path, args: &[String]) -> Result<serde_json::Value> {
-    let text = run_self_cli_text(repo_root, args)?;
+    let current_exe =
+        std::env::current_exe().with_context(|| "failed resolving current executable")?;
+    let mut cmd = ProcessCommand::new(current_exe);
+    cmd.arg("--repo-root").arg(repo_root).args(args);
+    let output = cmd.output().with_context(|| {
+        format!(
+            "failed running fugit subprocess for args: {}",
+            args.join(" ")
+        )
+    })?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if !output.status.success() {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(stdout.trim()) {
+            return Ok(parsed);
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        bail!(
+            "fugit subprocess failed for args: {}\nstdout: {}\nstderr: {}",
+            args.join(" "),
+            stdout.trim(),
+            stderr.trim()
+        );
+    }
+    let text = stdout;
     let parsed: serde_json::Value = serde_json::from_str(text.trim()).with_context(|| {
         format!(
             "expected JSON output from fugit subprocess for args: {}",
@@ -6870,31 +7484,104 @@ fn load_branch_index(repo_root: &Path, branch: &str) -> Result<BTreeMap<String, 
     Ok(load_json_optional::<BTreeMap<String, FileRecord>>(&index_path)?.unwrap_or_default())
 }
 
-fn read_branch_events(repo_root: &Path, branch: &str) -> Result<Vec<TimelineEvent>> {
+fn collect_branch_events_with_errors(
+    repo_root: &Path,
+    branch: &str,
+) -> Result<(Vec<TimelineEvent>, Vec<serde_json::Value>, Vec<String>)> {
     let path = timeline_branch_events_path(repo_root, branch);
     if !path.exists() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
     }
 
     let file = fs::File::open(&path)
         .with_context(|| format!("failed opening timeline events {}", path.display()))?;
     let reader = BufReader::new(file);
     let mut out = Vec::<TimelineEvent>::new();
+    let mut valid_lines = Vec::<String>::new();
+    let mut corrupt = Vec::<serde_json::Value>::new();
     for (idx, line) in reader.lines().enumerate() {
         let line = line.with_context(|| format!("failed reading line {}", idx + 1))?;
         if line.trim().is_empty() {
             continue;
         }
-        let event: TimelineEvent = serde_json::from_str(&line).with_context(|| {
-            format!(
-                "failed parsing timeline event at {}:{}",
-                path.display(),
-                idx + 1
-            )
-        })?;
-        out.push(event);
+        match serde_json::from_str::<TimelineEvent>(&line) {
+            Ok(event) => {
+                valid_lines.push(line);
+                out.push(event);
+            }
+            Err(err) => {
+                corrupt.push(json!({
+                    "line": idx + 1,
+                    "preview": line.chars().take(160).collect::<String>(),
+                    "error": err.to_string()
+                }));
+            }
+        }
     }
-    Ok(out)
+    Ok((out, corrupt, valid_lines))
+}
+
+fn repair_branch_event_journal(repo_root: &Path, branch: &str) -> Result<serde_json::Value> {
+    let path = timeline_branch_events_path(repo_root, branch);
+    let (events, corrupt, valid_lines) = collect_branch_events_with_errors(repo_root, branch)?;
+    if corrupt.is_empty() {
+        return Ok(json!({
+            "attempted": true,
+            "branch": branch,
+            "file": path.display().to_string(),
+            "repaired": false,
+            "dropped_count": 0,
+            "backup_file": null,
+            "corrupt_lines": []
+        }));
+    }
+
+    let backup = path.with_extension(format!("jsonl.bak.{}", Uuid::new_v4().simple()));
+    fs::copy(&path, &backup).with_context(|| {
+        format!(
+            "failed backing up timeline event journal {} -> {}",
+            path.display(),
+            backup.display()
+        )
+    })?;
+    let rewritten = if valid_lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", valid_lines.join("\n"))
+    };
+    fs::write(&path, rewritten.as_bytes())
+        .with_context(|| format!("failed rewriting repaired journal {}", path.display()))?;
+
+    Ok(json!({
+        "attempted": true,
+        "branch": branch,
+        "file": path.display().to_string(),
+        "repaired": true,
+        "kept_event_count": events.len(),
+        "dropped_count": corrupt.len(),
+        "backup_file": backup.display().to_string(),
+        "corrupt_lines": corrupt
+    }))
+}
+
+fn read_branch_events(repo_root: &Path, branch: &str) -> Result<Vec<TimelineEvent>> {
+    let path = timeline_branch_events_path(repo_root, branch);
+    let (events, corrupt, _) = collect_branch_events_with_errors(repo_root, branch)?;
+    if let Some(first) = corrupt.first() {
+        bail!(
+            "failed parsing timeline event at {}:{}\ncorrupt_line={}",
+            path.display(),
+            first
+                .get("line")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+            first
+                .get("preview")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+        );
+    }
+    Ok(events)
 }
 
 fn read_branch_events_tail(
@@ -6906,32 +7593,23 @@ fn read_branch_events_tail(
         return Ok(Vec::new());
     }
     let path = timeline_branch_events_path(repo_root, branch);
-    if !path.exists() {
-        return Ok(Vec::new());
+    let (events, corrupt, _) = collect_branch_events_with_errors(repo_root, branch)?;
+    if let Some(first) = corrupt.first() {
+        bail!(
+            "failed parsing timeline event at {}:{}\ncorrupt_line={}",
+            path.display(),
+            first
+                .get("line")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+            first
+                .get("preview")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+        );
     }
-
-    let file = fs::File::open(&path)
-        .with_context(|| format!("failed opening timeline events {}", path.display()))?;
-    let reader = BufReader::new(file);
-    let mut tail = VecDeque::<TimelineEvent>::new();
-    for (idx, line) in reader.lines().enumerate() {
-        let line = line.with_context(|| format!("failed reading line {}", idx + 1))?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let event: TimelineEvent = serde_json::from_str(&line).with_context(|| {
-            format!(
-                "failed parsing timeline event at {}:{}",
-                path.display(),
-                idx + 1
-            )
-        })?;
-        tail.push_back(event);
-        if tail.len() > limit {
-            let _ = tail.pop_front();
-        }
-    }
-    Ok(tail.into_iter().collect())
+    let start = events.len().saturating_sub(limit);
+    Ok(events.into_iter().skip(start).collect())
 }
 
 fn reconstruct_index_at_event(
@@ -7328,6 +8006,8 @@ fn build_manual_task(
         completion_notes: Vec::new(),
         completion_artifacts: Vec::new(),
         completion_commands: Vec::new(),
+        source_key: None,
+        source_plan: None,
     })
 }
 
@@ -7445,6 +8125,40 @@ fn remove_task_from_state(
     Ok(removed)
 }
 
+fn reopen_task_in_state(state: &mut TaskState, task_id: &str, agent_id: &str) -> Result<FugitTask> {
+    let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id) else {
+        bail!("task not found: {}", task_id);
+    };
+    if let Some(owner) = state.tasks[task_index].claimed_by_agent_id.as_deref()
+        && owner != agent_id
+    {
+        bail!(
+            "task {} is claimed by {}; cannot reopen as {}",
+            state.tasks[task_index].task_id,
+            owner,
+            agent_id
+        );
+    }
+    if state.tasks[task_index].status != TaskStatus::Done {
+        bail!("task is not completed: {}", state.tasks[task_index].task_id);
+    }
+
+    let now = now_utc();
+    state.tasks[task_index].status = TaskStatus::Open;
+    state.tasks[task_index].updated_at_utc = now.clone();
+    state.tasks[task_index].claimed_by_agent_id = None;
+    state.tasks[task_index].claim_started_at_utc = None;
+    state.tasks[task_index].claim_expires_at_utc = None;
+    state.tasks[task_index].completed_at_utc = None;
+    state.tasks[task_index].completed_by_agent_id = None;
+    state.tasks[task_index].completed_summary = None;
+    state.tasks[task_index].completion_notes = Vec::new();
+    state.tasks[task_index].completion_artifacts = Vec::new();
+    state.tasks[task_index].completion_commands = Vec::new();
+    state.updated_at_utc = now;
+    Ok(state.tasks[task_index].clone())
+}
+
 fn normalize_task_query_filter(
     tags: Vec<String>,
     focus: Option<String>,
@@ -7541,7 +8255,9 @@ fn task_to_json_payload(
         "completion_notes": task.completion_notes,
         "completion_artifacts": task.completion_artifacts,
         "completion_commands": task.completion_commands,
-        "claim_expires_at_utc": task.claim_expires_at_utc
+        "claim_expires_at_utc": task.claim_expires_at_utc,
+        "source_key": task.source_key,
+        "source_plan": task.source_plan
     })
 }
 
@@ -7676,12 +8392,14 @@ fn parse_task_import_markdown_line(trimmed: &str, line_no: usize) -> Result<Opti
     }
 
     let mut key = format!("md_{}", line_no);
+    let mut source_key = None;
     if let Some(after_open_tick) = body.strip_prefix('`')
         && let Some(end_tick_idx) = after_open_tick.find('`')
     {
         let candidate = normalize_markdown_import_key(&after_open_tick[..end_tick_idx]);
         if !candidate.is_empty() {
             key = candidate;
+            source_key = Some(key.clone());
             let remainder = after_open_tick[end_tick_idx + 1..].trim();
             if !remainder.is_empty() {
                 body = remainder.trim_start_matches(|ch| matches!(ch, ':' | '-' | ' '));
@@ -7696,6 +8414,7 @@ fn parse_task_import_markdown_line(trimmed: &str, line_no: usize) -> Result<Opti
 
     Ok(Some(TaskImportRow {
         key,
+        source_key,
         title,
         detail: None,
         priority: None,
@@ -7782,6 +8501,7 @@ fn parse_task_import_tsv_line(line: &str) -> Result<TaskImportRow> {
     });
 
     Ok(TaskImportRow {
+        source_key: Some(key.clone()),
         key,
         title,
         detail,
@@ -7799,6 +8519,440 @@ fn parse_task_import_csv_tokens(value: &str) -> Vec<String> {
         .filter(|token| !token.is_empty())
         .map(ToString::to_string)
         .collect()
+}
+
+fn resolve_task_plan_path(repo_root: &Path, plan: &Path) -> Result<PathBuf> {
+    let candidate = if plan.is_absolute() {
+        plan.to_path_buf()
+    } else {
+        repo_root.join(plan)
+    };
+    candidate
+        .canonicalize()
+        .with_context(|| format!("failed resolving plan file {}", candidate.display()))
+}
+
+fn normalize_task_plan_source(repo_root: &Path, plan: &Path) -> String {
+    if let Ok(relative) = plan.strip_prefix(repo_root) {
+        let normalized = normalize_relpath(relative);
+        if !normalized.is_empty() {
+            return normalized;
+        }
+    }
+    plan.display().to_string()
+}
+
+fn task_status_label(status: &TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Open => "open",
+        TaskStatus::Claimed => "claimed",
+        TaskStatus::Done => "done",
+    }
+}
+
+fn task_sync_record(task: &FugitTask) -> TaskSyncTaskRecord {
+    TaskSyncTaskRecord {
+        task_id: task.task_id.clone(),
+        title: task.title.clone(),
+        status: task_status_label(&task.status).to_string(),
+        source_key: task.source_key.clone(),
+    }
+}
+
+fn find_sync_match_for_row(
+    state: &TaskState,
+    used_indices: &BTreeSet<usize>,
+    plan_source: &str,
+    row: &TaskImportRow,
+) -> Result<Option<(usize, bool)>> {
+    if let Some(source_key) = row.source_key.as_deref() {
+        let source_matches = state
+            .tasks
+            .iter()
+            .enumerate()
+            .filter(|(idx, task)| {
+                !used_indices.contains(idx)
+                    && task.source_plan.as_deref() == Some(plan_source)
+                    && task.source_key.as_deref() == Some(source_key)
+            })
+            .map(|(idx, _)| idx)
+            .collect::<Vec<_>>();
+        if source_matches.len() > 1 {
+            bail!(
+                "task sync found multiple managed tasks for source key '{}' in plan {}",
+                source_key,
+                plan_source
+            );
+        }
+        if let Some(idx) = source_matches.first().copied() {
+            return Ok(Some((idx, false)));
+        }
+    }
+
+    let title_matches = state
+        .tasks
+        .iter()
+        .enumerate()
+        .filter(|(idx, task)| {
+            if used_indices.contains(idx) || task.title != row.title {
+                return false;
+            }
+            task.source_plan.as_deref().is_none()
+                || task.source_plan.as_deref() == Some(plan_source)
+        })
+        .map(|(idx, _)| idx)
+        .collect::<Vec<_>>();
+    if title_matches.len() == 1 {
+        return Ok(Some((title_matches[0], true)));
+    }
+    Ok(None)
+}
+
+fn sync_task_needs_update(
+    task: &FugitTask,
+    row: &TaskImportRow,
+    plan_source: &str,
+    default_priority: i32,
+    depends_on: &[String],
+) -> bool {
+    task.status == TaskStatus::Done
+        || task.title != row.title
+        || task.detail != row.detail
+        || task.priority != row.priority.unwrap_or(default_priority)
+        || task.tags != dedupe_keep_order(row.tags.clone())
+        || task.depends_on != dedupe_keep_order(depends_on.to_vec())
+        || task.source_plan.as_deref() != Some(plan_source)
+        || task.source_key != row.source_key
+}
+
+fn mark_task_synced(
+    state: &mut TaskState,
+    task_index: usize,
+    row: &TaskImportRow,
+    plan_source: &str,
+    default_priority: i32,
+    depends_on: Vec<String>,
+) -> Result<bool> {
+    let desired_title = normalize_task_title(&row.title)?;
+    let desired_detail = normalize_task_detail(row.detail.clone());
+    let desired_priority = row.priority.unwrap_or(default_priority);
+    let desired_tags = dedupe_keep_order(row.tags.clone());
+    let desired_depends_on = dedupe_keep_order(depends_on);
+
+    let mut changed = false;
+    if state.tasks[task_index].title != desired_title {
+        state.tasks[task_index].title = desired_title;
+        changed = true;
+    }
+    if state.tasks[task_index].detail != desired_detail {
+        state.tasks[task_index].detail = desired_detail;
+        changed = true;
+    }
+    if state.tasks[task_index].priority != desired_priority {
+        state.tasks[task_index].priority = desired_priority;
+        changed = true;
+    }
+    if state.tasks[task_index].tags != desired_tags {
+        state.tasks[task_index].tags = desired_tags;
+        changed = true;
+    }
+    if state.tasks[task_index].depends_on != desired_depends_on {
+        state.tasks[task_index].depends_on = desired_depends_on;
+        changed = true;
+    }
+    if state.tasks[task_index].source_plan.as_deref() != Some(plan_source) {
+        state.tasks[task_index].source_plan = Some(plan_source.to_string());
+        changed = true;
+    }
+    if state.tasks[task_index].source_key != row.source_key {
+        state.tasks[task_index].source_key = row.source_key.clone();
+        changed = true;
+    }
+    if changed {
+        let now = now_utc();
+        state.tasks[task_index].updated_at_utc = now.clone();
+        state.updated_at_utc = now;
+    }
+    Ok(changed)
+}
+
+fn sync_plan_into_task_state(
+    state: &mut TaskState,
+    rows: Vec<TaskImportRow>,
+    plan_source: &str,
+    agent_id: &str,
+    default_priority: i32,
+    keep_missing: bool,
+) -> Result<TaskSyncReport> {
+    let mut known_keys = BTreeSet::<String>::new();
+    for row in &rows {
+        if !known_keys.insert(row.key.clone()) {
+            bail!(
+                "duplicate task sync key '{}' in plan {}",
+                row.key,
+                plan_source
+            );
+        }
+    }
+    for row in &rows {
+        for dependency in &row.depends_on_keys {
+            if dependency == &row.key {
+                bail!("task sync key '{}' cannot depend on itself", row.key);
+            }
+            if !known_keys.contains(dependency) {
+                bail!(
+                    "task sync key '{}' depends on unknown key '{}'",
+                    row.key,
+                    dependency
+                );
+            }
+        }
+    }
+
+    let mut report = TaskSyncReport {
+        schema_version: "fugit.task.sync.v1".to_string(),
+        generated_at_utc: now_utc(),
+        plan: plan_source.to_string(),
+        format: "resolved".to_string(),
+        dry_run: false,
+        keep_missing,
+        created: Vec::new(),
+        updated: Vec::new(),
+        reopened: Vec::new(),
+        removed: Vec::new(),
+        unchanged: Vec::new(),
+        matched_by_title: Vec::new(),
+        blocked: Vec::new(),
+    };
+
+    let mut used_indices = BTreeSet::<usize>::new();
+    let mut row_to_existing = BTreeMap::<String, usize>::new();
+    let mut key_to_task_id = BTreeMap::<String, String>::new();
+    let mut expected_task_ids = BTreeSet::<String>::new();
+
+    for row in &rows {
+        if let Some((idx, matched_by_title)) =
+            find_sync_match_for_row(state, &used_indices, plan_source, row)?
+        {
+            used_indices.insert(idx);
+            row_to_existing.insert(row.key.clone(), idx);
+            key_to_task_id.insert(row.key.clone(), state.tasks[idx].task_id.clone());
+            expected_task_ids.insert(state.tasks[idx].task_id.clone());
+            if matched_by_title {
+                report
+                    .matched_by_title
+                    .push(task_sync_record(&state.tasks[idx]));
+            }
+        }
+    }
+
+    let mut pending = rows
+        .iter()
+        .filter(|row| !row_to_existing.contains_key(&row.key))
+        .cloned()
+        .collect::<Vec<_>>();
+    while !pending.is_empty() {
+        let mut progress = false;
+        let mut unresolved = Vec::<TaskImportRow>::new();
+        for row in pending {
+            if row
+                .depends_on_keys
+                .iter()
+                .all(|key| key_to_task_id.contains_key(key))
+            {
+                progress = true;
+                let depends_on = row
+                    .depends_on_keys
+                    .iter()
+                    .map(|key| key_to_task_id[key].clone())
+                    .collect::<Vec<_>>();
+                let now = now_utc();
+                let task = FugitTask {
+                    task_id: format!("task_{}", Uuid::new_v4().simple()),
+                    title: normalize_task_title(&row.title)?,
+                    detail: normalize_task_detail(row.detail.clone()),
+                    priority: row.priority.unwrap_or(default_priority),
+                    tags: dedupe_keep_order(row.tags.clone()),
+                    depends_on: dedupe_keep_order(depends_on),
+                    status: TaskStatus::Open,
+                    created_at_utc: now.clone(),
+                    updated_at_utc: now.clone(),
+                    created_by_agent_id: agent_id.to_string(),
+                    claimed_by_agent_id: None,
+                    claim_started_at_utc: None,
+                    claim_expires_at_utc: None,
+                    completed_at_utc: None,
+                    completed_by_agent_id: None,
+                    completed_summary: None,
+                    completion_notes: Vec::new(),
+                    completion_artifacts: Vec::new(),
+                    completion_commands: Vec::new(),
+                    source_key: row.source_key.clone(),
+                    source_plan: Some(plan_source.to_string()),
+                };
+                key_to_task_id.insert(row.key.clone(), task.task_id.clone());
+                expected_task_ids.insert(task.task_id.clone());
+                report.created.push(task_sync_record(&task));
+                state.tasks.push(task);
+            } else {
+                unresolved.push(row);
+            }
+        }
+        if !progress {
+            let unresolved_keys = unresolved
+                .iter()
+                .map(|row| row.key.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "task sync has unresolved or cyclic dependencies: {}",
+                unresolved_keys
+            );
+        }
+        pending = unresolved;
+    }
+
+    for row in &rows {
+        let Some(task_id) = key_to_task_id.get(&row.key).cloned() else {
+            continue;
+        };
+        let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id) else {
+            continue;
+        };
+        let depends_on = row
+            .depends_on_keys
+            .iter()
+            .map(|key| key_to_task_id[key].clone())
+            .collect::<Vec<_>>();
+        let needs_update = sync_task_needs_update(
+            &state.tasks[task_index],
+            row,
+            plan_source,
+            default_priority,
+            &depends_on,
+        );
+        if let Some(owner) = state.tasks[task_index].claimed_by_agent_id.as_deref()
+            && owner != agent_id
+            && needs_update
+        {
+            report.blocked.push(TaskSyncBlockedTask {
+                action: "update".to_string(),
+                task_id: state.tasks[task_index].task_id.clone(),
+                title: state.tasks[task_index].title.clone(),
+                reason: format!("claimed by {}", owner),
+            });
+            continue;
+        }
+
+        let mut reopened = false;
+        if state.tasks[task_index].status == TaskStatus::Done {
+            let reopened_task =
+                reopen_task_in_state(state, &state.tasks[task_index].task_id.clone(), agent_id)?;
+            report.reopened.push(task_sync_record(&reopened_task));
+            reopened = true;
+        }
+        let changed = mark_task_synced(
+            state,
+            task_index,
+            row,
+            plan_source,
+            default_priority,
+            depends_on,
+        )?;
+        if changed {
+            report
+                .updated
+                .push(task_sync_record(&state.tasks[task_index]));
+        } else if !reopened
+            && !report
+                .created
+                .iter()
+                .any(|record| record.task_id == state.tasks[task_index].task_id)
+        {
+            report
+                .unchanged
+                .push(task_sync_record(&state.tasks[task_index]));
+        }
+    }
+
+    if !keep_missing {
+        let managed_task_ids = state
+            .tasks
+            .iter()
+            .filter(|task| task.source_plan.as_deref() == Some(plan_source))
+            .map(|task| task.task_id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut pending_remove = managed_task_ids
+            .difference(&expected_task_ids)
+            .cloned()
+            .collect::<Vec<_>>();
+        loop {
+            let mut progress = false;
+            let mut retry = Vec::<String>::new();
+            for task_id in pending_remove {
+                let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id)
+                else {
+                    continue;
+                };
+                if let Some(owner) = state.tasks[task_index].claimed_by_agent_id.as_deref()
+                    && owner != agent_id
+                {
+                    report.blocked.push(TaskSyncBlockedTask {
+                        action: "remove".to_string(),
+                        task_id: state.tasks[task_index].task_id.clone(),
+                        title: state.tasks[task_index].title.clone(),
+                        reason: format!("claimed by {}", owner),
+                    });
+                    continue;
+                }
+                match remove_task_from_state(state, &task_id, agent_id) {
+                    Ok(task) => {
+                        progress = true;
+                        report.removed.push(task_sync_record(&task));
+                    }
+                    Err(err) => {
+                        let reason = err.to_string();
+                        if reason.contains("still has dependents") {
+                            retry.push(task_id);
+                        } else {
+                            let fallback = state
+                                .tasks
+                                .iter()
+                                .find(|task| task.task_id == task_id)
+                                .cloned();
+                            if let Some(task) = fallback {
+                                report.blocked.push(TaskSyncBlockedTask {
+                                    action: "remove".to_string(),
+                                    task_id: task.task_id,
+                                    title: task.title,
+                                    reason,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            if retry.is_empty() {
+                break;
+            }
+            if !progress {
+                for task_id in retry {
+                    if let Some(task) = state.tasks.iter().find(|task| task.task_id == task_id) {
+                        report.blocked.push(TaskSyncBlockedTask {
+                            action: "remove".to_string(),
+                            task_id: task.task_id.clone(),
+                            title: task.title.clone(),
+                            reason: "still has dependents".to_string(),
+                        });
+                    }
+                }
+                break;
+            }
+            pending_remove = retry;
+        }
+    }
+
+    Ok(report)
 }
 
 fn write_mcp_task_import_temp_file(repo_root: &Path, kind: &str, content: &str) -> Result<PathBuf> {
@@ -8676,6 +9830,8 @@ mod tests {
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    source_key: None,
+                    source_plan: None,
                 },
                 FugitTask {
                     task_id: "task_child".to_string(),
@@ -8697,6 +9853,8 @@ mod tests {
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    source_key: None,
+                    source_plan: None,
                 },
             ],
         };
@@ -8738,6 +9896,8 @@ mod tests {
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    source_key: None,
+                    source_plan: None,
                 },
                 FugitTask {
                     task_id: "task_simple".to_string(),
@@ -8759,6 +9919,8 @@ mod tests {
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    source_key: None,
+                    source_plan: None,
                 },
                 FugitTask {
                     task_id: "task_priority_ready".to_string(),
@@ -8780,6 +9942,8 @@ mod tests {
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    source_key: None,
+                    source_plan: None,
                 },
                 FugitTask {
                     task_id: "task_blocked".to_string(),
@@ -8801,6 +9965,8 @@ mod tests {
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    source_key: None,
+                    source_plan: None,
                 },
             ],
         };
@@ -8847,6 +10013,8 @@ mod tests {
                 completion_notes: Vec::new(),
                 completion_artifacts: Vec::new(),
                 completion_commands: Vec::new(),
+                source_key: None,
+                source_plan: None,
             }],
         };
 
@@ -8962,6 +10130,7 @@ mod tests {
                 burst: false,
                 repair: CheckpointRepairModeArg::Auto,
                 allow_lossy_repair: false,
+                json: false,
             },
         )
         .expect("checkpoint succeeds after git-backed repair");
@@ -9007,6 +10176,7 @@ mod tests {
                 burst: false,
                 repair: CheckpointRepairModeArg::Auto,
                 allow_lossy_repair: false,
+                json: false,
             },
         )
         .expect("beta checkpoint");
@@ -9036,6 +10206,7 @@ mod tests {
                 burst: false,
                 repair: CheckpointRepairModeArg::Auto,
                 allow_lossy_repair: false,
+                json: false,
             },
         )
         .expect_err("strict checkpoint should fail when timeline-only blob is missing");
@@ -9058,6 +10229,7 @@ mod tests {
                 burst: false,
                 repair: CheckpointRepairModeArg::Lossy,
                 allow_lossy_repair: true,
+                json: false,
             },
         )
         .expect("lossy repair checkpoint succeeds");
@@ -9211,6 +10383,8 @@ mod tests {
             completion_notes: Vec::new(),
             completion_artifacts: Vec::new(),
             completion_commands: Vec::new(),
+            source_key: None,
+            source_plan: None,
         };
 
         let tags = task_timeline_tags("done", &task, Some(TaskDispatchKind::Open));
@@ -9268,6 +10442,8 @@ mod tests {
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    source_key: None,
+                    source_plan: None,
                 },
                 FugitTask {
                     task_id: "task_main".to_string(),
@@ -9289,6 +10465,8 @@ mod tests {
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    source_key: None,
+                    source_plan: None,
                 },
             ],
         };
@@ -9339,6 +10517,8 @@ mod tests {
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    source_key: None,
+                    source_plan: None,
                 },
                 FugitTask {
                     task_id: "task_child".to_string(),
@@ -9360,6 +10540,8 @@ mod tests {
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    source_key: None,
+                    source_plan: None,
                 },
             ],
         };
@@ -9367,6 +10549,158 @@ mod tests {
         let err = remove_task_from_state(&mut state, "task_parent", "agent.editor")
             .expect_err("expected dependent check to fail");
         assert!(err.to_string().contains("still has dependents"));
+    }
+
+    #[test]
+    fn reopen_task_in_state_clears_completion_metadata() {
+        let mut state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![FugitTask {
+                task_id: "task_done".to_string(),
+                title: "done".to_string(),
+                detail: None,
+                priority: 0,
+                tags: vec![],
+                depends_on: vec![],
+                status: TaskStatus::Done,
+                created_at_utc: now_utc(),
+                updated_at_utc: now_utc(),
+                created_by_agent_id: "agent.seed".to_string(),
+                claimed_by_agent_id: None,
+                claim_started_at_utc: None,
+                claim_expires_at_utc: None,
+                completed_at_utc: Some(now_utc()),
+                completed_by_agent_id: Some("agent.seed".to_string()),
+                completed_summary: Some("finished".to_string()),
+                completion_notes: vec!["note".to_string()],
+                completion_artifacts: vec!["artifact".to_string()],
+                completion_commands: vec!["cargo test".to_string()],
+                source_key: Some("A-01".to_string()),
+                source_plan: Some("the_final_plan.md".to_string()),
+            }],
+        };
+
+        let reopened =
+            reopen_task_in_state(&mut state, "task_done", "agent.editor").expect("reopen task");
+        assert_eq!(reopened.status, TaskStatus::Open);
+        assert!(reopened.completed_at_utc.is_none());
+        assert!(reopened.completed_by_agent_id.is_none());
+        assert!(reopened.completed_summary.is_none());
+        assert!(reopened.completion_notes.is_empty());
+        assert!(reopened.completion_artifacts.is_empty());
+        assert!(reopened.completion_commands.is_empty());
+    }
+
+    #[test]
+    fn sync_plan_into_task_state_reconciles_managed_tasks() {
+        let mut state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![
+                FugitTask {
+                    task_id: "task_a01".to_string(),
+                    title: "Define compiler contract".to_string(),
+                    detail: None,
+                    priority: 0,
+                    tags: vec![],
+                    depends_on: vec![],
+                    status: TaskStatus::Open,
+                    created_at_utc: now_utc(),
+                    updated_at_utc: now_utc(),
+                    created_by_agent_id: "agent.seed".to_string(),
+                    claimed_by_agent_id: None,
+                    claim_started_at_utc: None,
+                    claim_expires_at_utc: None,
+                    completed_at_utc: None,
+                    completed_by_agent_id: None,
+                    completed_summary: None,
+                    completion_notes: Vec::new(),
+                    completion_artifacts: Vec::new(),
+                    completion_commands: Vec::new(),
+                    source_key: Some("A-01".to_string()),
+                    source_plan: Some("the_final_plan.md".to_string()),
+                },
+                FugitTask {
+                    task_id: "task_a02".to_string(),
+                    title: "Add checkpoint json payloads".to_string(),
+                    detail: None,
+                    priority: 0,
+                    tags: vec![],
+                    depends_on: vec![],
+                    status: TaskStatus::Done,
+                    created_at_utc: now_utc(),
+                    updated_at_utc: now_utc(),
+                    created_by_agent_id: "agent.seed".to_string(),
+                    claimed_by_agent_id: None,
+                    claim_started_at_utc: None,
+                    claim_expires_at_utc: None,
+                    completed_at_utc: Some(now_utc()),
+                    completed_by_agent_id: Some("agent.seed".to_string()),
+                    completed_summary: Some("finished".to_string()),
+                    completion_notes: Vec::new(),
+                    completion_artifacts: Vec::new(),
+                    completion_commands: Vec::new(),
+                    source_key: Some("A-02".to_string()),
+                    source_plan: Some("the_final_plan.md".to_string()),
+                },
+            ],
+        };
+        let rows = vec![
+            TaskImportRow {
+                key: "A-02".to_string(),
+                source_key: Some("A-02".to_string()),
+                title: "Add checkpoint json payloads".to_string(),
+                detail: None,
+                priority: None,
+                tags: Vec::new(),
+                depends_on_keys: Vec::new(),
+                agent: None,
+            },
+            TaskImportRow {
+                key: "A-03".to_string(),
+                source_key: Some("A-03".to_string()),
+                title: "Add plan sync".to_string(),
+                detail: None,
+                priority: Some(5),
+                tags: vec!["planning".to_string()],
+                depends_on_keys: vec!["A-02".to_string()],
+                agent: None,
+            },
+        ];
+
+        let report = sync_plan_into_task_state(
+            &mut state,
+            rows,
+            "the_final_plan.md",
+            "agent.sync",
+            0,
+            false,
+        )
+        .expect("sync should succeed");
+
+        assert_eq!(report.created.len(), 1);
+        assert_eq!(report.reopened.len(), 1);
+        assert_eq!(report.removed.len(), 1);
+        assert_eq!(report.blocked.len(), 0);
+        assert!(state.tasks.iter().all(|task| task.task_id != "task_a01"));
+
+        let reopened = state
+            .tasks
+            .iter()
+            .find(|task| task.task_id == "task_a02")
+            .expect("reopened task");
+        assert_eq!(reopened.status, TaskStatus::Open);
+        assert!(reopened.completed_at_utc.is_none());
+
+        let created = state
+            .tasks
+            .iter()
+            .find(|task| task.source_key.as_deref() == Some("A-03"))
+            .expect("created task");
+        assert_eq!(created.depends_on, vec!["task_a02".to_string()]);
+        assert_eq!(created.priority, 5);
+        assert_eq!(created.tags, vec!["planning".to_string()]);
     }
 
     #[test]
