@@ -1424,6 +1424,21 @@ struct ResolvedTaskListOptions {
     filters: TaskQueryFilter,
 }
 
+#[derive(Debug, Clone)]
+struct TaskListOptionsRequest {
+    view: Option<String>,
+    format: Option<TaskListFormatArg>,
+    json: bool,
+    jsonl: bool,
+    status: Option<TaskStatusArg>,
+    filters: TaskQueryFilter,
+    agent: Option<String>,
+    mine: bool,
+    ready_only: bool,
+    fields: Vec<String>,
+    limit: Option<usize>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct AutoReplenishEnsureResult {
     created_task_ids: Vec<String>,
@@ -1492,6 +1507,14 @@ struct CommentSyncReport {
     marker_counts: BTreeMap<String, usize>,
     matches: Vec<CommentTaskMatch>,
     sync: TaskSyncReport,
+}
+
+#[derive(Debug, Clone)]
+struct CommentTaskRowBuildResult {
+    rows: Vec<TaskImportRow>,
+    matches: Vec<CommentTaskMatch>,
+    scanned_files: usize,
+    marker_counts: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -7587,21 +7610,25 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             }
             let resolved = resolve_task_list_options(
                 repo_root,
-                view,
-                format,
-                json,
-                jsonl,
-                status,
-                tags,
-                focus,
-                prefix,
-                contains,
-                title_contains,
-                agent,
-                mine,
-                ready_only,
-                fields,
-                limit,
+                TaskListOptionsRequest {
+                    view,
+                    format,
+                    json,
+                    jsonl,
+                    status,
+                    filters: normalize_task_query_filter(
+                        tags,
+                        focus,
+                        prefix,
+                        contains,
+                        title_contains,
+                    )?,
+                    agent,
+                    mine,
+                    ready_only,
+                    fields,
+                    limit,
+                },
             )?;
             let status_map = task_status_map(&state);
             let mine_agent_id = if resolved.mine {
@@ -20589,7 +20616,7 @@ fn normalize_task_view_name(name: String) -> Result<String> {
     Ok(normalized)
 }
 
-fn find_task_view(state: &TaskViewState, name: &str) -> Option<&TaskViewDefinition> {
+fn find_task_view<'a>(state: &'a TaskViewState, name: &str) -> Option<&'a TaskViewDefinition> {
     state.views.iter().find(|view| view.name == name)
 }
 
@@ -20634,25 +20661,22 @@ fn load_named_task_view(
 
 fn resolve_task_list_options(
     repo_root: &Path,
-    view: Option<String>,
-    format: Option<TaskListFormatArg>,
-    json: bool,
-    jsonl: bool,
-    status: Option<TaskStatusArg>,
-    tags: Vec<String>,
-    focus: Option<String>,
-    prefix: Option<String>,
-    contains: Option<String>,
-    title_contains: Option<String>,
-    agent: Option<String>,
-    mine: bool,
-    ready_only: bool,
-    fields: Vec<String>,
-    limit: Option<usize>,
+    request: TaskListOptionsRequest,
 ) -> Result<ResolvedTaskListOptions> {
+    let TaskListOptionsRequest {
+        view,
+        format,
+        json,
+        jsonl,
+        status,
+        filters: explicit_filter,
+        agent,
+        mine,
+        ready_only,
+        fields,
+        limit,
+    } = request;
     let resolved_view = load_named_task_view(repo_root, view)?;
-    let explicit_filter =
-        normalize_task_query_filter(tags, focus, prefix, contains, title_contains)?;
     let filters = if let Some(view) = resolved_view.as_ref() {
         merge_task_query_filter(&view.query, &explicit_filter)
     } else {
@@ -22482,12 +22506,7 @@ fn build_comment_task_rows(
     repo_root: &Path,
     markers: &[String],
     default_priority: Option<i32>,
-) -> Result<(
-    Vec<TaskImportRow>,
-    Vec<CommentTaskMatch>,
-    usize,
-    BTreeMap<String, usize>,
-)> {
+) -> Result<CommentTaskRowBuildResult> {
     let mut rows = Vec::<TaskImportRow>::new();
     let mut matches = Vec::<CommentTaskMatch>::new();
     let mut marker_counts = BTreeMap::<String, usize>::new();
@@ -22594,7 +22613,12 @@ fn build_comment_task_rows(
         }
     }
 
-    Ok((rows, matches, scanned_files, marker_counts))
+    Ok(CommentTaskRowBuildResult {
+        rows,
+        matches,
+        scanned_files,
+        marker_counts,
+    })
 }
 
 fn build_comment_sync_report(
@@ -22607,8 +22631,12 @@ fn build_comment_sync_report(
     dry_run: bool,
 ) -> Result<(TaskState, CommentSyncReport)> {
     let normalized_markers = normalize_comment_sync_markers(markers)?;
-    let (rows, matches, scanned_files, marker_counts) =
-        build_comment_task_rows(repo_root, &normalized_markers, default_priority)?;
+    let CommentTaskRowBuildResult {
+        rows,
+        matches,
+        scanned_files,
+        marker_counts,
+    } = build_comment_task_rows(repo_root, &normalized_markers, default_priority)?;
     let mut next_state = state.clone();
     let mut sync = sync_plan_into_task_state(
         &mut next_state,
@@ -25106,21 +25134,26 @@ mod tests {
 
         let resolved = resolve_task_list_options(
             repo.path(),
-            Some("semantic/compiler".to_string()),
-            None,
-            false,
-            false,
-            None,
-            vec!["seed".to_string()],
-            None,
-            None,
-            Some("tree-sitter".to_string()),
-            None,
-            None,
-            false,
-            false,
-            Vec::new(),
-            None,
+            TaskListOptionsRequest {
+                view: Some("semantic/compiler".to_string()),
+                format: None,
+                json: false,
+                jsonl: false,
+                status: None,
+                filters: normalize_task_query_filter(
+                    vec!["seed".to_string()],
+                    None,
+                    None,
+                    Some("tree-sitter".to_string()),
+                    None,
+                )
+                .expect("request query"),
+                agent: None,
+                mine: false,
+                ready_only: false,
+                fields: Vec::new(),
+                limit: None,
+            },
         )
         .expect("resolve task list options");
 
@@ -25150,8 +25183,12 @@ mod tests {
         repo.write_file("README.md", "<!-- TODO document task views -->\n");
 
         let markers = vec!["TODO".to_string(), "FIXME".to_string()];
-        let (_rows, matches, scanned_files, marker_counts) =
-            build_comment_task_rows(repo.path(), &markers, None).expect("scan comment tasks");
+        let CommentTaskRowBuildResult {
+            rows: _rows,
+            matches,
+            scanned_files,
+            marker_counts,
+        } = build_comment_task_rows(repo.path(), &markers, None).expect("scan comment tasks");
 
         assert_eq!(scanned_files, 2);
         assert_eq!(matches.len(), 3);
