@@ -111,8 +111,10 @@ Recoverability repair:
 
 13. Optional live task board window:
 - CLI foreground: `fugit --repo-root . task gui`
-- CLI background: `fugit --repo-root . task gui --background`
+- CLI background: `fugit --repo-root . task gui --background --port 0`
 - Project-pinned GUI: `fugit --repo-root . task gui --project <project_name>`
+- Auto-discover projects for the board: `fugit project discover --json`
+- Desktop-friendly launcher after install: `fugit-gui`
 - Built-in board supports create/edit/remove directly from the browser.
 - Confirmation-gated scout tasks can also be approved directly from the browser.
 - Timeline explorer: use the branch selector and `load older` in the GUI to scroll project history.

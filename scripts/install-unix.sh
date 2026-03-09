@@ -96,6 +96,7 @@ esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_NAME="fugit"
+GUI_LAUNCHER_NAME="fugit-gui"
 
 ensure_cargo() {
   if command -v cargo >/dev/null 2>&1; then
@@ -129,6 +130,73 @@ ensure_cargo() {
 
 ensure_cargo
 
+desktop_exec_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/ /\\ /g'
+}
+
+install_gui_launcher() {
+  local launcher_src="$REPO_ROOT/scripts/$GUI_LAUNCHER_NAME"
+  if [[ ! -f "$launcher_src" ]]; then
+    echo "missing GUI launcher source: $launcher_src" >&2
+    exit 1
+  fi
+  install -m 0755 "$launcher_src" "$INSTALL_DIR/$GUI_LAUNCHER_NAME"
+  echo "[installer] installed GUI launcher to: $INSTALL_DIR/$GUI_LAUNCHER_NAME"
+}
+
+install_macos_gui_app() {
+  local app_root="$HOME/Applications/Fugit GUI.app"
+  local macos_dir="$app_root/Contents/MacOS"
+  local plist_path="$app_root/Contents/Info.plist"
+  local launcher_path="$macos_dir/fugit-gui-launcher"
+  mkdir -p "$macos_dir"
+  cat >"$launcher_path" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+exec "$INSTALL_DIR/$GUI_LAUNCHER_NAME" "\$@"
+EOF
+  chmod 0755 "$launcher_path"
+  cat >"$plist_path" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDisplayName</key>
+  <string>Fugit GUI</string>
+  <key>CFBundleExecutable</key>
+  <string>fugit-gui-launcher</string>
+  <key>CFBundleIdentifier</key>
+  <string>io.fugit.gui</string>
+  <key>CFBundleName</key>
+  <string>Fugit GUI</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+</dict>
+</plist>
+EOF
+  echo "[installer] installed macOS app launcher to: $app_root"
+}
+
+install_linux_desktop_entry() {
+  local desktop_dir="$HOME/.local/share/applications"
+  local desktop_file="$desktop_dir/fugit-gui.desktop"
+  local escaped_exec
+  mkdir -p "$desktop_dir"
+  escaped_exec="$(desktop_exec_escape "$INSTALL_DIR/$GUI_LAUNCHER_NAME")"
+  cat >"$desktop_file" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Fugit GUI
+Comment=Launch the fugit task board
+Exec=$escaped_exec
+Terminal=false
+Categories=Development;
+EOF
+  echo "[installer] installed Linux desktop entry to: $desktop_file"
+}
+
 echo "[installer] building fugit-alpha (binary: fugit)"
 cargo build --release --manifest-path "$REPO_ROOT/Cargo.toml"
 
@@ -140,6 +208,7 @@ fi
 
 mkdir -p "$INSTALL_DIR"
 install -m 0755 "$BIN_SRC" "$INSTALL_DIR/$BIN_NAME"
+install_gui_launcher
 
 echo "[installer] installed $BIN_NAME to: $INSTALL_DIR/$BIN_NAME"
 
@@ -165,6 +234,15 @@ elif [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
   echo "[installer] PATH auto-update disabled. Add this line manually if needed:"
   echo "  $PATH_EXPORT_LINE"
 fi
+
+case "$PLATFORM" in
+  macos)
+    install_macos_gui_app
+    ;;
+  linux)
+    install_linux_desktop_entry
+    ;;
+esac
 
 if [[ "$WITH_SKILL" -eq 1 ]]; then
   echo "[installer] installing bundled Codex skill..."

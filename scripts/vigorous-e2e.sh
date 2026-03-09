@@ -230,14 +230,15 @@ json_assert "$TMP_ROOT/task-sync-2.json" 'len(payload.get("removed", [])) >= 1 a
 echo "[vigorous-e2e] project registry"
 "$BIN" project add --name proj-a --repo-root "$REPO_A" --set-default --json >"$TMP_ROOT/project-add-a.json"
 "$BIN" project add --name proj-b --repo-root "$REPO_B" --json >"$TMP_ROOT/project-add-b.json"
+"$BIN" project discover --root "$TMP_ROOT" --json >"$TMP_ROOT/project-discover.json"
+json_assert "$TMP_ROOT/project-discover.json" 'payload.get("selected_project", {}).get("repo_root") is not None and len(payload.get("created", [])) + len(payload.get("updated", [])) >= 2' "project discover should find initialized fugit repos under the requested root"
 "$BIN" project list --json >"$TMP_ROOT/project-list.json"
-json_assert "$TMP_ROOT/project-list.json" 'isinstance(payload, list) and len(payload) >= 2' "project list should include registered projects"
+json_assert "$TMP_ROOT/project-list.json" 'isinstance(payload, list) and len(payload) >= 2 and any("is_most_recent" in row for row in payload)' "project list should include registry rows with recent-project metadata"
 "$BIN" project use --name proj-b --json >"$TMP_ROOT/project-use.json"
 "$BIN" project remove --name proj-b --json >"$TMP_ROOT/project-remove.json"
 
 echo "[vigorous-e2e] task GUI + timeline API"
-GUI_PORT=7815
-"$BIN" --repo-root "$REPO_A" task gui --background --host 127.0.0.1 --port "$GUI_PORT" --project proj-a --no-open >/dev/null
+GUI_PORT="$("$BIN" --repo-root "$REPO_A" task gui --background --host 127.0.0.1 --port 0 --project proj-a --no-open --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["port"])')"
 sleep 0.7
 curl -s "http://127.0.0.1:$GUI_PORT/health" >"$TMP_ROOT/gui-health.json"
 curl -s "http://127.0.0.1:$GUI_PORT/api/tasks?project=proj-a" >"$TMP_ROOT/gui-tasks.json"
@@ -265,6 +266,17 @@ json_assert "$TMP_ROOT/gui-remove.json" 'payload.get("ok") is True and payload.g
 GUI_PID="$(lsof -ti tcp:$GUI_PORT || true)"
 if [[ -n "$GUI_PID" ]]; then
   kill "$GUI_PID" || true
+fi
+
+echo "[vigorous-e2e] gui launcher wrapper"
+WRAPPER_PORT=7816
+FUGIT_BIN="$BIN" FUGIT_GUI_ROOT="$TMP_ROOT" FUGIT_GUI_PORT="$WRAPPER_PORT" "$REPO_ROOT/scripts/fugit-gui" --project proj-a --no-open >/dev/null
+sleep 0.7
+curl -s "http://127.0.0.1:$WRAPPER_PORT/api/tasks?project=proj-a" >"$TMP_ROOT/gui-wrapper.json"
+json_assert "$TMP_ROOT/gui-wrapper.json" 'payload.get("selected_project", {}).get("key") == "proj-a"' "fugit-gui wrapper should launch the board against the requested project"
+WRAPPER_PID="$(lsof -ti tcp:$WRAPPER_PORT || true)"
+if [[ -n "$WRAPPER_PID" ]]; then
+  kill "$WRAPPER_PID" || true
 fi
 
 echo "[vigorous-e2e] bridge auth/sync/pull"

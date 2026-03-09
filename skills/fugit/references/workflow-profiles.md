@@ -43,8 +43,10 @@ Characteristics:
 Use when humans or lead agents need continuous visual awareness of queue state.
 
 - `fugit --repo-root . task gui`
-- `fugit --repo-root . task gui --background`
+- `fugit --repo-root . task gui --background --port 0`
 - `fugit --repo-root . task gui --project <project_name>`
+- `fugit project discover --json`
+- `fugit-gui`
 - MCP: `fugit_task_gui_launch`
 
 Characteristics:

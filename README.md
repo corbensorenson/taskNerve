@@ -189,19 +189,28 @@ Notes:
 ```bash
 fugit --repo-root . task gui
 # or
-fugit --repo-root . task gui --background --project <project_name>
+fugit --repo-root . task gui --background --port 0
+# or use the installed launcher
+fugit-gui
+fugit-gui --project <project_name>
 ```
 
 GUI features:
-- Project switcher
+- Project switcher with most-recent project selection by default
 - Optional agent-id field for task mutations
 - Task board with create, edit, remove, and approval controls for confirmation-gated scout tasks
 - Timeline explorer (branch selector + paged `load older`)
 - Scrollable history to correlate task completion with timeline events
+- `project discover` scans common roots for `.fugit/config.json` repos so the launcher can populate the board automatically
+
+Launcher notes:
+- `fugit-gui` runs project discovery, starts the board in the background, auto-picks a free port, and opens the most recently worked-on project.
+- The Unix installer also creates a desktop launcher: `~/Applications/Fugit GUI.app` on macOS or `~/.local/share/applications/fugit-gui.desktop` on Linux.
 
 Task maintenance from CLI:
 
 ```bash
+fugit project discover --json
 fugit --repo-root . task show --task-id <task_id>
 fugit --repo-root . task current --agent <agent_id> --json
 fugit --repo-root . task list --jsonl --fields task_id,title,status

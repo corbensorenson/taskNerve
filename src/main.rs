@@ -589,6 +589,10 @@ struct RegisteredProject {
     repo_root: String,
     added_at_utc: String,
     updated_at_utc: String,
+    #[serde(default)]
+    last_activity_at_utc: Option<String>,
+    #[serde(default)]
+    last_opened_at_utc: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -606,6 +610,9 @@ struct TaskGuiProject {
     repo_root: String,
     is_default: bool,
     is_current_repo: bool,
+    last_activity_at_utc: Option<String>,
+    last_opened_at_utc: Option<String>,
+    is_most_recent: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -959,6 +966,12 @@ struct ProjectArgs {
 #[derive(Debug, Subcommand)]
 enum ProjectAction {
     List {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Discover {
+        #[arg(long = "root")]
+        roots: Vec<PathBuf>,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -3184,6 +3197,16 @@ fn cmd_project(args: ProjectArgs) -> Result<()> {
     let mut registry = load_project_registry()?;
     match args.action {
         ProjectAction::List { json } => {
+            refresh_project_registry_activity(&mut registry);
+            let most_recent_name = registry
+                .projects
+                .iter()
+                .max_by(|lhs, rhs| {
+                    project_recent_activity_timestamp(lhs)
+                        .cmp(&project_recent_activity_timestamp(rhs))
+                        .then_with(|| lhs.name.cmp(&rhs.name))
+                })
+                .map(|project| project.name.clone());
             let rows = registry
                 .projects
                 .iter()
@@ -3193,7 +3216,10 @@ fn cmd_project(args: ProjectArgs) -> Result<()> {
                         "repo_root": project.repo_root,
                         "added_at_utc": project.added_at_utc,
                         "updated_at_utc": project.updated_at_utc,
-                        "is_default": registry.default_project.as_deref() == Some(project.name.as_str())
+                        "last_activity_at_utc": project.last_activity_at_utc,
+                        "last_opened_at_utc": project.last_opened_at_utc,
+                        "is_default": registry.default_project.as_deref() == Some(project.name.as_str()),
+                        "is_most_recent": most_recent_name.as_deref() == Some(project.name.as_str())
                     })
                 })
                 .collect::<Vec<_>>();
@@ -3207,11 +3233,45 @@ fn cmd_project(args: ProjectArgs) -> Result<()> {
                     } else {
                         "-"
                     };
+                    let recent_marker = if row["is_most_recent"].as_bool().unwrap_or(false) {
+                        " recent"
+                    } else {
+                        ""
+                    };
                     println!(
-                        "{} {} repo_root={}",
+                        "{} {} repo_root={} activity={} opened={}{}",
                         marker,
                         row["name"].as_str().unwrap_or("unknown"),
-                        row["repo_root"].as_str().unwrap_or("unknown")
+                        row["repo_root"].as_str().unwrap_or("unknown"),
+                        row["last_activity_at_utc"].as_str().unwrap_or("unknown"),
+                        row["last_opened_at_utc"].as_str().unwrap_or("never"),
+                        recent_marker
+                    );
+                }
+            }
+        }
+        ProjectAction::Discover { roots, json } => {
+            let payload = discover_projects_into_registry(&mut registry, &roots)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!(
+                    "[fugit-project] discovery roots={} created={} updated={}",
+                    payload["roots"].as_array().map(Vec::len).unwrap_or(0),
+                    payload["created"].as_array().map(Vec::len).unwrap_or(0),
+                    payload["updated"].as_array().map(Vec::len).unwrap_or(0)
+                );
+                if let Some(selected) = payload["selected_project"].as_object() {
+                    println!(
+                        "[fugit-project] selected name={} repo_root={}",
+                        selected
+                            .get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("unknown"),
+                        selected
+                            .get("repo_root")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("unknown")
                     );
                 }
             }
@@ -3233,12 +3293,15 @@ fn cmd_project(args: ProjectArgs) -> Result<()> {
             {
                 existing.repo_root = canonical_root.display().to_string();
                 existing.updated_at_utc = now.clone();
+                existing.last_activity_at_utc = detect_project_last_activity(&canonical_root);
             } else {
                 registry.projects.push(RegisteredProject {
                     name: normalized_name.clone(),
                     repo_root: canonical_root.display().to_string(),
                     added_at_utc: now.clone(),
                     updated_at_utc: now.clone(),
+                    last_activity_at_utc: detect_project_last_activity(&canonical_root),
+                    last_opened_at_utc: None,
                 });
             }
             if set_default {
@@ -3311,11 +3374,20 @@ fn cmd_project(args: ProjectArgs) -> Result<()> {
             {
                 bail!("project not found: {}", normalized_name);
             }
+            let now = now_utc();
+            if let Some(project) = registry
+                .projects
+                .iter_mut()
+                .find(|project| project.name == normalized_name)
+            {
+                project.last_opened_at_utc = Some(now.clone());
+                project.updated_at_utc = now.clone();
+            }
             registry
                 .projects
                 .sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
             registry.default_project = Some(normalized_name.to_string());
-            registry.updated_at_utc = now_utc();
+            registry.updated_at_utc = now;
             write_project_registry(&registry)?;
             let payload = json!({
                 "schema_version": "fugit.project.use.v1",
@@ -4424,12 +4496,11 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 bail!("--json requires --background for task gui");
             }
             let open_browser = !no_open;
+            let selected_project = resolve_task_gui_launch_project(repo_root, project.as_deref())?;
             if background {
-                if port == 0 {
-                    bail!("--background requires explicit non-zero --port");
-                }
-                let url = task_gui_url(&host, port, project.as_deref());
-                spawn_task_gui_background(repo_root, &host, port, project.as_deref())?;
+                let port = resolve_task_gui_background_port(&host, port)?;
+                let url = task_gui_url(&host, port, selected_project.as_deref());
+                spawn_task_gui_background(repo_root, &host, port, selected_project.as_deref())?;
                 let mut opened_browser = false;
                 if open_browser {
                     if open_url_in_browser(&url).is_ok() {
@@ -4450,7 +4521,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                             "url": url,
                             "host": host,
                             "port": port,
-                            "project": project,
+                            "project": selected_project,
                             "opened_browser": opened_browser
                         }))?
                     );
@@ -4465,7 +4536,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 let url = task_gui_url(
                     &local_addr.ip().to_string(),
                     local_addr.port(),
-                    project.as_deref(),
+                    selected_project.as_deref(),
                 );
                 println!(
                     "[fugit-task-gui] serving live task board at {} (Ctrl+C to stop)",
@@ -4477,7 +4548,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                         err
                     );
                 }
-                serve_task_gui(listener, repo_root, project.as_deref())?;
+                serve_task_gui(listener, repo_root, selected_project.as_deref())?;
             }
         }
     }
@@ -4599,6 +4670,30 @@ fn bind_task_gui_listener(host: &str, port: u16) -> Result<TcpListener> {
     let listener = TcpListener::bind(&bind_addr)
         .with_context(|| format!("failed binding task gui listener at {}", bind_addr))?;
     Ok(listener)
+}
+
+fn resolve_task_gui_background_port(host: &str, port: u16) -> Result<u16> {
+    if port != 0 {
+        return Ok(port);
+    }
+    let listener = bind_task_gui_listener(host, 0)?;
+    let selected_port = listener
+        .local_addr()
+        .with_context(|| "failed resolving task-gui auto-selected port")?
+        .port();
+    Ok(selected_port)
+}
+
+fn resolve_task_gui_launch_project(
+    repo_root: &Path,
+    project_selector: Option<&str>,
+) -> Result<Option<String>> {
+    let projects = collect_task_gui_projects(repo_root)?;
+    let Some(selected) = resolve_selected_task_gui_project(&projects, project_selector) else {
+        return Ok(None);
+    };
+    let _ = touch_registered_project_opened(&selected.repo_root)?;
+    Ok(Some(selected.key.clone()))
 }
 
 fn task_gui_url(host: &str, port: u16, project: Option<&str>) -> String {
@@ -10559,8 +10654,363 @@ fn validate_project_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn normalize_discovered_project_name(raw: &str) -> String {
+    let mut out = String::new();
+    let mut last_was_sep = false;
+    for ch in raw.trim().chars() {
+        let normalized = if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            Some(ch.to_ascii_lowercase())
+        } else if ch.is_whitespace() || matches!(ch, '/' | '\\' | ':' | '|') {
+            Some('-')
+        } else {
+            None
+        };
+        if let Some(candidate) = normalized {
+            if matches!(candidate, '-' | '_' | '.') {
+                if !last_was_sep {
+                    out.push(candidate);
+                    last_was_sep = true;
+                }
+            } else {
+                out.push(candidate);
+                last_was_sep = false;
+            }
+        }
+    }
+    let trimmed = out.trim_matches(|ch| matches!(ch, '-' | '_' | '.'));
+    if trimmed.is_empty() {
+        "project".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn choose_unique_discovered_project_name(
+    repo_root: &str,
+    existing_names: &BTreeMap<String, String>,
+) -> String {
+    let base_name = Path::new(repo_root)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(normalize_discovered_project_name)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "project".to_string());
+    if !existing_names.contains_key(&base_name) {
+        return base_name;
+    }
+    if existing_names.get(&base_name).map(String::as_str) == Some(repo_root) {
+        return base_name;
+    }
+    let digest = hash_bytes(repo_root.as_bytes());
+    format!("{}_{}", base_name, &digest[..8])
+}
+
+fn file_modified_at_utc(path: &Path) -> Option<String> {
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
+    let datetime: DateTime<Utc> = modified.into();
+    Some(format_utc(datetime))
+}
+
+fn newer_optional_timestamp(current: Option<String>, candidate: Option<String>) -> Option<String> {
+    match (current, candidate) {
+        (Some(current), Some(candidate)) => {
+            let current_dt = parse_rfc3339_utc(&current);
+            let candidate_dt = parse_rfc3339_utc(&candidate);
+            match (current_dt, candidate_dt) {
+                (Some(current_dt), Some(candidate_dt)) => {
+                    if candidate_dt > current_dt {
+                        Some(candidate)
+                    } else {
+                        Some(current)
+                    }
+                }
+                (None, Some(_)) => Some(candidate),
+                _ => Some(current),
+            }
+        }
+        (Some(current), None) => Some(current),
+        (None, Some(candidate)) => Some(candidate),
+        (None, None) => None,
+    }
+}
+
+fn project_recent_timestamp_values(
+    last_activity_at_utc: Option<&str>,
+    last_opened_at_utc: Option<&str>,
+    updated_at_utc: Option<&str>,
+    added_at_utc: Option<&str>,
+) -> Option<DateTime<Utc>> {
+    let mut latest = None;
+    for candidate in [
+        last_activity_at_utc,
+        last_opened_at_utc,
+        updated_at_utc,
+        added_at_utc,
+    ] {
+        if let Some(candidate) = candidate.and_then(parse_rfc3339_utc) {
+            latest = match latest {
+                Some(current) if current >= candidate => Some(current),
+                _ => Some(candidate),
+            };
+        }
+    }
+    latest
+}
+
+fn detect_project_last_activity(repo_root: &Path) -> Option<String> {
+    let mut latest = None;
+    let candidate_paths = [
+        timeline_tasks_path(repo_root),
+        timeline_config_path(repo_root),
+        timeline_branches_path(repo_root),
+        timeline_bridge_auto_sync_state_path(repo_root),
+        repo_root.join(".git").join("logs").join("HEAD"),
+        repo_root.join(".git").join("FETCH_HEAD"),
+    ];
+    for path in candidate_paths {
+        latest = newer_optional_timestamp(latest, file_modified_at_utc(&path));
+    }
+    if let Ok(branches) = load_json_optional::<BranchesState>(&timeline_branches_path(repo_root)) {
+        if let Some(branches) = branches {
+            for branch in branches.branches.keys() {
+                latest = newer_optional_timestamp(
+                    latest,
+                    file_modified_at_utc(&timeline_branch_events_path(repo_root, branch)),
+                );
+                latest = newer_optional_timestamp(
+                    latest,
+                    file_modified_at_utc(&timeline_branch_index_path(repo_root, branch)),
+                );
+            }
+        }
+    }
+    latest
+}
+
+fn default_project_discovery_roots(registry: &ProjectRegistry) -> Vec<PathBuf> {
+    let mut roots = Vec::<PathBuf>::new();
+    if let Ok(home) = std::env::var("HOME") {
+        let home_path = PathBuf::from(home);
+        for relative in ["Documents", "Code", "Projects", "Workspace", "src"] {
+            let candidate = home_path.join(relative);
+            if candidate.exists() {
+                roots.push(candidate);
+            }
+        }
+        if roots.is_empty() && home_path.exists() {
+            roots.push(home_path);
+        }
+    }
+    for project in &registry.projects {
+        let repo_root = PathBuf::from(&project.repo_root);
+        if repo_root.exists() {
+            roots.push(repo_root.clone());
+            if let Some(parent) = repo_root.parent() {
+                roots.push(parent.to_path_buf());
+            }
+        }
+    }
+    dedupe_keep_order(
+        roots
+            .into_iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>(),
+    )
+    .into_iter()
+    .map(PathBuf::from)
+    .collect()
+}
+
+fn should_descend_project_discovery(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return true;
+    };
+    if name.starts_with('.') && name != ".fugit" {
+        return false;
+    }
+    !matches!(
+        name,
+        ".git"
+            | ".fugit"
+            | "node_modules"
+            | "target"
+            | "dist"
+            | "build"
+            | "Library"
+            | "Applications"
+            | ".Trash"
+    )
+}
+
+fn discover_fugit_repo_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut discovered = Vec::<PathBuf>::new();
+    let mut seen = BTreeSet::<String>::new();
+    for root in roots {
+        if !root.exists() {
+            continue;
+        }
+        let walker = WalkDir::new(root)
+            .follow_links(false)
+            .max_depth(4)
+            .into_iter()
+            .filter_entry(|entry| should_descend_project_discovery(entry.path()));
+        for entry in walker.filter_map(Result::ok) {
+            if !entry.file_type().is_dir() {
+                continue;
+            }
+            let candidate = entry.path().join(".fugit").join("config.json");
+            if !candidate.exists() {
+                continue;
+            }
+            if let Ok(canonical_root) = entry.path().canonicalize() {
+                let key = canonical_root.display().to_string();
+                if seen.insert(key) {
+                    discovered.push(canonical_root);
+                }
+            }
+        }
+    }
+    discovered
+}
+
+fn refresh_project_registry_activity(registry: &mut ProjectRegistry) {
+    for project in &mut registry.projects {
+        let repo_root = PathBuf::from(&project.repo_root);
+        project.last_activity_at_utc = detect_project_last_activity(&repo_root);
+    }
+}
+
+fn project_recent_activity_timestamp(project: &RegisteredProject) -> Option<DateTime<Utc>> {
+    project_recent_timestamp_values(
+        project.last_activity_at_utc.as_deref(),
+        project.last_opened_at_utc.as_deref(),
+        Some(project.updated_at_utc.as_str()),
+        Some(project.added_at_utc.as_str()),
+    )
+}
+
+fn task_gui_project_recent_timestamp(project: &TaskGuiProject) -> Option<DateTime<Utc>> {
+    project_recent_timestamp_values(
+        project.last_activity_at_utc.as_deref(),
+        project.last_opened_at_utc.as_deref(),
+        None,
+        None,
+    )
+}
+
+fn touch_registered_project_opened(repo_root: &str) -> Result<bool> {
+    let mut registry = load_project_registry()?;
+    let Some(project) = registry
+        .projects
+        .iter_mut()
+        .find(|project| project.repo_root == repo_root)
+    else {
+        return Ok(false);
+    };
+    let now = now_utc();
+    project.last_opened_at_utc = Some(now.clone());
+    project.updated_at_utc = now.clone();
+    registry.updated_at_utc = now;
+    write_project_registry(&registry)?;
+    Ok(true)
+}
+
+fn discover_projects_into_registry(
+    registry: &mut ProjectRegistry,
+    roots: &[PathBuf],
+) -> Result<serde_json::Value> {
+    let discovery_roots = if roots.is_empty() {
+        default_project_discovery_roots(registry)
+    } else {
+        roots
+            .iter()
+            .map(|root| resolve_repo_root(root))
+            .collect::<Result<Vec<_>>>()?
+    };
+    let discovered_roots = discover_fugit_repo_roots(&discovery_roots);
+    let now = now_utc();
+    let mut existing_name_map = registry
+        .projects
+        .iter()
+        .map(|project| (project.name.clone(), project.repo_root.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let mut created = Vec::<serde_json::Value>::new();
+    let mut updated = Vec::<serde_json::Value>::new();
+    for repo_root in discovered_roots {
+        let repo_root_text = repo_root.display().to_string();
+        let detected_activity = detect_project_last_activity(&repo_root);
+        if let Some(existing) = registry
+            .projects
+            .iter_mut()
+            .find(|project| project.repo_root == repo_root_text)
+        {
+            existing.updated_at_utc = now.clone();
+            existing.last_activity_at_utc = detected_activity.clone();
+            updated.push(json!({
+                "name": existing.name,
+                "repo_root": existing.repo_root,
+                "last_activity_at_utc": existing.last_activity_at_utc
+            }));
+            continue;
+        }
+
+        let name = choose_unique_discovered_project_name(&repo_root_text, &existing_name_map);
+        existing_name_map.insert(name.clone(), repo_root_text.clone());
+        registry.projects.push(RegisteredProject {
+            name: name.clone(),
+            repo_root: repo_root_text.clone(),
+            added_at_utc: now.clone(),
+            updated_at_utc: now.clone(),
+            last_activity_at_utc: detected_activity.clone(),
+            last_opened_at_utc: None,
+        });
+        created.push(json!({
+            "name": name,
+            "repo_root": repo_root_text,
+            "last_activity_at_utc": detected_activity
+        }));
+    }
+
+    refresh_project_registry_activity(registry);
+    registry
+        .projects
+        .sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
+    registry.updated_at_utc = now;
+    write_project_registry(registry)?;
+
+    let selected = registry
+        .projects
+        .iter()
+        .max_by(|lhs, rhs| {
+            project_recent_activity_timestamp(lhs)
+                .cmp(&project_recent_activity_timestamp(rhs))
+                .then_with(|| lhs.name.cmp(&rhs.name))
+        })
+        .map(|project| {
+            json!({
+                "name": project.name,
+                "repo_root": project.repo_root,
+                "last_activity_at_utc": project.last_activity_at_utc,
+                "last_opened_at_utc": project.last_opened_at_utc
+            })
+        });
+
+    Ok(json!({
+        "schema_version": "fugit.project.discover.v1",
+        "generated_at_utc": now_utc(),
+        "roots": discovery_roots.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
+        "created": created,
+        "updated": updated,
+        "selected_project": selected
+    }))
+}
+
 fn collect_task_gui_projects(current_repo_root: &Path) -> Result<Vec<TaskGuiProject>> {
-    let registry = load_project_registry()?;
+    let mut registry = load_project_registry()?;
+    if registry.projects.is_empty() {
+        let _ = discover_projects_into_registry(&mut registry, &[])?;
+    }
+    refresh_project_registry_activity(&mut registry);
     let current = current_repo_root.display().to_string();
     let default_project = registry.default_project.clone();
     let mut projects = Vec::<TaskGuiProject>::new();
@@ -10574,20 +11024,46 @@ fn collect_task_gui_projects(current_repo_root: &Path) -> Result<Vec<TaskGuiProj
             repo_root: project.repo_root.clone(),
             is_default: default_project.as_deref() == Some(project.name.as_str()),
             is_current_repo,
+            last_activity_at_utc: project.last_activity_at_utc.clone(),
+            last_opened_at_utc: project.last_opened_at_utc.clone(),
+            is_most_recent: false,
         });
     }
 
     if !seen_repo_roots.contains(&current) {
+        let current_path = current_repo_root.to_path_buf();
         projects.push(TaskGuiProject {
             key: "@current".to_string(),
             name: "current".to_string(),
             repo_root: current,
             is_default: projects.is_empty(),
             is_current_repo: true,
+            last_activity_at_utc: detect_project_last_activity(&current_path),
+            last_opened_at_utc: None,
+            is_most_recent: false,
         });
     }
 
-    projects.sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
+    let most_recent_repo_root = projects
+        .iter()
+        .max_by(|lhs, rhs| {
+            task_gui_project_recent_timestamp(lhs)
+                .cmp(&task_gui_project_recent_timestamp(rhs))
+                .then_with(|| lhs.name.cmp(&rhs.name))
+        })
+        .map(|project| project.repo_root.clone());
+    for project in &mut projects {
+        project.is_most_recent =
+            most_recent_repo_root.as_deref() == Some(project.repo_root.as_str());
+    }
+    projects.sort_by(|lhs, rhs| {
+        rhs.is_most_recent
+            .cmp(&lhs.is_most_recent)
+            .then_with(|| {
+                task_gui_project_recent_timestamp(rhs).cmp(&task_gui_project_recent_timestamp(lhs))
+            })
+            .then_with(|| lhs.name.cmp(&rhs.name))
+    });
     Ok(projects)
 }
 
@@ -10605,6 +11081,9 @@ fn resolve_selected_task_gui_project<'a>(
         if let Some(project) = projects.iter().find(|project| project.name == token) {
             return Some(project);
         }
+    }
+    if let Some(project) = projects.iter().find(|project| project.is_most_recent) {
+        return Some(project);
     }
     if let Some(project) = projects.iter().find(|project| project.is_default) {
         return Some(project);
@@ -12157,7 +12636,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_selected_task_gui_project_prefers_selector_then_default() {
+    fn resolve_selected_task_gui_project_prefers_selector_then_most_recent_then_default() {
         let projects = vec![
             TaskGuiProject {
                 key: "alpha".to_string(),
@@ -12165,6 +12644,9 @@ mod tests {
                 repo_root: "/tmp/alpha".to_string(),
                 is_default: false,
                 is_current_repo: false,
+                last_activity_at_utc: Some("2026-03-01T00:00:00Z".to_string()),
+                last_opened_at_utc: None,
+                is_most_recent: true,
             },
             TaskGuiProject {
                 key: "beta".to_string(),
@@ -12172,13 +12654,33 @@ mod tests {
                 repo_root: "/tmp/beta".to_string(),
                 is_default: true,
                 is_current_repo: false,
+                last_activity_at_utc: Some("2026-02-01T00:00:00Z".to_string()),
+                last_opened_at_utc: None,
+                is_most_recent: false,
             },
         ];
         let selected =
             resolve_selected_task_gui_project(&projects, Some("alpha")).expect("selector");
         assert_eq!(selected.key, "alpha");
-        let fallback = resolve_selected_task_gui_project(&projects, None).expect("default");
-        assert_eq!(fallback.key, "beta");
+        let fallback = resolve_selected_task_gui_project(&projects, None).expect("recent");
+        assert_eq!(fallback.key, "alpha");
+    }
+
+    #[test]
+    fn project_recent_timestamp_prefers_newer_open_over_activity() {
+        let project = RegisteredProject {
+            name: "alpha".to_string(),
+            repo_root: "/tmp/alpha".to_string(),
+            added_at_utc: "2026-01-01T00:00:00Z".to_string(),
+            updated_at_utc: "2026-01-02T00:00:00Z".to_string(),
+            last_activity_at_utc: Some("2026-01-03T00:00:00Z".to_string()),
+            last_opened_at_utc: Some("2026-01-05T00:00:00Z".to_string()),
+        };
+        let timestamp = project_recent_activity_timestamp(&project).expect("timestamp");
+        assert_eq!(
+            timestamp,
+            parse_rfc3339_utc("2026-01-05T00:00:00Z").unwrap()
+        );
     }
 
     #[test]
