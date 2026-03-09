@@ -206,6 +206,7 @@ fugit --repo-root . task edit --task-id <task_id> --title "Updated title" --tag 
 fugit --repo-root . task remove --task-id <task_id>
 fugit --repo-root . task sync --plan the_final_plan.md --json
 fugit --repo-root . task request --agent agent.worker --no-claim --max 3 --json
+fugit --repo-root . task request --agent agent.worker --skip-owned --json
 fugit --repo-root . task reopen --task-id <task_id>
 ```
 

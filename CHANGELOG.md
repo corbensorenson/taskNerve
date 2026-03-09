@@ -17,6 +17,7 @@
 - Added structured checkpoint payloads via `checkpoint --json`, including machine-readable `missing_blobs[]` on recoverability failures.
 - Added plan reconciliation with `task sync --plan ...` and manual reopening via `task reopen`.
 - Added `task current`, `in_progress` as a status alias for `claimed`, and `bridge sync-github --repair-journal` for lossy recovery from malformed event journal lines.
+- Added `task request --skip-owned` so agents can pull the next ready task without re-dispatching their current claim.
 - Improved the Unix installer to print the installed version and warn when `PATH` still resolves to a different `fugit` binary.
 - Added multi-project registry (`project add|list|use|remove`) and GUI project switching to keep task streams isolated across repos.
 - Hardened release validation script to run dependency advisory checks with `cargo-audit` when available.

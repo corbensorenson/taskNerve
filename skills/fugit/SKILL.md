@@ -44,6 +44,8 @@ Use this skill when any of the following are true:
 5. Request next task (work-stealing by default on stale claims):
 - `fugit --repo-root . task request --agent <agent_id> --claim-ttl-minutes 30 --steal-after-minutes 90`
 - Optional routing hints: `--focus <token>`, `--prefix <token>`, `--contains <token>`, plus `--tag <tag>`
+- To bypass your currently claimed work and fetch the next ready task:
+- `fugit --repo-root . task request --agent <agent_id> --skip-owned --json`
 - optional dry assignment: `fugit --repo-root . task request --agent <agent_id> --no-claim`
 
 6. Capture progress as checkpoints:

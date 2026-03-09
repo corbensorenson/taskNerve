@@ -743,6 +743,8 @@ enum TaskAction {
         #[arg(long, default_value_t = false)]
         no_steal: bool,
         #[arg(long, default_value_t = false)]
+        skip_owned: bool,
+        #[arg(long, default_value_t = false)]
         no_claim: bool,
         #[arg(long, default_value_t = false)]
         json: bool,
@@ -3708,6 +3710,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             claim_ttl_minutes,
             steal_after_minutes,
             no_steal,
+            skip_owned,
             no_claim,
             json,
         } => {
@@ -3723,6 +3726,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 &agent_id,
                 &filters,
                 !no_steal,
+                !skip_owned,
                 steal_after_minutes,
                 now,
                 max,
@@ -3740,6 +3744,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     "assigned_count": 0,
                     "claimed": false,
                     "max": max,
+                    "skip_owned": skip_owned,
                     "filters": {
                         "tags": filters.required_tags,
                         "focus": filters.focus,
@@ -3803,6 +3808,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 "assigned_count": task_rows.len(),
                 "claimed": claimed,
                 "max": max,
+                "skip_owned": skip_owned,
                 "dispatch_kind": dispatch_kind.as_str(),
                 "filters": {
                     "tags": filters.required_tags,
@@ -6050,6 +6056,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "claim_ttl_minutes": { "type": "integer" },
                     "steal_after_minutes": { "type": "integer" },
                     "no_steal": { "type": "boolean" },
+                    "skip_owned": { "type": "boolean" },
                     "no_claim": { "type": "boolean" }
                 }
             }
@@ -6761,6 +6768,13 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 .unwrap_or(false)
             {
                 cli_args.push("--no-steal".to_string());
+            }
+            if args
+                .get("skip_owned")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--skip-owned".to_string());
             }
             if args
                 .get("no_claim")
@@ -9141,6 +9155,7 @@ fn select_task_for_agent(
     agent_id: &str,
     filters: &TaskQueryFilter,
     allow_steal: bool,
+    include_owned_claims: bool,
     steal_after_minutes: i64,
     now: DateTime<Utc>,
 ) -> Option<(usize, TaskDispatchKind)> {
@@ -9149,6 +9164,7 @@ fn select_task_for_agent(
         agent_id,
         filters,
         allow_steal,
+        include_owned_claims,
         steal_after_minutes,
         now,
         1,
@@ -9162,6 +9178,7 @@ fn select_task_candidates_for_agent(
     agent_id: &str,
     filters: &TaskQueryFilter,
     allow_steal: bool,
+    include_owned_claims: bool,
     steal_after_minutes: i64,
     now: DateTime<Utc>,
     max: usize,
@@ -9187,7 +9204,7 @@ fn select_task_candidates_for_agent(
         match task.status {
             TaskStatus::Open => open_tasks.push(idx),
             TaskStatus::Claimed => {
-                if task.claimed_by_agent_id.as_deref() == Some(agent_id) {
+                if include_owned_claims && task.claimed_by_agent_id.as_deref() == Some(agent_id) {
                     owned_claims.push(idx);
                 } else if allow_steal && task_claim_is_stale(task, now, steal_after_minutes) {
                     stealable_tasks.push(idx);
@@ -9979,6 +9996,7 @@ mod tests {
                 ..Default::default()
             },
             true,
+            true,
             90,
             Utc::now(),
         );
@@ -10023,6 +10041,7 @@ mod tests {
             "agent.worker",
             &TaskQueryFilter::default(),
             true,
+            true,
             30,
             now,
         )
@@ -10035,10 +10054,94 @@ mod tests {
             "agent.worker",
             &TaskQueryFilter::default(),
             false,
+            true,
             30,
             now,
         );
         assert!(blocked.is_none());
+    }
+
+    #[test]
+    fn task_request_can_skip_owned_claims() {
+        let now = Utc::now();
+        let state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![
+                FugitTask {
+                    task_id: "task_owned".to_string(),
+                    title: "owned".to_string(),
+                    detail: None,
+                    priority: 100,
+                    tags: vec![],
+                    depends_on: vec![],
+                    status: TaskStatus::Claimed,
+                    created_at_utc: "2026-03-01T00:00:00Z".to_string(),
+                    updated_at_utc: now_utc(),
+                    created_by_agent_id: "agent.a".to_string(),
+                    claimed_by_agent_id: Some("agent.worker".to_string()),
+                    claim_started_at_utc: Some(format_utc(now - Duration::minutes(10))),
+                    claim_expires_at_utc: Some(format_utc(now + Duration::minutes(20))),
+                    completed_at_utc: None,
+                    completed_by_agent_id: None,
+                    completed_summary: None,
+                    completion_notes: Vec::new(),
+                    completion_artifacts: Vec::new(),
+                    completion_commands: Vec::new(),
+                    source_key: None,
+                    source_plan: None,
+                },
+                FugitTask {
+                    task_id: "task_open".to_string(),
+                    title: "open".to_string(),
+                    detail: None,
+                    priority: 5,
+                    tags: vec![],
+                    depends_on: vec![],
+                    status: TaskStatus::Open,
+                    created_at_utc: "2026-03-02T00:00:00Z".to_string(),
+                    updated_at_utc: now_utc(),
+                    created_by_agent_id: "agent.a".to_string(),
+                    claimed_by_agent_id: None,
+                    claim_started_at_utc: None,
+                    claim_expires_at_utc: None,
+                    completed_at_utc: None,
+                    completed_by_agent_id: None,
+                    completed_summary: None,
+                    completion_notes: Vec::new(),
+                    completion_artifacts: Vec::new(),
+                    completion_commands: Vec::new(),
+                    source_key: None,
+                    source_plan: None,
+                },
+            ],
+        };
+
+        let owned = select_task_for_agent(
+            &state,
+            "agent.worker",
+            &TaskQueryFilter::default(),
+            true,
+            true,
+            90,
+            now,
+        )
+        .expect("expected owned claim");
+        assert_eq!(owned.1, TaskDispatchKind::OwnedClaim);
+        assert_eq!(state.tasks[owned.0].task_id, "task_owned");
+
+        let skipped = select_task_for_agent(
+            &state,
+            "agent.worker",
+            &TaskQueryFilter::default(),
+            true,
+            false,
+            90,
+            now,
+        )
+        .expect("expected open task when skipping owned");
+        assert_eq!(skipped.1, TaskDispatchKind::Open);
+        assert_eq!(state.tasks[skipped.0].task_id, "task_open");
     }
 
     #[test]

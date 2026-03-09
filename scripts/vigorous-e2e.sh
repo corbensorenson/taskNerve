@@ -135,7 +135,6 @@ import json,sys
 print(json.load(open(sys.argv[1]))["task_id"])
 PY
 )"
-"$BIN" --repo-root "$REPO_A" task remove --task-id "$TASK_C" --agent agent.c >/dev/null
 "$BIN" --repo-root "$REPO_A" task request --agent agent.runner --no-claim --max 2 --json >"$TMP_ROOT/task-request-preview.json"
 json_assert "$TMP_ROOT/task-request-preview.json" 'payload.get("assigned_count", 0) >= 1 and isinstance(payload.get("tasks"), list)' "task request preview should return a prioritized slice"
 "$BIN" --repo-root "$REPO_A" task request --agent agent.runner --focus root --json >"$TMP_ROOT/task-request-1.json"
@@ -144,11 +143,15 @@ json_assert "$TMP_ROOT/task-request-1.json" 'payload.get("assigned") is True and
 json_assert "$TMP_ROOT/task-current.json" 'payload.get("found") is True and payload.get("task",{}).get("task_id") == "'"$TASK_A"'"' "task current should return the active claim for the agent"
 "$BIN" --repo-root "$REPO_A" task list --status in_progress --json >"$TMP_ROOT/task-in-progress.json"
 json_assert "$TMP_ROOT/task-in-progress.json" 'any(row.get("task_id") == "'"$TASK_A"'" for row in payload)' "task list should accept in_progress as a claimed-task alias"
+"$BIN" --repo-root "$REPO_A" task request --agent agent.runner --skip-owned --json >"$TMP_ROOT/task-request-skip-owned.json"
+json_assert "$TMP_ROOT/task-request-skip-owned.json" 'payload.get("dispatch_kind") == "open" and payload.get("task",{}).get("task_id") == "'"$TASK_C"'" and payload.get("skip_owned") is True' "task request --skip-owned should bypass the agent's existing claim"
+"$BIN" --repo-root "$REPO_A" task release --task-id "$TASK_C" --agent agent.runner >/dev/null
 "$BIN" --repo-root "$REPO_A" task done --task-id "$TASK_A" --agent agent.runner --summary "root lane complete" --artifact "$TMP_ROOT/task-a-edit.json" --command "cargo test" >/dev/null
 "$BIN" --repo-root "$REPO_A" task request --agent agent.runner --json >"$TMP_ROOT/task-request-2.json"
 json_assert "$TMP_ROOT/task-request-2.json" 'payload.get("assigned") is True' "second task request should assign dependent task after completion"
 "$BIN" --repo-root "$REPO_A" task show --task-id "$TASK_A" --json >"$TMP_ROOT/task-a-done.json"
 json_assert "$TMP_ROOT/task-a-done.json" 'payload.get("completed_summary") == "root lane complete" and "cargo test" in payload.get("completion_commands", [])' "task show should include completion metadata"
+"$BIN" --repo-root "$REPO_A" task remove --task-id "$TASK_C" --agent agent.c >/dev/null
 "$BIN" --repo-root "$REPO_A" log --limit 50 --json >"$TMP_ROOT/log-task.json"
 json_assert "$TMP_ROOT/log-task.json" 'any("task done:" in row.get("summary","") for row in payload)' "task actions should be mirrored into timeline events"
 json_assert "$TMP_ROOT/log-task.json" 'any("task edit:" in row.get("summary","") for row in payload) and any("task remove:" in row.get("summary","") for row in payload)' "edit/remove actions should be mirrored into timeline events"
