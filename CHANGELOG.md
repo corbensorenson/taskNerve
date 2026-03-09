@@ -18,6 +18,7 @@
 - Added plan reconciliation with `task sync --plan ...` and manual reopening via `task reopen`.
 - Added `task current`, `in_progress` as a status alias for `claimed`, and `bridge sync-github --repair-journal` for lossy recovery from malformed event journal lines.
 - Added `task request --skip-owned` so agents can pull the next ready task without re-dispatching their current claim.
+- Added `task status`, `task progress`, `task list --mine`, date-gated task filtering with `task request --ignore-date-gates`, and `task done --claim-next` for tighter agent execution loops.
 - Added default-on task auto-replenish fallback: when no real work is dispatchable, `task request` seeds per-agent scout tasks, with `task policy show|set`, `task approve`, GUI approval controls, and MCP tools for operating the flow.
 - Added default-on background bridge auto-sync after `task done`, with task-note commit subjects, `bridge auto-sync show|set`, and manual detached `bridge sync-github --background`.
 - Added default-on quality gates: `task done` now registers regression/benchmark checks, `check add|list|run|deprecate|policy` manages them, and bridge sync runs active checks before commit/push.
@@ -28,6 +29,8 @@
 - Improved the Unix installer to print the installed version and warn when `PATH` still resolves to a different `fugit` binary.
 - Added multi-project registry (`project add|list|use|remove`) and GUI project switching to keep task streams isolated across repos.
 - Hardened release validation script to run dependency advisory checks with `cargo-audit` when available.
+- Fixed the public release-check installer smoke path so it no longer writes temporary `/tmp` binaries into real shell startup files.
+- Added checkpoint repair aliases `--repair-missing-blobs` and `--allow-baseline-reseed` for one-command recoverability repair from the original checkpoint context.
 - Removed project-specific identifiers from README examples to keep docs fingerprint-neutral.
 - Documented advisor/runtime privacy expectations so credentials and personal data stay out of tracked project files.
 - Integrated task lifecycle operations with timeline events (`task add|edit|claim|done|release|remove`).

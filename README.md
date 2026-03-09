@@ -130,9 +130,11 @@ After migration, use fugit for daily coordination (`task`, `checkpoint`, `log`),
 fugit --repo-root . task import --file /path/to/tasks.tsv
 fugit --repo-root . task sync --plan /path/to/the_final_plan.md
 fugit --repo-root . task request --agent agent.worker --focus compiler
+fugit --repo-root . task request --agent agent.worker --title-contains "Phase B"
 fugit --repo-root . task request --agent agent.worker --task-id <task_id>
+fugit --repo-root . task progress --task-id <task_id> --agent agent.worker --note "landed parser wiring"
 fugit --repo-root . checkpoint --summary "implemented feature X" --agent agent.worker --tag feature
-fugit --repo-root . task done --task-id <task_id> --agent agent.worker --summary "validated feature X" --command "cargo test" --regression "cargo test"
+fugit --repo-root . task done --task-id <task_id> --agent agent.worker --summary "validated feature X" --command "cargo test" --regression "cargo test" --claim-next
 fugit --repo-root . log --limit 20
 ```
 
@@ -145,6 +147,8 @@ fugit --repo-root . task add --title "Implement feature X" --priority 10 --tag f
 Task lifecycle operations (`add`, `edit`, `claim`, `done`, `reopen`, `release`, `remove`) are mirrored into timeline events.
 
 By default, `task request` also auto-seeds one queue-scout task per known agent when no real work is dispatchable. Use `task policy` to turn this off or require explicit approval before those scout tasks can be claimed.
+
+By default, `task request` respects date gates discovered from tags like `not_before:2026-04-21` or from task text like `2026-04-21 through 2026-06-01`. Use `--ignore-date-gates` only when you intentionally want to bypass that scheduling guard.
 
 By default, `task done` requires at least one regression or benchmark check (`--regression ...` / `--benchmark ...`) unless the task already has an active registered check. Those checks are then executed automatically before `bridge sync-github`, including background auto-sync after task completion. Use `fugit check deprecate --check-id ...` when a test is obsolete instead of silently deleting the record.
 
@@ -282,9 +286,12 @@ Task maintenance from CLI:
 fugit project discover --json
 fugit --repo-root . task show --task-id <task_id>
 fugit --repo-root . task current --agent <agent_id> --json
+fugit --repo-root . task status --agent <agent_id> --json
+fugit --repo-root . task list --agent <agent_id> --mine --json
 fugit --repo-root . task list --jsonl --fields task_id,title,status
 fugit --repo-root . task list --status in_progress --json
 fugit --repo-root . task edit --task-id <task_id> --title "Updated title" --tag compiler
+fugit --repo-root . task progress --task-id <task_id> --note "waiting on benchmark rerun"
 fugit --repo-root . task remove --task-id <task_id>
 fugit --repo-root . task approve --all-pending-auto-replenish --agent reviewer
 fugit --repo-root . task policy show --json
@@ -303,7 +310,9 @@ fugit --repo-root . bridge sync-github --background --note "manual backup sweep"
 fugit --repo-root . task sync --plan the_final_plan.md --json
 fugit --repo-root . task request --agent agent.worker --no-claim --max 3 --json
 fugit --repo-root . task request --agent agent.worker --skip-owned --json
+fugit --repo-root . task request --agent agent.worker --title-contains "compiler" --json
 fugit --repo-root . task request --agent agent.worker --task-id <task_id> --json
+fugit --repo-root . task done --task-id <task_id> --claim-next --json
 fugit --repo-root . task reopen --task-id <task_id>
 ```
 
@@ -312,6 +321,8 @@ Recoverability repair:
 ```bash
 fugit --repo-root . doctor --fix
 fugit --repo-root . checkpoint --summary "..." --repair auto
+fugit --repo-root . checkpoint --summary "..." --repair-missing-blobs
+fugit --repo-root . checkpoint --summary "..." --allow-baseline-reseed
 fugit --repo-root . checkpoint --summary "..." --repair lossy
 fugit --repo-root . checkpoint --summary "..." --json
 fugit --repo-root . bridge sync-github --no-push --repair-journal

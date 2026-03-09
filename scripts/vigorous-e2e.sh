@@ -181,6 +181,11 @@ print(json.load(open(sys.argv[1]))["task_id"])
 PY
 )"
 "$BIN" --repo-root "$REPO_A" task add --title "task-b" --priority 5 --depends-on "$TASK_A" --agent agent.b --json >"$TMP_ROOT/task-b.json"
+TASK_B="$(python3 - "$TMP_ROOT/task-b.json" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1]))["task_id"])
+PY
+)"
 "$BIN" --repo-root "$REPO_A" task edit --task-id "$TASK_A" --detail "root task" --tag root --agent agent.a --json >"$TMP_ROOT/task-a-edit.json"
 json_assert "$TMP_ROOT/task-a-edit.json" 'payload.get("detail") == "root task" and "root" in payload.get("tags", [])' "task edit should replace requested fields"
 "$BIN" --repo-root "$REPO_A" task show --task-id "$TASK_A" --json >"$TMP_ROOT/task-a-show.json"
@@ -201,23 +206,39 @@ import json,sys
 print(json.load(open(sys.argv[1]))["task_id"])
 PY
 )"
+"$BIN" --repo-root "$REPO_A" task add --title "Execute Phase B deliverables (2026-04-21 through 2026-06-01)" --priority 60 --agent agent.schedule --json >"$TMP_ROOT/task-gated.json"
+TASK_GATED="$(python3 - "$TMP_ROOT/task-gated.json" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1]))["task_id"])
+PY
+)"
+"$BIN" --repo-root "$REPO_A" task request --agent agent.scheduler --title-contains "Phase B" --no-claim --json >"$TMP_ROOT/task-request-gated-blocked.json"
+json_assert "$TMP_ROOT/task-request-gated-blocked.json" 'payload.get("assigned") is False and payload.get("respect_date_gates") is True and payload.get("filters", {}).get("title_contains") == "Phase B"' "task request should skip date-gated tasks by default"
+"$BIN" --repo-root "$REPO_A" task request --agent agent.scheduler --task-id "$TASK_GATED" --ignore-date-gates --no-claim --json >"$TMP_ROOT/task-request-gated-override.json"
+json_assert "$TMP_ROOT/task-request-gated-override.json" 'payload.get("assigned") is True and payload.get("task",{}).get("task_id") == "'"$TASK_GATED"'" and payload.get("respect_date_gates") is False' "task request should allow explicit date-gate override"
 "$BIN" --repo-root "$REPO_A" task request --agent agent.runner --no-claim --max 2 --json >"$TMP_ROOT/task-request-preview.json"
 json_assert "$TMP_ROOT/task-request-preview.json" 'payload.get("assigned_count", 0) >= 1 and isinstance(payload.get("tasks"), list)' "task request preview should return a prioritized slice"
 "$BIN" --repo-root "$REPO_A" task request --agent agent.runner --focus root --json >"$TMP_ROOT/task-request-1.json"
 json_assert "$TMP_ROOT/task-request-1.json" 'payload.get("assigned") is True and payload.get("task",{}).get("task_id") is not None' "task request should assign a task"
 "$BIN" --repo-root "$REPO_A" task current --agent agent.runner --json >"$TMP_ROOT/task-current.json"
 json_assert "$TMP_ROOT/task-current.json" 'payload.get("found") is True and payload.get("task",{}).get("task_id") == "'"$TASK_A"'"' "task current should return the active claim for the agent"
+"$BIN" --repo-root "$REPO_A" task status --agent agent.runner --json >"$TMP_ROOT/task-status.json"
+json_assert "$TMP_ROOT/task-status.json" 'payload.get("counts", {}).get("mine_claimed") == 1 and payload.get("current", {}).get("task_id") == "'"$TASK_A"'"' "task status should summarize the agent queue and current claim"
+"$BIN" --repo-root "$REPO_A" task list --agent agent.runner --mine --json >"$TMP_ROOT/task-mine.json"
+json_assert "$TMP_ROOT/task-mine.json" 'len(payload) == 1 and payload[0].get("task_id") == "'"$TASK_A"'"' "task list --mine should return only the agent-owned claim"
 "$BIN" --repo-root "$REPO_A" task list --status in_progress --json >"$TMP_ROOT/task-in-progress.json"
 json_assert "$TMP_ROOT/task-in-progress.json" 'any(row.get("task_id") == "'"$TASK_A"'" for row in payload)' "task list should accept in_progress as a claimed-task alias"
 "$BIN" --repo-root "$REPO_A" task request --agent agent.runner --skip-owned --json >"$TMP_ROOT/task-request-skip-owned.json"
 json_assert "$TMP_ROOT/task-request-skip-owned.json" 'payload.get("dispatch_kind") == "open" and payload.get("task",{}).get("task_id") in {"'"$TASK_C"'","'"$TASK_D"'"} and payload.get("skip_owned") is True' "task request --skip-owned should bypass the agent's existing claim"
+"$BIN" --repo-root "$REPO_A" task progress --task-id "$TASK_A" --agent agent.runner --note "implemented root workflow" --json >"$TMP_ROOT/task-progress.json"
+json_assert "$TMP_ROOT/task-progress.json" 'payload.get("progress_count") == 1 and payload.get("last_progress_note") == "implemented root workflow"' "task progress should append an execution breadcrumb"
 if "$BIN" --repo-root "$REPO_A" task done --task-id "$TASK_D" --agent agent.runner >/dev/null 2>&1; then
   echo "[vigorous-e2e] expected task done to require a regression or benchmark check by default" >&2
   exit 1
 fi
 "$BIN" --repo-root "$REPO_A" task release --task-id "$TASK_C" --agent agent.runner >/dev/null
-"$BIN" --repo-root "$REPO_A" task done --task-id "$TASK_A" --agent agent.runner --summary "root lane complete" --artifact "$TMP_ROOT/task-a-edit.json" --command "cargo test" --regression "test -f README.txt" --json >"$TMP_ROOT/task-done.json"
-json_assert "$TMP_ROOT/task-done.json" 'payload.get("completed_summary") == "root lane complete" and payload.get("auto_bridge_sync", {}).get("status") is not None and payload.get("quality_checks", {}).get("created_count") == 1' "task done should include completion metadata, quality checks, and auto bridge sync status"
+"$BIN" --repo-root "$REPO_A" task done --task-id "$TASK_A" --agent agent.runner --summary "root lane complete" --artifact "$TMP_ROOT/task-a-edit.json" --command "cargo test" --regression "test -f README.txt" --claim-next --json >"$TMP_ROOT/task-done.json"
+json_assert "$TMP_ROOT/task-done.json" 'payload.get("completed_summary") == "root lane complete" and payload.get("auto_bridge_sync", {}).get("status") is not None and payload.get("quality_checks", {}).get("created_count") == 1 and payload.get("claim_next", {}).get("task", {}).get("task", {}).get("task_id") == "'"$TASK_B"'"' "task done should include completion metadata, quality checks, auto bridge sync status, and claim the next ready task"
 wait_for_auto_sync "$REPO_A"
 "$BIN" --repo-root "$REPO_A" bridge auto-sync show --json >"$TMP_ROOT/auto-sync-after-task-done.json"
 json_assert "$TMP_ROOT/auto-sync-after-task-done.json" 'payload.get("status") in {"success","committed_local","noop"} and "task done:" in (payload.get("last_note") or "") and payload.get("last_trigger") == "task_done"' "task done should queue bridge auto-sync with task note"
@@ -226,16 +247,16 @@ if [[ "$AUTO_SYNC_SUBJECT" != timeline\ sync:\ task\ done:* ]]; then
   echo "[vigorous-e2e] unexpected auto-sync subject: $AUTO_SYNC_SUBJECT" >&2
   exit 1
 fi
-"$BIN" --repo-root "$REPO_A" task request --agent agent.runner --json >"$TMP_ROOT/task-request-2.json"
-json_assert "$TMP_ROOT/task-request-2.json" 'payload.get("assigned") is True' "second task request should assign dependent task after completion"
+"$BIN" --repo-root "$REPO_A" task current --agent agent.runner --json >"$TMP_ROOT/task-current-after-done.json"
+json_assert "$TMP_ROOT/task-current-after-done.json" 'payload.get("task", {}).get("task_id") == "'"$TASK_B"'"' "task done --claim-next should make the next task current immediately"
 "$BIN" --repo-root "$REPO_A" task show --task-id "$TASK_A" --json >"$TMP_ROOT/task-a-done.json"
-json_assert "$TMP_ROOT/task-a-done.json" 'payload.get("completed_summary") == "root lane complete" and "cargo test" in payload.get("completion_commands", [])' "task show should include completion metadata"
+json_assert "$TMP_ROOT/task-a-done.json" 'payload.get("completed_summary") == "root lane complete" and "cargo test" in payload.get("completion_commands", []) and payload.get("progress_count") == 1' "task show should include completion metadata and progress breadcrumbs"
 "$BIN" --repo-root "$REPO_A" check list --json >"$TMP_ROOT/check-list.json"
 json_assert "$TMP_ROOT/check-list.json" 'any(row.get("task_id") == "'"$TASK_A"'" and row.get("kind") == "regression" for row in payload)' "task done should register a regression check"
 "$BIN" --repo-root "$REPO_A" task remove --task-id "$TASK_C" --agent agent.c >/dev/null
 "$BIN" --repo-root "$REPO_A" log --limit 50 --json >"$TMP_ROOT/log-task.json"
 json_assert "$TMP_ROOT/log-task.json" 'any("task done:" in row.get("summary","") for row in payload)' "task actions should be mirrored into timeline events"
-json_assert "$TMP_ROOT/log-task.json" 'any("task edit:" in row.get("summary","") for row in payload) and any("task remove:" in row.get("summary","") for row in payload) and any("check add:" in row.get("summary","") for row in payload)' "task and check actions should be mirrored into timeline events"
+json_assert "$TMP_ROOT/log-task.json" 'any("task edit:" in row.get("summary","") for row in payload) and any("task remove:" in row.get("summary","") for row in payload) and any("check add:" in row.get("summary","") for row in payload) and any("task progress:" in row.get("summary","") for row in payload)' "task and check actions should be mirrored into timeline events"
 
 echo "[vigorous-e2e] auto replenish policy"
 "$BIN" --repo-root "$REPO_B" init --branch trunk >/dev/null
@@ -548,6 +569,8 @@ if "$BIN" --repo-root "$REPO_C" checkpoint --summary "gamma" --json >"$TMP_ROOT/
   exit 1
 fi
 json_assert "$TMP_ROOT/checkpoint-error.json" 'payload.get("ok") is False and payload.get("error", {}).get("code") == "missing_old_objects" and len(payload.get("error", {}).get("missing_blobs", [])) >= 1' "checkpoint --json should emit structured failure payload"
+"$BIN" --repo-root "$REPO_C" checkpoint --summary "gamma repaired" --repair-missing-blobs --json >"$TMP_ROOT/checkpoint-repair-alias.json"
+json_assert "$TMP_ROOT/checkpoint-repair-alias.json" 'payload.get("ok") is True and payload.get("repair_mode") == "auto"' "checkpoint --repair-missing-blobs should act as an auto-repair alias"
 printf '{"broken":\n' >>"$REPO_C/.fugit/branches/trunk/events.jsonl"
 echo "delta" >>"$REPO_C/tracked.txt"
 "$BIN" --repo-root "$REPO_C" bridge sync-github --no-push --repair-journal >/dev/null

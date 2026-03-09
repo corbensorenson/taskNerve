@@ -22,8 +22,10 @@ fi
 
 echo "[release-check] installer smoke (unix)"
 TMP_BIN="$(mktemp -d /tmp/fugit-alpha-release-bin-XXXXXX)"
+TMP_HOME="$(mktemp -d /tmp/fugit-alpha-release-home-XXXXXX)"
 CODEX_HOME="$(mktemp -d /tmp/fugit-alpha-release-codex-XXXXXX)" \
-  bash ./install.sh --install-dir "$TMP_BIN" --skip-rust-install --with-skill --overwrite-skill
+HOME="$TMP_HOME" \
+  bash ./install.sh --install-dir "$TMP_BIN" --no-path-update --skip-rust-install --with-skill --overwrite-skill
 "$TMP_BIN/fugit" --help >/dev/null
 "$TMP_BIN/fugit" skill doctor >/dev/null
 

@@ -43,9 +43,10 @@ Use this skill when any of the following are true:
 
 5. Request next task (work-stealing by default on stale claims):
 - `fugit --repo-root . task request --agent <agent_id> --claim-ttl-minutes 30 --steal-after-minutes 90`
-- Optional routing hints: `--focus <token>`, `--prefix <token>`, `--contains <token>`, plus `--tag <tag>`
+- Optional routing hints: `--focus <token>`, `--prefix <token>`, `--contains <token>`, `--title-contains <token>`, plus `--tag <tag>`
 - When the queue is genuinely exhausted, `task request` will auto-seed per-agent scout tasks by default so agents can replenish backlog instead of stalling.
 - When standard work gets low, `task request` can also queue advisor review/task-manager runs in the background so backlog generation does not stall.
+- Date gates are respected by default when tasks carry `not_before:` tags or date windows in title/detail text. Use `--ignore-date-gates` only when you intentionally want to bypass that schedule gate.
 - To require human approval before those scout tasks run:
 - `fugit --repo-root . task policy set --auto-replenish-confirmation true --agent <agent_id>`
 - To approve them explicitly:
@@ -63,6 +64,10 @@ Use this skill when any of the following are true:
 
 7. Mark tasks done or release claim:
 - `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --summary "<what finished>" --regression "<test command>"`
+- To leave a lightweight execution breadcrumb without changing task state:
+- `fugit --repo-root . task progress --task-id <task_id> --agent <agent_id> --note "<what changed>"`
+- To close work and pull the next ready item in one round trip:
+- `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --claim-next --regression "<test command>"`
 - Default quality gate is on: every completed task should carry at least one regression or benchmark check, and active checks run before bridge sync.
 - Register or retire checks explicitly when needed:
 - `fugit --repo-root . check add --kind regression --task-id <task_id> --command "<test command>"`
@@ -86,9 +91,12 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . task show --task-id <task_id>`
 - Inspect your active claim directly:
 - `fugit --repo-root . task current --agent <agent_id> --json`
+- Inspect your queue/ownership summary directly:
+- `fugit --repo-root . task status --agent <agent_id> --json`
 - For compact queue scans:
 - `fugit --repo-root . task list --jsonl --fields task_id,title,status`
 - `fugit --repo-root . task list --status in_progress --json`
+- `fugit --repo-root . task list --agent <agent_id> --mine --json`
 - Inspect or change auto-replenish policy:
 - `fugit --repo-root . task policy show --json`
 - `fugit --repo-root . task policy set --auto-replenish-enabled false --agent <agent_id>`
@@ -133,6 +141,8 @@ Use this skill when any of the following are true:
 Recoverability repair:
 - `fugit --repo-root . doctor --fix`
 - `fugit --repo-root . checkpoint --summary "..." --repair auto`
+- `fugit --repo-root . checkpoint --summary "..." --repair-missing-blobs`
+- `fugit --repo-root . checkpoint --summary "..." --allow-baseline-reseed`
 - `fugit --repo-root . checkpoint --summary "..." --repair lossy`
 - For malformed event journals during bridge export:
 - `fugit --repo-root . bridge sync-github --no-push --repair-journal`

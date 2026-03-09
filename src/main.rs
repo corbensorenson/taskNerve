@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use globset::Glob;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -197,6 +197,10 @@ struct CheckpointArgs {
     burst: bool,
     #[arg(long, value_enum, default_value_t = CheckpointRepairModeArg::Auto)]
     repair: CheckpointRepairModeArg,
+    #[arg(long, default_value_t = false)]
+    repair_missing_blobs: bool,
+    #[arg(long, default_value_t = false)]
+    allow_baseline_reseed: bool,
     #[arg(long, hide = true, default_value_t = false)]
     allow_lossy_repair: bool,
     #[arg(long, default_value_t = false)]
@@ -915,6 +919,8 @@ struct FugitTask {
     approved_at_utc: Option<String>,
     #[serde(default)]
     approved_by_agent_id: Option<String>,
+    #[serde(default)]
+    progress_entries: Vec<TaskProgressEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -922,6 +928,13 @@ struct TaskState {
     schema_version: String,
     updated_at_utc: String,
     tasks: Vec<FugitTask>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TaskProgressEntry {
+    at_utc: String,
+    agent_id: String,
+    note: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1194,6 +1207,7 @@ struct TaskQueryFilter {
     focus: Option<String>,
     prefix: Option<String>,
     contains: Option<String>,
+    title_contains: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1410,11 +1424,19 @@ enum TaskAction {
         #[arg(long)]
         agent: Option<String>,
         #[arg(long, default_value_t = false)]
+        mine: bool,
+        #[arg(long, default_value_t = false)]
         ready_only: bool,
         #[arg(long, value_delimiter = ',')]
         fields: Vec<String>,
         #[arg(long, default_value_t = 200)]
         limit: usize,
+    },
+    Status {
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     Show {
         #[arg(long)]
@@ -1533,6 +1555,8 @@ enum TaskAction {
         prefix: Option<String>,
         #[arg(long)]
         contains: Option<String>,
+        #[arg(long)]
+        title_contains: Option<String>,
         #[arg(long, default_value_t = 1)]
         max: usize,
         #[arg(long, default_value_t = 30)]
@@ -1543,6 +1567,8 @@ enum TaskAction {
         no_steal: bool,
         #[arg(long, default_value_t = false)]
         skip_owned: bool,
+        #[arg(long, default_value_t = false)]
+        ignore_date_gates: bool,
         #[arg(long, default_value_t = false)]
         no_claim: bool,
         #[arg(long, default_value_t = false)]
@@ -1579,6 +1605,20 @@ enum TaskAction {
         benchmarks: Vec<String>,
         #[arg(long, default_value_t = false)]
         skip_check_requirement: bool,
+        #[arg(long, default_value_t = false)]
+        claim_next: bool,
+        #[arg(long, default_value_t = false)]
+        next_ignore_date_gates: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Progress {
+        #[arg(long)]
+        task_id: String,
+        #[arg(long)]
+        note: String,
+        #[arg(long)]
+        agent: Option<String>,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -2048,6 +2088,8 @@ fn cmd_quickstart(repo_root: &Path, args: QuickstartArgs) -> Result<()> {
             object_jobs: None,
             burst: false,
             repair: CheckpointRepairModeArg::Auto,
+            repair_missing_blobs: false,
+            allow_baseline_reseed: false,
             allow_lossy_repair: false,
             json: false,
         },
@@ -2573,7 +2615,12 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
     let hash_jobs = resolve_parallel_jobs(args.hash_jobs, args.burst);
     let object_jobs = resolve_parallel_jobs(args.object_jobs.or(args.hash_jobs), args.burst);
     let new_index = scan_repo(repo_root, Some(&old_index), args.strict_hash, hash_jobs)?;
-    let repair_mode = resolve_checkpoint_repair_mode(args.repair, args.allow_lossy_repair);
+    let repair_mode = resolve_checkpoint_repair_mode(
+        args.repair,
+        args.repair_missing_blobs,
+        args.allow_baseline_reseed,
+        args.allow_lossy_repair,
+    );
 
     let allowed_paths = args
         .files
@@ -2641,7 +2688,7 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
                 .collect::<Vec<_>>()
                 .join("\n");
             let message = format!(
-                "checkpoint would lose recoverability because old object blobs are missing:\n{}\nRecreate the baseline snapshot first (for new repos, run `fugit init` before edits).\nTry `fugit doctor --fix` for safe Git-backed repair, rerun with `--repair auto` to auto-heal during checkpoint, or use `--repair lossy` only when those blobs are irrecoverable.",
+                "checkpoint would lose recoverability because old object blobs are missing:\n{}\nRecreate the baseline snapshot first (for new repos, run `fugit init` before edits).\nTry `fugit doctor --fix` for safe Git-backed repair, rerun with `--repair auto` or `--repair-missing-blobs` to auto-heal during checkpoint, or use `--repair lossy` only when those blobs are irrecoverable.",
                 rendered_missing,
             );
             if args.json {
@@ -2657,6 +2704,11 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
                         format!("fugit --repo-root {} doctor --fix", repo_root.display()),
                         format!(
                             "fugit --repo-root {} checkpoint --summary {:?} --repair auto",
+                            repo_root.display(),
+                            args.summary.trim()
+                        ),
+                        format!(
+                            "fugit --repo-root {} checkpoint --summary {:?} --repair-missing-blobs",
                             repo_root.display(),
                             args.summary.trim()
                         ),
@@ -4404,6 +4456,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             jsonl,
             status,
             agent,
+            mine,
             ready_only,
             fields,
             limit,
@@ -4416,6 +4469,11 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
             }
             let status_map = task_status_map(&state);
+            let mine_agent_id = if mine {
+                Some(normalize_agent_id(agent.clone()))
+            } else {
+                None
+            };
             let mut indices: Vec<usize> = (0..state.tasks.len()).collect();
             sort_task_indices(&state, &mut indices);
             let mut rows = Vec::<serde_json::Value>::new();
@@ -4426,11 +4484,20 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 {
                     continue;
                 }
+                if let Some(agent_id) = mine_agent_id.as_deref()
+                    && task.claimed_by_agent_id.as_deref() != Some(agent_id)
+                {
+                    continue;
+                }
                 if let Some(agent_filter) = agent.as_deref() {
-                    let touches_agent = task.created_by_agent_id == agent_filter
-                        || task.claimed_by_agent_id.as_deref() == Some(agent_filter)
-                        || task.completed_by_agent_id.as_deref() == Some(agent_filter);
-                    if !touches_agent {
+                    let matches_agent = if mine {
+                        task.claimed_by_agent_id.as_deref() == Some(agent_filter)
+                    } else {
+                        task.created_by_agent_id == agent_filter
+                            || task.claimed_by_agent_id.as_deref() == Some(agent_filter)
+                            || task.completed_by_agent_id.as_deref() == Some(agent_filter)
+                    };
+                    if !matches_agent {
                         continue;
                     }
                 }
@@ -4500,6 +4567,30 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                         task_id, status, priority, ready, claimed_by, title
                     );
                 }
+            }
+        }
+        TaskAction::Status { agent, json } => {
+            if state_changed {
+                state.updated_at_utc = now_utc();
+                write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+            }
+            let agent_id = normalize_agent_id(agent);
+            let payload = task_status_summary_payload(repo_root, &state, &agent_id);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!(
+                    "[fugit-task-status] agent={} mine={} ready_open={} blocked_open={} date_gated_open={} next={}",
+                    payload["agent_id"].as_str().unwrap_or("unknown"),
+                    payload["counts"]["mine_claimed"].as_u64().unwrap_or(0),
+                    payload["counts"]["ready_open"].as_u64().unwrap_or(0),
+                    payload["counts"]["blocked_open"].as_u64().unwrap_or(0),
+                    payload["counts"]["date_gated_open"].as_u64().unwrap_or(0),
+                    payload["next_task"]["task"]["task_id"]
+                        .as_str()
+                        .or_else(|| payload["next_task"]["task_id"].as_str())
+                        .unwrap_or("none")
+                );
             }
         }
         TaskAction::Show { task_id, json } => {
@@ -4849,6 +4940,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                             completion_notes: Vec::new(),
                             completion_artifacts: Vec::new(),
                             completion_commands: Vec::new(),
+                            progress_entries: Vec::new(),
                             source_key: task.source_key.clone(),
                             source_plan: Some(plan_source.clone()),
                             awaiting_confirmation: false,
@@ -4965,6 +5057,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                             completion_notes: Vec::new(),
                             completion_artifacts: Vec::new(),
                             completion_commands: Vec::new(),
+                            progress_entries: Vec::new(),
                             source_key: row.source_key.clone(),
                             source_plan: Some(plan_source.clone()),
                             awaiting_confirmation: false,
@@ -5050,22 +5143,26 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             focus,
             prefix,
             contains,
+            title_contains,
             max,
             claim_ttl_minutes,
             steal_after_minutes,
             no_steal,
             skip_owned,
+            ignore_date_gates,
             no_claim,
             json,
         } => {
             let agent_id = agent.unwrap_or_else(default_agent_id);
             let requested_task_id = normalize_optional_text(task_id, "task id")?;
-            let filters = normalize_task_query_filter(tags, focus, prefix, contains)?;
+            let filters =
+                normalize_task_query_filter(tags, focus, prefix, contains, title_contains)?;
             let max = max.max(1);
             if max > 1 && !no_claim {
                 bail!("task request --max > 1 requires --no-claim");
             }
             let now = Utc::now();
+            let respect_date_gates = !ignore_date_gates;
             let config = load_timeline_config_or_default(repo_root)?;
             let advisor = if requested_task_id.is_none() {
                 maybe_queue_auto_advisor_runs(repo_root, &state).unwrap_or_else(|err| {
@@ -5092,6 +5189,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     task_id,
                     &agent_id,
                     !no_steal,
+                    respect_date_gates,
                     steal_after_minutes,
                     now,
                 )
@@ -5104,6 +5202,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     &filters,
                     !no_steal,
                     !skip_owned,
+                    respect_date_gates,
                     steal_after_minutes,
                     now,
                     max,
@@ -5117,6 +5216,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     &state,
                     &agent_id,
                     !no_steal,
+                    respect_date_gates,
                     steal_after_minutes,
                     now,
                 );
@@ -5127,6 +5227,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     &agent_id,
                     !no_steal,
                     !skip_owned,
+                    respect_date_gates,
                     steal_after_minutes,
                     now,
                     max,
@@ -5184,12 +5285,13 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     "skip_owned": skip_owned,
                     "request_reason": requested_task_id.as_deref().map(|_| {
                         match requested_task_index {
-                            None => "task_not_found",
+                            None => "task_not_found".to_string(),
                             Some(task_index) => specific_task_unavailable_reason(
                                 &state,
                                 task_index,
                                 &agent_id,
                                 !no_steal,
+                                respect_date_gates,
                                 steal_after_minutes,
                                 now,
                             ),
@@ -5199,8 +5301,10 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                         "tags": filters.required_tags,
                         "focus": filters.focus,
                         "prefix": filters.prefix,
-                        "contains": filters.contains
+                        "contains": filters.contains,
+                        "title_contains": filters.title_contains
                     },
+                    "respect_date_gates": respect_date_gates,
                     "auto_replenish": {
                         "enabled": config.auto_replenish_enabled,
                         "triggered": should_seed_auto_replenish,
@@ -5310,8 +5414,10 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     "tags": filters.required_tags,
                     "focus": filters.focus,
                     "prefix": filters.prefix,
-                    "contains": filters.contains
+                    "contains": filters.contains,
+                    "title_contains": filters.title_contains
                 },
+                "respect_date_gates": respect_date_gates,
                 "auto_replenish": {
                     "enabled": config.auto_replenish_enabled,
                     "triggered": should_seed_auto_replenish,
@@ -5406,6 +5512,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             regressions,
             benchmarks,
             skip_check_requirement,
+            claim_next,
+            next_ignore_date_gates,
             json,
         } => {
             let agent_id = agent.unwrap_or_else(default_agent_id);
@@ -5509,10 +5617,70 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             state.tasks[task_index].claimed_by_agent_id = None;
             state.tasks[task_index].claim_started_at_utc = None;
             state.tasks[task_index].claim_expires_at_utc = None;
+            let task = state.tasks[task_index].clone();
+            let now = Utc::now();
+            let respect_date_gates = !next_ignore_date_gates;
+            let mut next_dispatch = None::<(usize, TaskDispatchKind)>;
+            let mut auto_replenish = AutoReplenishEnsureResult::default();
+            if claim_next {
+                next_dispatch = select_task_for_agent(
+                    &state,
+                    &agent_id,
+                    &TaskQueryFilter::default(),
+                    true,
+                    false,
+                    respect_date_gates,
+                    90,
+                    now,
+                );
+                if next_dispatch.is_none() && config.auto_replenish_enabled {
+                    auto_replenish = ensure_auto_replenish_tasks(&mut state, &config, &agent_id);
+                    next_dispatch = select_auto_replenish_candidates_for_agent(
+                        &state,
+                        &agent_id,
+                        true,
+                        false,
+                        respect_date_gates,
+                        90,
+                        now,
+                        1,
+                    )
+                    .into_iter()
+                    .next();
+                }
+                if let Some((next_task_index, _)) = next_dispatch {
+                    apply_task_claim(&mut state.tasks[next_task_index], &agent_id, 30, now);
+                }
+            }
             state.updated_at_utc = now_utc();
             write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
-            let task = state.tasks[task_index].clone();
             append_task_timeline_event(repo_root, &task, &agent_id, "done", None)?;
+            for task_id in &auto_replenish.created_task_ids {
+                if let Some(auto_task) = state.tasks.iter().find(|row| row.task_id == *task_id) {
+                    append_task_timeline_event(repo_root, auto_task, SYSTEM_AGENT_ID, "add", None)?;
+                }
+            }
+            for task_id in &auto_replenish.updated_task_ids {
+                if let Some(auto_task) = state.tasks.iter().find(|row| row.task_id == *task_id) {
+                    append_task_timeline_event(
+                        repo_root,
+                        auto_task,
+                        SYSTEM_AGENT_ID,
+                        "edit",
+                        None,
+                    )?;
+                }
+            }
+            if let Some((next_task_index, dispatch_kind)) = next_dispatch {
+                let next_task = state.tasks[next_task_index].clone();
+                append_task_timeline_event(
+                    repo_root,
+                    &next_task,
+                    &agent_id,
+                    "claim",
+                    Some(dispatch_kind),
+                )?;
+            }
             let auto_bridge_sync =
                 maybe_queue_auto_bridge_sync_for_task_done(repo_root, &config, &task);
             if json {
@@ -5530,15 +5698,79 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                             "created": created_checks
                         }),
                     );
+                    object.insert(
+                        "claim_next".to_string(),
+                        json!({
+                            "requested": claim_next,
+                            "respect_date_gates": respect_date_gates,
+                            "task": next_dispatch.map(|(idx, dispatch)| {
+                                json!({
+                                    "dispatch_kind": dispatch.as_str(),
+                                    "task": task_to_json_payload(&state.tasks[idx], &task_status_map(&state))
+                                })
+                            }).unwrap_or(serde_json::Value::Null),
+                            "auto_replenish": {
+                                "created_task_ids": auto_replenish.created_task_ids,
+                                "updated_task_ids": auto_replenish.updated_task_ids,
+                                "pending_confirmation_task_ids": auto_replenish.pending_confirmation_task_ids
+                            }
+                        }),
+                    );
                 }
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
+                let next_task_id = next_dispatch
+                    .map(|(idx, _)| state.tasks[idx].task_id.as_str())
+                    .unwrap_or("none");
                 println!(
-                    "[fugit-task] completed {} by {} quality_checks_added={} auto_bridge_sync={}",
+                    "[fugit-task] completed {} by {} quality_checks_added={} auto_bridge_sync={} next_task={}",
                     state.tasks[task_index].task_id,
                     agent_id,
                     created_checks.len(),
-                    auto_bridge_sync["status"].as_str().unwrap_or("unknown")
+                    auto_bridge_sync["status"].as_str().unwrap_or("unknown"),
+                    next_task_id
+                );
+            }
+        }
+        TaskAction::Progress {
+            task_id,
+            note,
+            agent,
+            json,
+        } => {
+            let agent_id = normalize_agent_id(agent);
+            let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id)
+            else {
+                bail!("task not found: {}", task_id);
+            };
+            if state.tasks[task_index].status == TaskStatus::Done {
+                bail!(
+                    "task already completed: {}",
+                    state.tasks[task_index].task_id
+                );
+            }
+            if let Some(owner) = state.tasks[task_index].claimed_by_agent_id.as_deref()
+                && owner != agent_id
+            {
+                bail!(
+                    "task {} is claimed by {}; cannot append progress as {}",
+                    state.tasks[task_index].task_id,
+                    owner,
+                    agent_id
+                );
+            }
+            let task = add_task_progress_entry(&mut state, &task_id, &agent_id, note)?;
+            write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+            append_task_timeline_event(repo_root, &task, &agent_id, "progress", None)?;
+            let payload = task_to_json_payload(&task, &task_status_map(&state));
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!(
+                    "[fugit-task] progress task_id={} progress_count={} last_note={}",
+                    payload["task_id"].as_str().unwrap_or("unknown"),
+                    payload["progress_count"].as_u64().unwrap_or(0),
+                    payload["last_progress_note"].as_str().unwrap_or("")
                 );
             }
         }
@@ -8911,6 +9143,8 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "strict_hash": { "type": "boolean" },
                     "ignore_locks": { "type": "boolean" },
                     "repair": { "type": "string", "enum": ["auto", "strict", "lossy"] },
+                    "repair_missing_blobs": { "type": "boolean" },
+                    "allow_baseline_reseed": { "type": "boolean" },
                     "hash_jobs": { "type": "integer", "minimum": 1 },
                     "object_jobs": { "type": "integer", "minimum": 1 },
                     "burst": { "type": "boolean" }
@@ -8977,6 +9211,16 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
         json!({
             "name": "fugit_task_current",
             "description": "Return the current claimed task or tasks for an agent.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent": { "type": "string" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_task_status",
+            "description": "Return a compact queue and ownership summary for an agent.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -9106,6 +9350,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                 "properties": {
                     "status": { "type": "string", "enum": ["open", "claimed", "done"] },
                     "agent": { "type": "string" },
+                    "mine": { "type": "boolean" },
                     "ready_only": { "type": "boolean" },
                     "fields": { "type": "array", "items": { "type": "string" } },
                     "limit": { "type": "integer", "minimum": 1 }
@@ -9124,11 +9369,13 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "focus": { "type": "string" },
                     "prefix": { "type": "string" },
                     "contains": { "type": "string" },
+                    "title_contains": { "type": "string" },
                     "max": { "type": "integer", "minimum": 1 },
                     "claim_ttl_minutes": { "type": "integer" },
                     "steal_after_minutes": { "type": "integer" },
                     "no_steal": { "type": "boolean" },
                     "skip_owned": { "type": "boolean" },
+                    "ignore_date_gates": { "type": "boolean" },
                     "no_claim": { "type": "boolean" }
                 }
             }
@@ -9162,7 +9409,22 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "commands": { "type": "array", "items": { "type": "string" } },
                     "regressions": { "type": "array", "items": { "type": "string" } },
                     "benchmarks": { "type": "array", "items": { "type": "string" } },
-                    "skip_check_requirement": { "type": "boolean" }
+                    "skip_check_requirement": { "type": "boolean" },
+                    "claim_next": { "type": "boolean" },
+                    "next_ignore_date_gates": { "type": "boolean" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_task_progress",
+            "description": "Append an execution progress note to a task without changing status.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["task_id", "note"],
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "note": { "type": "string" },
+                    "agent": { "type": "string" }
                 }
             }
         }),
@@ -9552,6 +9814,20 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             if let Some(repair) = args.get("repair").and_then(serde_json::Value::as_str) {
                 cli_args.push("--repair".to_string());
                 cli_args.push(repair.to_string());
+            }
+            if args
+                .get("repair_missing_blobs")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--repair-missing-blobs".to_string());
+            }
+            if args
+                .get("allow_baseline_reseed")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--allow-baseline-reseed".to_string());
             }
             if let Some(hash_jobs) = args.get("hash_jobs").and_then(serde_json::Value::as_u64) {
                 cli_args.push("--hash-jobs".to_string());
@@ -10031,6 +10307,13 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 cli_args.push(agent.to_string());
             }
             if args
+                .get("mine")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--mine".to_string());
+            }
+            if args
                 .get("ready_only")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false)
@@ -10053,6 +10336,18 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             if let Some(limit) = args.get("limit").and_then(serde_json::Value::as_u64) {
                 cli_args.push("--limit".to_string());
                 cli_args.push(limit.to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_task_status" => {
+            let mut cli_args = vec![
+                "task".to_string(),
+                "status".to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
@@ -10090,6 +10385,13 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 cli_args.push("--contains".to_string());
                 cli_args.push(contains.to_string());
             }
+            if let Some(title_contains) = args
+                .get("title_contains")
+                .and_then(serde_json::Value::as_str)
+            {
+                cli_args.push("--title-contains".to_string());
+                cli_args.push(title_contains.to_string());
+            }
             if let Some(max) = args.get("max").and_then(serde_json::Value::as_u64) {
                 cli_args.push("--max".to_string());
                 cli_args.push(max.to_string());
@@ -10121,6 +10423,13 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 .unwrap_or(false)
             {
                 cli_args.push("--skip-owned".to_string());
+            }
+            if args
+                .get("ignore_date_gates")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--ignore-date-gates".to_string());
             }
             if args
                 .get("no_claim")
@@ -10232,6 +10541,44 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 .unwrap_or(false)
             {
                 cli_args.push("--skip-check-requirement".to_string());
+            }
+            if args
+                .get("claim_next")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--claim-next".to_string());
+            }
+            if args
+                .get("next_ignore_date_gates")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--next-ignore-date-gates".to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_task_progress" => {
+            let task_id = args
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_task_progress requires task_id"))?;
+            let note = args
+                .get("note")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_task_progress requires note"))?;
+            let mut cli_args = vec![
+                "task".to_string(),
+                "progress".to_string(),
+                "--task-id".to_string(),
+                task_id.to_string(),
+                "--note".to_string(),
+                note.to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
@@ -13251,6 +13598,7 @@ fn sync_advisor_generated_tasks(
                 completion_notes: Vec::new(),
                 completion_artifacts: Vec::new(),
                 completion_commands: Vec::new(),
+                progress_entries: Vec::new(),
                 source_key: task.source_key.clone(),
                 source_plan: Some(plan_source.clone()),
                 awaiting_confirmation: false,
@@ -14427,10 +14775,14 @@ fn normalize_agent_id(agent: Option<String>) -> String {
 
 fn resolve_checkpoint_repair_mode(
     requested: CheckpointRepairModeArg,
+    repair_missing_blobs: bool,
+    allow_baseline_reseed: bool,
     allow_lossy_repair: bool,
 ) -> CheckpointRepairModeArg {
     if allow_lossy_repair {
         CheckpointRepairModeArg::Lossy
+    } else if repair_missing_blobs || allow_baseline_reseed {
+        CheckpointRepairModeArg::Auto
     } else {
         requested
     }
@@ -14542,6 +14894,7 @@ fn build_manual_task(
         completion_notes: Vec::new(),
         completion_artifacts: Vec::new(),
         completion_commands: Vec::new(),
+        progress_entries: Vec::new(),
         source_key: None,
         source_plan: None,
         awaiting_confirmation: false,
@@ -15005,17 +15358,33 @@ fn task_policy_payload(state: &TaskState, config: &TimelineConfig) -> serde_json
     })
 }
 
+#[derive(Debug, Clone)]
+struct TaskDateWindow {
+    not_before: Option<NaiveDate>,
+    not_after: Option<NaiveDate>,
+    source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TaskScheduleState {
+    Ready,
+    NotBefore(NaiveDate),
+    WindowEnded(NaiveDate),
+}
+
 fn normalize_task_query_filter(
     tags: Vec<String>,
     focus: Option<String>,
     prefix: Option<String>,
     contains: Option<String>,
+    title_contains: Option<String>,
 ) -> Result<TaskQueryFilter> {
     Ok(TaskQueryFilter {
         required_tags: dedupe_keep_order(tags),
         focus: normalize_optional_text(focus, "task focus")?,
         prefix: normalize_optional_text(prefix, "task prefix")?,
         contains: normalize_optional_text(contains, "task contains")?,
+        title_contains: normalize_optional_text(title_contains, "task title contains")?,
     })
 }
 
@@ -15040,7 +15409,25 @@ fn task_is_auto_replenish_for_agent(task: &FugitTask, agent_id: &str) -> bool {
     task_auto_replenish_agent_id(task) == Some(agent_id)
 }
 
+fn task_is_ready_for_dispatch_at(
+    task: &FugitTask,
+    status_map: &BTreeMap<String, TaskStatus>,
+    today: NaiveDate,
+) -> bool {
+    task.status != TaskStatus::Done
+        && !task.awaiting_confirmation
+        && task_blocked_by(task, status_map).is_empty()
+        && task_schedule_state(task, today) == TaskScheduleState::Ready
+}
+
 fn task_is_ready_for_dispatch(task: &FugitTask, status_map: &BTreeMap<String, TaskStatus>) -> bool {
+    task_is_ready_for_dispatch_at(task, status_map, Utc::now().date_naive())
+}
+
+fn task_is_dispatchable_without_date_gate(
+    task: &FugitTask,
+    status_map: &BTreeMap<String, TaskStatus>,
+) -> bool {
     task.status != TaskStatus::Done
         && !task.awaiting_confirmation
         && task_blocked_by(task, status_map).is_empty()
@@ -15108,6 +15495,7 @@ fn build_auto_replenish_task(agent_id: &str, require_confirmation: bool) -> Fugi
         completion_notes: Vec::new(),
         completion_artifacts: Vec::new(),
         completion_commands: Vec::new(),
+        progress_entries: Vec::new(),
         source_key: Some(auto_replenish_source_key(agent_id)),
         source_plan: Some(AUTO_REPLENISH_SOURCE_PLAN.to_string()),
         awaiting_confirmation: require_confirmation,
@@ -15217,6 +15605,159 @@ fn task_search_haystacks(task: &FugitTask) -> Vec<String> {
     haystacks
 }
 
+fn parse_naive_date_token(value: &str) -> Option<NaiveDate> {
+    let trimmed = value.trim_matches(|ch: char| !ch.is_ascii_digit() && ch != '-');
+    if trimmed.len() != 10 {
+        return None;
+    }
+    NaiveDate::parse_from_str(trimmed, "%Y-%m-%d").ok()
+}
+
+fn extract_iso_dates_with_positions(text: &str) -> Vec<(usize, usize, NaiveDate)> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::<(usize, usize, NaiveDate)>::new();
+    let mut idx = 0usize;
+    while idx + 10 <= bytes.len() {
+        let candidate = &text[idx..idx + 10];
+        let matches_shape = candidate.as_bytes()[4] == b'-'
+            && candidate.as_bytes()[7] == b'-'
+            && candidate
+                .chars()
+                .enumerate()
+                .all(|(pos, ch)| matches!(pos, 4 | 7) || ch.is_ascii_digit());
+        if matches_shape && let Some(date) = parse_naive_date_token(candidate) {
+            out.push((idx, idx + 10, date));
+            idx += 10;
+            continue;
+        }
+        idx += 1;
+    }
+    out
+}
+
+fn parse_task_date_window_from_tags(task: &FugitTask) -> TaskDateWindow {
+    let mut window = TaskDateWindow {
+        not_before: None,
+        not_after: None,
+        source: None,
+    };
+    for tag in &task.tags {
+        for (prefix, slot, source_label) in [
+            ("not_before:", "before", "tag:not_before"),
+            ("not-before:", "before", "tag:not_before"),
+            ("window_start:", "before", "tag:window_start"),
+            ("start:", "before", "tag:start"),
+            ("not_after:", "after", "tag:not_after"),
+            ("not-after:", "after", "tag:not_after"),
+            ("window_end:", "after", "tag:window_end"),
+            ("end:", "after", "tag:end"),
+        ] {
+            if let Some(value) = tag.strip_prefix(prefix)
+                && let Some(parsed) = parse_naive_date_token(value)
+            {
+                match slot {
+                    "before" => window.not_before = Some(parsed),
+                    "after" => window.not_after = Some(parsed),
+                    _ => {}
+                }
+                if window.source.is_none() {
+                    window.source = Some(source_label.to_string());
+                }
+            }
+        }
+    }
+    window
+}
+
+fn parse_task_date_window_from_text(text: &str) -> Option<TaskDateWindow> {
+    let lowered = text.to_ascii_lowercase();
+    let dates = extract_iso_dates_with_positions(text);
+    if dates.len() >= 2 {
+        for pair in dates.windows(2) {
+            let left = pair[0];
+            let right = pair[1];
+            let bridge = lowered[left.1..right.0].trim();
+            if bridge.contains("through")
+                || bridge == "-"
+                || bridge.contains(" to ")
+                || bridge.contains("until")
+            {
+                return Some(TaskDateWindow {
+                    not_before: Some(left.2),
+                    not_after: Some(right.2),
+                    source: Some("text_range".to_string()),
+                });
+            }
+        }
+    }
+    let keywords = [
+        "not before",
+        "starting",
+        "starts",
+        "start ",
+        "from ",
+        "on or after",
+    ];
+    for (start, _end, date) in dates {
+        let prefix = lowered[..start].trim_end();
+        if keywords.iter().any(|keyword| prefix.ends_with(keyword)) {
+            return Some(TaskDateWindow {
+                not_before: Some(date),
+                not_after: None,
+                source: Some("text_start".to_string()),
+            });
+        }
+    }
+    None
+}
+
+fn task_date_window(task: &FugitTask) -> TaskDateWindow {
+    let from_tags = parse_task_date_window_from_tags(task);
+    if from_tags.not_before.is_some() || from_tags.not_after.is_some() {
+        return from_tags;
+    }
+    for text in [Some(task.title.as_str()), task.detail.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(window) = parse_task_date_window_from_text(text) {
+            return window;
+        }
+    }
+    TaskDateWindow {
+        not_before: None,
+        not_after: None,
+        source: None,
+    }
+}
+
+fn task_schedule_state(task: &FugitTask, today: NaiveDate) -> TaskScheduleState {
+    let window = task_date_window(task);
+    if let Some(not_before) = window.not_before
+        && today < not_before
+    {
+        return TaskScheduleState::NotBefore(not_before);
+    }
+    if let Some(not_after) = window.not_after
+        && today > not_after
+    {
+        return TaskScheduleState::WindowEnded(not_after);
+    }
+    TaskScheduleState::Ready
+}
+
+fn task_schedule_block_reason(task: &FugitTask, today: NaiveDate) -> Option<String> {
+    match task_schedule_state(task, today) {
+        TaskScheduleState::Ready => None,
+        TaskScheduleState::NotBefore(date) => {
+            Some(format!("not_before:{}", date.format("%Y-%m-%d")))
+        }
+        TaskScheduleState::WindowEnded(date) => {
+            Some(format!("window_ended:{}", date.format("%Y-%m-%d")))
+        }
+    }
+}
+
 fn task_matches_tag_filters(task: &FugitTask, required_tags: &[String]) -> bool {
     if required_tags.is_empty() {
         return true;
@@ -15246,6 +15787,13 @@ fn task_matches_query_filter(task: &FugitTask, filter: &TaskQueryFilter) -> bool
         }
     }
 
+    if let Some(title_contains) = filter.title_contains.as_deref() {
+        let needle = title_contains.to_ascii_lowercase();
+        if !task.title.to_ascii_lowercase().contains(&needle) {
+            return false;
+        }
+    }
+
     if let Some(focus) = filter.focus.as_deref() {
         let needle = focus.to_ascii_lowercase();
         if !haystacks
@@ -15263,11 +15811,18 @@ fn task_to_json_payload(
     task: &FugitTask,
     status_map: &BTreeMap<String, TaskStatus>,
 ) -> serde_json::Value {
+    let today = Utc::now().date_naive();
+    let date_window = task_date_window(task);
+    let schedule_state = task_schedule_state(task, today);
     let mut blocked_by = task_blocked_by(task, status_map);
     if task.awaiting_confirmation {
         blocked_by.push("confirmation".to_string());
     }
-    let ready = task_is_ready_for_dispatch(task, status_map);
+    if let Some(reason) = task_schedule_block_reason(task, today) {
+        blocked_by.push(reason);
+    }
+    let ready = matches!(schedule_state, TaskScheduleState::Ready)
+        && task_is_dispatchable_without_date_gate(task, status_map);
     json!({
         "task_id": task.task_id,
         "title": task.title,
@@ -15294,7 +15849,20 @@ fn task_to_json_payload(
         "auto_replenish": task_is_auto_replenish(task),
         "awaiting_confirmation": task.awaiting_confirmation,
         "approved_at_utc": task.approved_at_utc,
-        "approved_by_agent_id": task.approved_by_agent_id
+        "approved_by_agent_id": task.approved_by_agent_id,
+        "progress_entries": task.progress_entries,
+        "progress_count": task.progress_entries.len(),
+        "last_progress_note": task.progress_entries.last().map(|entry| entry.note.clone()),
+        "schedule": {
+            "ready_now": matches!(schedule_state, TaskScheduleState::Ready),
+            "not_before": date_window
+                .not_before
+                .map(|value| value.format("%Y-%m-%d").to_string()),
+            "not_after": date_window
+                .not_after
+                .map(|value| value.format("%Y-%m-%d").to_string()),
+            "source": date_window.source
+        }
     })
 }
 
@@ -15330,6 +15898,126 @@ fn json_value_compact_text(value: &serde_json::Value) -> String {
             .join(","),
         serde_json::Value::Object(_) => serde_json::to_string(value).unwrap_or_default(),
     }
+}
+
+fn task_status_summary_payload(
+    repo_root: &Path,
+    state: &TaskState,
+    agent_id: &str,
+) -> serde_json::Value {
+    let status_map = task_status_map(state);
+    let today = Utc::now().date_naive();
+    let mine = state
+        .tasks
+        .iter()
+        .filter(|task| {
+            task.status == TaskStatus::Claimed
+                && task.claimed_by_agent_id.as_deref() == Some(agent_id)
+        })
+        .map(|task| task_to_json_payload(task, &status_map))
+        .collect::<Vec<_>>();
+    let ready_open_count = state
+        .tasks
+        .iter()
+        .filter(|task| {
+            task.status == TaskStatus::Open
+                && task_is_ready_for_dispatch_at(task, &status_map, today)
+        })
+        .count();
+    let date_gated_count = state
+        .tasks
+        .iter()
+        .filter(|task| {
+            task.status == TaskStatus::Open
+                && !task.awaiting_confirmation
+                && task_blocked_by(task, &status_map).is_empty()
+                && matches!(
+                    task_schedule_state(task, today),
+                    TaskScheduleState::NotBefore(_)
+                )
+        })
+        .count();
+    let blocked_open_count = state
+        .tasks
+        .iter()
+        .filter(|task| {
+            task.status == TaskStatus::Open
+                && (!task_blocked_by(task, &status_map).is_empty()
+                    || task.awaiting_confirmation
+                    || matches!(
+                        task_schedule_state(task, today),
+                        TaskScheduleState::WindowEnded(_)
+                    ))
+        })
+        .count();
+    let next_task = select_task_candidates_for_agent(
+        state,
+        agent_id,
+        &TaskQueryFilter::default(),
+        true,
+        true,
+        true,
+        90,
+        Utc::now(),
+        1,
+    )
+    .first()
+    .map(|(idx, dispatch)| {
+        json!({
+            "dispatch_kind": dispatch.as_str(),
+            "task": task_to_json_payload(&state.tasks[*idx], &status_map)
+        })
+    })
+    .unwrap_or(serde_json::Value::Null);
+    json!({
+        "schema_version": "fugit.task.status.v1",
+        "generated_at_utc": now_utc(),
+        "repo_root": repo_root.display().to_string(),
+        "agent_id": agent_id,
+        "current": mine.first().cloned().unwrap_or(serde_json::Value::Null),
+        "mine": mine,
+        "counts": {
+            "total": state.tasks.len(),
+            "open": state.tasks.iter().filter(|task| task.status == TaskStatus::Open).count(),
+            "claimed": state.tasks.iter().filter(|task| task.status == TaskStatus::Claimed).count(),
+            "done": state.tasks.iter().filter(|task| task.status == TaskStatus::Done).count(),
+            "mine_claimed": state
+                .tasks
+                .iter()
+                .filter(|task| task.status == TaskStatus::Claimed && task.claimed_by_agent_id.as_deref() == Some(agent_id))
+                .count(),
+            "ready_open": ready_open_count,
+            "blocked_open": blocked_open_count,
+            "date_gated_open": date_gated_count,
+            "awaiting_confirmation": state
+                .tasks
+                .iter()
+                .filter(|task| task.status == TaskStatus::Open && task.awaiting_confirmation)
+                .count()
+        },
+        "next_task": next_task
+    })
+}
+
+fn add_task_progress_entry(
+    state: &mut TaskState,
+    task_id: &str,
+    agent_id: &str,
+    note: String,
+) -> Result<FugitTask> {
+    let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id) else {
+        bail!("task not found: {}", task_id);
+    };
+    let normalized_note = normalize_required_text(note, "task progress note")?;
+    let entry = TaskProgressEntry {
+        at_utc: now_utc(),
+        agent_id: agent_id.to_string(),
+        note: normalized_note,
+    };
+    state.tasks[task_index].progress_entries.push(entry);
+    state.tasks[task_index].updated_at_utc = now_utc();
+    state.updated_at_utc = now_utc();
+    Ok(state.tasks[task_index].clone())
 }
 
 fn parse_task_import_rows(file: &Path, format: TaskImportFormatArg) -> Result<Vec<TaskImportRow>> {
@@ -15822,6 +16510,7 @@ fn sync_plan_into_task_state(
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    progress_entries: Vec::new(),
                     source_key: row.source_key.clone(),
                     source_plan: Some(plan_source.to_string()),
                     awaiting_confirmation: false,
@@ -16559,13 +17248,13 @@ fn task_blocked_by(task: &FugitTask, status_map: &BTreeMap<String, TaskStatus>) 
     blocked_by
 }
 
-#[cfg(test)]
 fn select_task_for_agent(
     state: &TaskState,
     agent_id: &str,
     filters: &TaskQueryFilter,
     allow_steal: bool,
     include_owned_claims: bool,
+    respect_date_gates: bool,
     steal_after_minutes: i64,
     now: DateTime<Utc>,
 ) -> Option<(usize, TaskDispatchKind)> {
@@ -16575,6 +17264,7 @@ fn select_task_for_agent(
         filters,
         allow_steal,
         include_owned_claims,
+        respect_date_gates,
         steal_after_minutes,
         now,
         1,
@@ -16590,6 +17280,7 @@ fn select_task_candidates_for_agent(
     filters: &TaskQueryFilter,
     allow_steal: bool,
     include_owned_claims: bool,
+    respect_date_gates: bool,
     steal_after_minutes: i64,
     now: DateTime<Utc>,
     max: usize,
@@ -16598,6 +17289,7 @@ fn select_task_candidates_for_agent(
         return Vec::new();
     }
     let status_map = task_status_map(state);
+    let today = now.date_naive();
     let mut owned_claims = Vec::<usize>::new();
     let mut open_tasks = Vec::<usize>::new();
     let mut stealable_tasks = Vec::<usize>::new();
@@ -16612,7 +17304,12 @@ fn select_task_candidates_for_agent(
         if !task_matches_query_filter(task, filters) {
             continue;
         }
-        if !task_is_ready_for_dispatch(task, &status_map) {
+        let dispatchable = if respect_date_gates {
+            task_is_ready_for_dispatch_at(task, &status_map, today)
+        } else {
+            task_is_dispatchable_without_date_gate(task, &status_map)
+        };
+        if !dispatchable {
             continue;
         }
         match task.status {
@@ -16659,10 +17356,12 @@ fn select_specific_task_candidate(
     task_id: &str,
     agent_id: &str,
     allow_steal: bool,
+    respect_date_gates: bool,
     steal_after_minutes: i64,
     now: DateTime<Utc>,
 ) -> Option<(usize, TaskDispatchKind)> {
     let status_map = task_status_map(state);
+    let today = now.date_naive();
     let (idx, task) = state
         .tasks
         .iter()
@@ -16674,7 +17373,12 @@ fn select_specific_task_candidate(
     if task_is_auto_replenish(task) && !task_is_auto_replenish_for_agent(task, agent_id) {
         return None;
     }
-    if !task_is_ready_for_dispatch(task, &status_map) {
+    let dispatchable = if respect_date_gates {
+        task_is_ready_for_dispatch_at(task, &status_map, today)
+    } else {
+        task_is_dispatchable_without_date_gate(task, &status_map)
+    };
+    if !dispatchable {
         return None;
     }
     match task.status {
@@ -16697,30 +17401,34 @@ fn specific_task_unavailable_reason(
     task_index: usize,
     agent_id: &str,
     allow_steal: bool,
+    respect_date_gates: bool,
     steal_after_minutes: i64,
     now: DateTime<Utc>,
-) -> &'static str {
+) -> String {
     let task = &state.tasks[task_index];
     let status_map = task_status_map(state);
     if task.status == TaskStatus::Done {
-        return "done";
+        return "done".to_string();
     }
     if task_is_auto_replenish(task) && !task_is_auto_replenish_for_agent(task, agent_id) {
-        return "reserved_for_other_agent";
+        return "reserved_for_other_agent".to_string();
     }
     if task.awaiting_confirmation {
-        return "awaiting_confirmation";
+        return "awaiting_confirmation".to_string();
     }
     if !task_blocked_by(task, &status_map).is_empty() {
-        return "blocked_by_dependencies";
+        return "blocked_by_dependencies".to_string();
+    }
+    if respect_date_gates && let Some(reason) = task_schedule_block_reason(task, now.date_naive()) {
+        return reason;
     }
     if task.status == TaskStatus::Claimed && task.claimed_by_agent_id.as_deref() != Some(agent_id) {
         if allow_steal && task_claim_is_stale(task, now, steal_after_minutes) {
-            return "stealable";
+            return "stealable".to_string();
         }
-        return "claimed_by_other_agent";
+        return "claimed_by_other_agent".to_string();
     }
-    "not_dispatchable"
+    "not_dispatchable".to_string()
 }
 
 fn select_auto_replenish_candidates_for_agent(
@@ -16728,6 +17436,7 @@ fn select_auto_replenish_candidates_for_agent(
     agent_id: &str,
     allow_steal: bool,
     include_owned_claims: bool,
+    respect_date_gates: bool,
     steal_after_minutes: i64,
     now: DateTime<Utc>,
     max: usize,
@@ -16736,6 +17445,7 @@ fn select_auto_replenish_candidates_for_agent(
         return Vec::new();
     }
     let status_map = task_status_map(state);
+    let today = now.date_naive();
     let mut owned_claims = Vec::<usize>::new();
     let mut open_tasks = Vec::<usize>::new();
     let mut stealable_tasks = Vec::<usize>::new();
@@ -16744,7 +17454,12 @@ fn select_auto_replenish_candidates_for_agent(
         if !task_is_auto_replenish_for_agent(task, agent_id) {
             continue;
         }
-        if !task_is_ready_for_dispatch(task, &status_map) {
+        let dispatchable = if respect_date_gates {
+            task_is_ready_for_dispatch_at(task, &status_map, today)
+        } else {
+            task_is_dispatchable_without_date_gate(task, &status_map)
+        };
+        if !dispatchable {
             continue;
         }
         match task.status {
@@ -16790,6 +17505,7 @@ fn agent_has_available_standard_work(
     state: &TaskState,
     agent_id: &str,
     allow_steal: bool,
+    respect_date_gates: bool,
     steal_after_minutes: i64,
     now: DateTime<Utc>,
 ) -> bool {
@@ -16799,6 +17515,7 @@ fn agent_has_available_standard_work(
         &TaskQueryFilter::default(),
         allow_steal,
         true,
+        respect_date_gates,
         steal_after_minutes,
         now,
         1,
@@ -17461,6 +18178,7 @@ mod tests {
             completion_notes: Vec::new(),
             completion_artifacts: Vec::new(),
             completion_commands: Vec::new(),
+            progress_entries: Vec::new(),
             source_key: None,
             source_plan: None,
             awaiting_confirmation: false,
@@ -17541,6 +18259,7 @@ mod tests {
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    progress_entries: Vec::new(),
                     source_key: None,
                     source_plan: None,
                     awaiting_confirmation: false,
@@ -17567,6 +18286,7 @@ mod tests {
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    progress_entries: Vec::new(),
                     source_key: None,
                     source_plan: None,
                     awaiting_confirmation: false,
@@ -17613,6 +18333,7 @@ mod tests {
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    progress_entries: Vec::new(),
                     source_key: None,
                     source_plan: None,
                     awaiting_confirmation: false,
@@ -17639,6 +18360,7 @@ mod tests {
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    progress_entries: Vec::new(),
                     source_key: None,
                     source_plan: None,
                     awaiting_confirmation: false,
@@ -17665,6 +18387,7 @@ mod tests {
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    progress_entries: Vec::new(),
                     source_key: None,
                     source_plan: None,
                     awaiting_confirmation: false,
@@ -17691,6 +18414,7 @@ mod tests {
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    progress_entries: Vec::new(),
                     source_key: None,
                     source_plan: None,
                     awaiting_confirmation: false,
@@ -17707,6 +18431,7 @@ mod tests {
                 required_tags: vec!["ui".to_string()],
                 ..Default::default()
             },
+            true,
             true,
             true,
             90,
@@ -17743,6 +18468,7 @@ mod tests {
                 completion_notes: Vec::new(),
                 completion_artifacts: Vec::new(),
                 completion_commands: Vec::new(),
+                progress_entries: Vec::new(),
                 source_key: None,
                 source_plan: None,
                 awaiting_confirmation: false,
@@ -17757,6 +18483,7 @@ mod tests {
             &TaskQueryFilter::default(),
             true,
             true,
+            true,
             30,
             now,
         )
@@ -17769,6 +18496,7 @@ mod tests {
             "agent.worker",
             &TaskQueryFilter::default(),
             false,
+            true,
             true,
             30,
             now,
@@ -17803,6 +18531,7 @@ mod tests {
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    progress_entries: Vec::new(),
                     source_key: None,
                     source_plan: None,
                     awaiting_confirmation: false,
@@ -17829,6 +18558,7 @@ mod tests {
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    progress_entries: Vec::new(),
                     source_key: None,
                     source_plan: None,
                     awaiting_confirmation: false,
@@ -17844,6 +18574,7 @@ mod tests {
             &TaskQueryFilter::default(),
             true,
             true,
+            true,
             90,
             now,
         )
@@ -17857,12 +18588,83 @@ mod tests {
             &TaskQueryFilter::default(),
             true,
             false,
+            true,
             90,
             now,
         )
         .expect("expected open task when skipping owned");
         assert_eq!(skipped.1, TaskDispatchKind::Open);
         assert_eq!(state.tasks[skipped.0].task_id, "task_open");
+    }
+
+    #[test]
+    fn task_request_respects_date_gates_by_default() {
+        let now = parse_rfc3339_utc("2026-03-09T12:00:00Z").expect("fixed now");
+        let state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![sample_task(
+                "task_phase_b",
+                "Execute Phase B deliverables (2026-04-21 through 2026-06-01)",
+                50,
+                TaskStatus::Open,
+            )],
+        };
+
+        let blocked = select_task_for_agent(
+            &state,
+            "agent.worker",
+            &TaskQueryFilter::default(),
+            true,
+            true,
+            true,
+            90,
+            now,
+        );
+        assert!(blocked.is_none());
+        assert_eq!(
+            specific_task_unavailable_reason(&state, 0, "agent.worker", true, true, 90, now),
+            "not_before:2026-04-21"
+        );
+
+        let overridden = select_task_for_agent(
+            &state,
+            "agent.worker",
+            &TaskQueryFilter::default(),
+            true,
+            true,
+            false,
+            90,
+            now,
+        )
+        .expect("date-gate override should return the task");
+        assert_eq!(overridden.1, TaskDispatchKind::Open);
+        assert_eq!(state.tasks[overridden.0].task_id, "task_phase_b");
+    }
+
+    #[test]
+    fn add_task_progress_entry_appends_notes() {
+        let mut state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![sample_task(
+                "task_progress",
+                "progress",
+                1,
+                TaskStatus::Open,
+            )],
+        };
+
+        let task = add_task_progress_entry(
+            &mut state,
+            "task_progress",
+            "agent.worker",
+            "implemented the parser".to_string(),
+        )
+        .expect("progress entry");
+        assert_eq!(task.progress_entries.len(), 1);
+        assert_eq!(task.progress_entries[0].agent_id, "agent.worker");
+        assert_eq!(task.progress_entries[0].note, "implemented the parser");
     }
 
     #[test]
@@ -17877,9 +18679,16 @@ mod tests {
             ],
         };
 
-        let selected =
-            select_specific_task_candidate(&state, "task_target", "agent.worker", true, 90, now)
-                .expect("expected targeted task");
+        let selected = select_specific_task_candidate(
+            &state,
+            "task_target",
+            "agent.worker",
+            true,
+            true,
+            90,
+            now,
+        )
+        .expect("expected targeted task");
         assert_eq!(selected.1, TaskDispatchKind::Open);
         assert_eq!(state.tasks[selected.0].task_id, "task_target");
     }
@@ -17910,6 +18719,7 @@ mod tests {
                 completion_notes: Vec::new(),
                 completion_artifacts: Vec::new(),
                 completion_commands: Vec::new(),
+                progress_entries: Vec::new(),
                 source_key: None,
                 source_plan: None,
                 awaiting_confirmation: false,
@@ -17918,9 +18728,16 @@ mod tests {
             }],
         };
 
-        let selected =
-            select_specific_task_candidate(&state, "task_owned", "agent.worker", true, 90, now)
-                .expect("expected owned targeted task");
+        let selected = select_specific_task_candidate(
+            &state,
+            "task_owned",
+            "agent.worker",
+            true,
+            true,
+            90,
+            now,
+        )
+        .expect("expected owned targeted task");
         assert_eq!(selected.1, TaskDispatchKind::OwnedClaim);
         assert_eq!(state.tasks[selected.0].task_id, "task_owned");
     }
@@ -17943,6 +18760,7 @@ mod tests {
             &state,
             "agent.worker",
             &TaskQueryFilter::default(),
+            true,
             true,
             true,
             90,
@@ -18178,6 +18996,8 @@ Prefer evidence-backed tasks.
                 object_jobs: None,
                 burst: false,
                 repair: CheckpointRepairModeArg::Auto,
+                repair_missing_blobs: false,
+                allow_baseline_reseed: false,
                 allow_lossy_repair: false,
                 json: false,
             },
@@ -18224,6 +19044,8 @@ Prefer evidence-backed tasks.
                 object_jobs: None,
                 burst: false,
                 repair: CheckpointRepairModeArg::Auto,
+                repair_missing_blobs: false,
+                allow_baseline_reseed: false,
                 allow_lossy_repair: false,
                 json: false,
             },
@@ -18254,6 +19076,8 @@ Prefer evidence-backed tasks.
                 object_jobs: None,
                 burst: false,
                 repair: CheckpointRepairModeArg::Auto,
+                repair_missing_blobs: false,
+                allow_baseline_reseed: false,
                 allow_lossy_repair: false,
                 json: false,
             },
@@ -18277,6 +19101,8 @@ Prefer evidence-backed tasks.
                 object_jobs: None,
                 burst: false,
                 repair: CheckpointRepairModeArg::Lossy,
+                repair_missing_blobs: false,
+                allow_baseline_reseed: false,
                 allow_lossy_repair: true,
                 json: false,
             },
@@ -18455,6 +19281,7 @@ Prefer evidence-backed tasks.
             completion_notes: Vec::new(),
             completion_artifacts: Vec::new(),
             completion_commands: Vec::new(),
+            progress_entries: Vec::new(),
             source_key: None,
             source_plan: None,
             awaiting_confirmation: false,
@@ -18517,6 +19344,7 @@ Prefer evidence-backed tasks.
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    progress_entries: Vec::new(),
                     source_key: None,
                     source_plan: None,
                     awaiting_confirmation: false,
@@ -18543,6 +19371,7 @@ Prefer evidence-backed tasks.
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    progress_entries: Vec::new(),
                     source_key: None,
                     source_plan: None,
                     awaiting_confirmation: false,
@@ -18598,6 +19427,7 @@ Prefer evidence-backed tasks.
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    progress_entries: Vec::new(),
                     source_key: None,
                     source_plan: None,
                     awaiting_confirmation: false,
@@ -18624,6 +19454,7 @@ Prefer evidence-backed tasks.
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    progress_entries: Vec::new(),
                     source_key: None,
                     source_plan: None,
                     awaiting_confirmation: false,
@@ -18663,6 +19494,7 @@ Prefer evidence-backed tasks.
                 completion_notes: vec!["note".to_string()],
                 completion_artifacts: vec!["artifact".to_string()],
                 completion_commands: vec!["cargo test".to_string()],
+                progress_entries: Vec::new(),
                 source_key: Some("A-01".to_string()),
                 source_plan: Some("the_final_plan.md".to_string()),
                 awaiting_confirmation: false,
@@ -18708,6 +19540,7 @@ Prefer evidence-backed tasks.
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    progress_entries: Vec::new(),
                     source_key: Some("A-01".to_string()),
                     source_plan: Some("the_final_plan.md".to_string()),
                     awaiting_confirmation: false,
@@ -18734,6 +19567,7 @@ Prefer evidence-backed tasks.
                     completion_notes: Vec::new(),
                     completion_artifacts: Vec::new(),
                     completion_commands: Vec::new(),
+                    progress_entries: Vec::new(),
                     source_key: Some("A-02".to_string()),
                     source_plan: Some("the_final_plan.md".to_string()),
                     awaiting_confirmation: false,
