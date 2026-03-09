@@ -2213,7 +2213,6 @@ struct GithubActionsJobsResponse {
 
 #[derive(Debug, Clone, Deserialize)]
 struct GithubActionsJob {
-    id: u64,
     name: String,
     #[serde(default)]
     html_url: Option<String>,
@@ -4224,7 +4223,6 @@ fn resolve_github_api_token(repo_root: &Path, host: &str) -> Result<Option<Strin
 }
 
 fn github_api_get_json(
-    repo_root: &Path,
     api_base_url: &str,
     api_path: &str,
     token: Option<&str>,
@@ -4307,6 +4305,7 @@ fn github_ci_run_name(run: &GithubActionsRun) -> String {
         .to_string()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sync_github_ci_failure_tasks(
     repo_root: &Path,
     config: &TimelineConfig,
@@ -4335,7 +4334,7 @@ fn sync_github_ci_failure_tasks(
             "repos/{owner}/{repo}/actions/runs/{}/jobs?per_page=100",
             run.id
         );
-        let (status, payload) = github_api_get_json(repo_root, api_base_url, &path, api_token)?;
+        let (status, payload) = github_api_get_json(api_base_url, &path, api_token)?;
         let jobs = if (200..300).contains(&status) {
             serde_json::from_value::<GithubActionsJobsResponse>(payload)
                 .unwrap_or(GithubActionsJobsResponse { jobs: Vec::new() })
@@ -4514,12 +4513,11 @@ fn verify_github_ci_for_commit(
     let started = Instant::now();
     let timeout = std::time::Duration::from_secs(timeout_minutes.saturating_mul(60));
     let poll_delay = std::time::Duration::from_secs(poll_seconds);
-    let mut last_runs = Vec::<GithubActionsRun>::new();
+    let mut last_runs = None::<Vec<GithubActionsRun>>;
 
     loop {
         let path = format!("repos/{owner}/{repo}/actions/runs?head_sha={commit_sha}&per_page=100");
-        let (status, payload) =
-            github_api_get_json(repo_root, &api_base_url, &path, api_token.as_deref())?;
+        let (status, payload) = github_api_get_json(&api_base_url, &path, api_token.as_deref())?;
         if !(200..300).contains(&status) {
             return Ok(json!({
                 "schema_version": "fugit.check.run.v2",
@@ -4541,19 +4539,20 @@ fn verify_github_ci_for_commit(
                 workflow_runs: Vec::new(),
             },
         );
-        last_runs = response.workflow_runs;
+        last_runs = Some(response.workflow_runs);
+        let current_runs = last_runs.as_ref().expect("workflow runs just assigned");
 
-        if !last_runs.is_empty() {
-            let all_completed = last_runs
+        if !current_runs.is_empty() {
+            let all_completed = current_runs
                 .iter()
                 .all(|run| run.status.as_deref() == Some("completed"));
             if all_completed {
-                let failing_runs = last_runs
+                let failing_runs = current_runs
                     .iter()
                     .filter(|run| github_ci_conclusion_is_failure(run.conclusion.as_deref()))
                     .cloned()
                     .collect::<Vec<_>>();
-                let first_url = last_runs.iter().find_map(|run| run.html_url.clone());
+                let first_url = current_runs.iter().find_map(|run| run.html_url.clone());
                 if failing_runs.is_empty() {
                     return Ok(json!({
                         "schema_version": "fugit.check.run.v2",
@@ -4564,10 +4563,10 @@ fn verify_github_ci_for_commit(
                         "commit_sha": commit_sha,
                         "branch": branch,
                         "repository": format!("{owner}/{repo}"),
-                        "workflow_run_count": last_runs.len(),
+                        "workflow_run_count": current_runs.len(),
                         "html_url": first_url,
                         "failure_tasks": serde_json::Value::Null,
-                        "workflow_runs": last_runs.iter().map(|run| {
+                        "workflow_runs": current_runs.iter().map(|run| {
                             json!({
                                 "id": run.id,
                                 "name": github_ci_run_name(run),
@@ -4598,10 +4597,10 @@ fn verify_github_ci_for_commit(
                     "commit_sha": commit_sha,
                     "branch": branch,
                     "repository": format!("{owner}/{repo}"),
-                    "workflow_run_count": last_runs.len(),
+                    "workflow_run_count": current_runs.len(),
                     "html_url": first_url,
                     "failure_tasks": failure_tasks,
-                    "workflow_runs": last_runs.iter().map(|run| {
+                    "workflow_runs": current_runs.iter().map(|run| {
                         json!({
                             "id": run.id,
                             "name": github_ci_run_name(run),
@@ -4615,7 +4614,8 @@ fn verify_github_ci_for_commit(
         }
 
         if started.elapsed() >= timeout {
-            let status = if last_runs.is_empty() {
+            let current_runs = last_runs.clone().unwrap_or_default();
+            let status = if current_runs.is_empty() {
                 if require_checks {
                     "no_runs_detected"
                 } else {
@@ -4634,10 +4634,10 @@ fn verify_github_ci_for_commit(
                 "commit_sha": commit_sha,
                 "branch": branch,
                 "repository": format!("{owner}/{repo}"),
-                "workflow_run_count": last_runs.len(),
-                "html_url": last_runs.iter().find_map(|run| run.html_url.clone()),
+                "workflow_run_count": current_runs.len(),
+                "html_url": current_runs.iter().find_map(|run| run.html_url.clone()),
                 "failure_tasks": serde_json::Value::Null,
-                "workflow_runs": last_runs.iter().map(|run| {
+                "workflow_runs": current_runs.iter().map(|run| {
                     json!({
                         "id": run.id,
                         "name": github_ci_run_name(run),
@@ -12994,7 +12994,7 @@ fn perform_bridge_sync_github(
     let pre_sync_quality_gate =
         if verification_enabled && quality_checks_backend(&config) == QUALITY_CHECK_BACKEND_LOCAL {
             let mut check_state = load_check_state(repo_root)?;
-            let payload = run_quality_checks(
+            run_quality_checks(
                 repo_root,
                 &mut check_state,
                 None,
@@ -13003,8 +13003,7 @@ fn perform_bridge_sync_github(
                 false,
                 "bridge_sync",
                 false,
-            )?;
-            payload
+            )?
         } else {
             json!({
                 "schema_version": "fugit.check.run.v2",
@@ -17141,6 +17140,7 @@ fn approve_tasks_in_state(
     Ok(approved)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_check_policy_config(
     config: &mut TimelineConfig,
     backend: Option<CheckBackendArg>,
