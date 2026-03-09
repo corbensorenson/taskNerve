@@ -73,6 +73,10 @@ Auto Unix installer (macOS/Linux):
 bash ./install.sh --with-skill --overwrite-skill
 ```
 
+Unix installer behavior:
+- PATH is updated automatically in startup files by default.
+- Use `--no-path-update` to skip automatic PATH edits.
+
 ### 3. Verify
 
 ```bash

@@ -11,6 +11,7 @@ Usage:
 Options:
   --platform <linux|macos>   Target platform check (auto-detected if omitted)
   --install-dir <path>       Install directory (default: \$FUGIT_INSTALL_DIR or \$HOME/.local/bin)
+  --no-path-update           Do not auto-update shell startup files with install dir
   --with-skill               Install bundled Codex skill after binary install
   --overwrite-skill          Overwrite existing Codex skill files when used with --with-skill
   --skip-rust-install        Fail instead of auto-installing Rust toolchain when cargo is missing
@@ -20,6 +21,7 @@ USAGE
 
 PLATFORM=""
 INSTALL_DIR="${FUGIT_INSTALL_DIR:-$HOME/.local/bin}"
+PATH_UPDATE=1
 WITH_SKILL=0
 OVERWRITE_SKILL=0
 SKIP_RUST_INSTALL=0
@@ -33,6 +35,10 @@ while [[ $# -gt 0 ]]; do
     --install-dir)
       INSTALL_DIR="$2"
       shift 2
+      ;;
+    --no-path-update)
+      PATH_UPDATE=0
+      shift
       ;;
     --with-skill)
       WITH_SKILL=1
@@ -137,15 +143,27 @@ install -m 0755 "$BIN_SRC" "$INSTALL_DIR/$BIN_NAME"
 
 echo "[installer] installed $BIN_NAME to: $INSTALL_DIR/$BIN_NAME"
 
-if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-  echo
-  echo "[installer] add this directory to PATH to use '$BIN_NAME' everywhere:"
-  echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
+PATH_EXPORT_LINE="export PATH=\"$INSTALL_DIR:\$PATH\""
+if [[ "$PATH_UPDATE" -eq 1 ]]; then
+  PATH_FILES=()
   if [[ "$PLATFORM" == "macos" ]]; then
-    echo "  echo 'export PATH=\"$INSTALL_DIR:\$PATH\"' >> ~/.zshrc"
+    PATH_FILES=("$HOME/.zprofile" "$HOME/.zshrc")
   else
-    echo "  echo 'export PATH=\"$INSTALL_DIR:\$PATH\"' >> ~/.bashrc"
+    PATH_FILES=("$HOME/.profile" "$HOME/.bashrc")
   fi
+  for path_file in "${PATH_FILES[@]}"; do
+    mkdir -p "$(dirname "$path_file")"
+    touch "$path_file"
+    if ! grep -Fqs "$PATH_EXPORT_LINE" "$path_file"; then
+      printf '\n%s\n' "$PATH_EXPORT_LINE" >> "$path_file"
+      echo "[installer] added PATH export to $path_file"
+    fi
+  done
+  export PATH="$INSTALL_DIR:$PATH"
+elif [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+  echo
+  echo "[installer] PATH auto-update disabled. Add this line manually if needed:"
+  echo "  $PATH_EXPORT_LINE"
 fi
 
 if [[ "$WITH_SKILL" -eq 1 ]]; then
