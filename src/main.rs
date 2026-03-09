@@ -32,6 +32,8 @@ const SCHEMA_PROJECTS: &str = "fugit.projects.v1";
 const SCHEMA_BRIDGE_AUTH: &str = "timeline.bridge_auth.v1";
 const BACKEND_MODE_GIT_BRIDGE: &str = "git_bridge";
 const BACKEND_MODE_FUGIT_CLOUD: &str = "fugit_cloud";
+const AUTO_REPLENISH_SOURCE_PLAN: &str = ".fugit:auto_replenish";
+const SYSTEM_AGENT_ID: &str = "fugit.system";
 const TASK_GUI_MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const FUGIT_SKILL_ID: &str = "fugit";
 const FUGIT_SKILL_MD: &str = include_str!("../skills/fugit/SKILL.md");
@@ -413,6 +415,12 @@ struct FugitTask {
     source_key: Option<String>,
     #[serde(default)]
     source_plan: Option<String>,
+    #[serde(default)]
+    awaiting_confirmation: bool,
+    #[serde(default)]
+    approved_at_utc: Option<String>,
+    #[serde(default)]
+    approved_by_agent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -462,6 +470,15 @@ struct TaskQueryFilter {
     focus: Option<String>,
     prefix: Option<String>,
     contains: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AutoReplenishEnsureResult {
+    created_task_ids: Vec<String>,
+    updated_task_ids: Vec<String>,
+    available_task_ids: Vec<String>,
+    pending_confirmation_task_ids: Vec<String>,
+    agent_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -583,6 +600,13 @@ struct TaskGuiRemoveRequest {
     agent: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TaskGuiApproveRequest {
+    task_id: Option<String>,
+    all_pending_auto_replenish: Option<bool>,
+    agent: Option<String>,
+}
+
 #[derive(Debug, Parser)]
 struct LockArgs {
     #[command(subcommand)]
@@ -692,6 +716,20 @@ enum TaskAction {
         agent: Option<String>,
         #[arg(long, default_value_t = false)]
         json: bool,
+    },
+    Approve {
+        #[arg(long)]
+        task_id: Option<String>,
+        #[arg(long, default_value_t = false)]
+        all_pending_auto_replenish: bool,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Policy {
+        #[command(subcommand)]
+        action: TaskPolicyAction,
     },
     Sync {
         #[arg(long)]
@@ -817,6 +855,28 @@ enum TaskStatusArg {
     Done,
 }
 
+#[derive(Debug, Subcommand)]
+enum TaskPolicyAction {
+    Show {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Set {
+        #[arg(long)]
+        auto_replenish_enabled: Option<bool>,
+        #[arg(long)]
+        auto_replenish_confirmation: Option<bool>,
+        #[arg(long = "replenish-agent")]
+        replenish_agents: Vec<String>,
+        #[arg(long, default_value_t = false)]
+        clear_replenish_agents: bool,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum TaskImportFormatArg {
     Auto,
@@ -918,6 +978,12 @@ struct TimelineConfig {
     storage_namespace: Option<String>,
     #[serde(default)]
     billing_account_id: Option<String>,
+    #[serde(default = "default_auto_replenish_enabled")]
+    auto_replenish_enabled: bool,
+    #[serde(default = "default_auto_replenish_require_confirmation")]
+    auto_replenish_require_confirmation: bool,
+    #[serde(default)]
+    auto_replenish_agents: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1049,20 +1115,9 @@ fn cmd_init(repo_root: &Path, args: InitArgs) -> Result<()> {
     let detected_branch = detect_git_branch(repo_root).unwrap_or_else(|| args.branch.clone());
     let bridge_branch = args.bridge_branch.unwrap_or(detected_branch);
 
-    let mut config = load_json_optional::<TimelineConfig>(&timeline_config_path(repo_root))?
-        .unwrap_or(TimelineConfig {
-            schema_version: SCHEMA_CONFIG.to_string(),
-            // Avoid persisting machine-specific absolute paths in project metadata.
-            repo_root: ".".to_string(),
-            created_at_utc: now.clone(),
-            updated_at_utc: now.clone(),
-            backend_mode: default_backend_mode(),
-            default_bridge_remote: args.bridge_remote,
-            default_bridge_branch: bridge_branch,
-            cloud_endpoint: None,
-            storage_namespace: None,
-            billing_account_id: None,
-        });
+    let mut config = load_timeline_config_or_default(repo_root)?;
+    config.default_bridge_remote = args.bridge_remote;
+    config.default_bridge_branch = bridge_branch;
     config.updated_at_utc = now.clone();
     write_pretty_json(&timeline_config_path(repo_root), &config)?;
 
@@ -1365,6 +1420,9 @@ fn fugit_skill_bundle(include_skill_body: bool, include_openai_yaml: bool) -> se
                 "fugit_task_add",
                 "fugit_task_edit",
                 "fugit_task_remove",
+                "fugit_task_approve",
+                "fugit_task_policy_show",
+                "fugit_task_policy_set",
                 "fugit_task_sync",
                 "fugit_task_import",
                 "fugit_task_list",
@@ -3419,6 +3477,116 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 println!("[fugit-task] removed {} by {}", task.task_id, agent_id);
             }
         }
+        TaskAction::Approve {
+            task_id,
+            all_pending_auto_replenish,
+            agent,
+            json,
+        } => {
+            let agent_id = normalize_agent_id(agent);
+            let approved = approve_tasks_in_state(
+                &mut state,
+                task_id.as_deref(),
+                all_pending_auto_replenish,
+                &agent_id,
+            )?;
+            write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+            for task in &approved {
+                append_task_timeline_event(repo_root, task, &agent_id, "edit", None)?;
+            }
+            let payload = json!({
+                "schema_version": "fugit.task.approve.v1",
+                "generated_at_utc": now_utc(),
+                "agent_id": agent_id,
+                "approved_count": approved.len(),
+                "tasks": approved
+            });
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!(
+                    "[fugit-task] approved {} task(s) by {}",
+                    payload["approved_count"].as_u64().unwrap_or(0),
+                    payload["agent_id"].as_str().unwrap_or("unknown")
+                );
+            }
+        }
+        TaskAction::Policy { action } => {
+            let mut config = load_timeline_config_or_default(repo_root)?;
+            match action {
+                TaskPolicyAction::Show { json } => {
+                    if state_changed {
+                        state.updated_at_utc = now_utc();
+                        write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+                    }
+                    let payload = task_policy_payload(&state, &config);
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&payload)?);
+                    } else {
+                        println!(
+                            "[fugit-task-policy] auto_replenish={} confirmation={} configured_agents={} pending_confirmation={}",
+                            payload["auto_replenish_enabled"].as_bool().unwrap_or(true),
+                            payload["auto_replenish_confirmation"]
+                                .as_bool()
+                                .unwrap_or(false),
+                            payload["configured_replenish_agents"]
+                                .as_array()
+                                .map(|rows| rows.len())
+                                .unwrap_or(0),
+                            payload["pending_confirmation_count"].as_u64().unwrap_or(0)
+                        );
+                    }
+                }
+                TaskPolicyAction::Set {
+                    auto_replenish_enabled,
+                    auto_replenish_confirmation,
+                    replenish_agents,
+                    clear_replenish_agents,
+                    agent,
+                    json,
+                } => {
+                    let agent_id = normalize_agent_id(agent);
+                    let config_changed = update_task_policy_config(
+                        &mut config,
+                        auto_replenish_enabled,
+                        auto_replenish_confirmation,
+                        replenish_agents,
+                        clear_replenish_agents,
+                    );
+                    let updated_task_ids = sync_auto_replenish_policy_in_state(&mut state, &config);
+                    if config_changed {
+                        write_pretty_json(&timeline_config_path(repo_root), &config)?;
+                    }
+                    if state_changed || !updated_task_ids.is_empty() {
+                        write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+                    }
+                    for task_id in &updated_task_ids {
+                        if let Some(task) = state.tasks.iter().find(|task| task.task_id == *task_id)
+                        {
+                            append_task_timeline_event(repo_root, task, &agent_id, "edit", None)?;
+                        }
+                    }
+                    let payload = task_policy_payload(&state, &config);
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&payload)?);
+                    } else {
+                        println!(
+                            "[fugit-task-policy] updated_by={} auto_replenish={} confirmation={} configured_agents={} policy_synced_tasks={}",
+                            agent_id,
+                            payload["auto_replenish_enabled"].as_bool().unwrap_or(true),
+                            payload["auto_replenish_confirmation"]
+                                .as_bool()
+                                .unwrap_or(false),
+                            payload["configured_replenish_agents"]
+                                .as_array()
+                                .map(|rows| rows.len())
+                                .unwrap_or(0),
+                            updated_task_ids.len()
+                        );
+                    }
+                }
+            }
+        }
         TaskAction::Sync {
             plan,
             agent,
@@ -3514,6 +3682,9 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                             completion_commands: Vec::new(),
                             source_key: task.source_key.clone(),
                             source_plan: Some(plan_source.clone()),
+                            awaiting_confirmation: false,
+                            approved_at_utc: None,
+                            approved_by_agent_id: None,
                         },
                         &agent_id,
                         "remove",
@@ -3627,6 +3798,9 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                             completion_commands: Vec::new(),
                             source_key: row.source_key.clone(),
                             source_plan: Some(plan_source.clone()),
+                            awaiting_confirmation: false,
+                            approved_at_utc: None,
+                            approved_by_agent_id: None,
                         };
                         key_to_task_id.insert(row.key.clone(), task.task_id.clone());
                         imported_records.push(json!({
@@ -3721,7 +3895,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 bail!("task request --max > 1 requires --no-claim");
             }
             let now = Utc::now();
-            let candidates = select_task_candidates_for_agent(
+            let config = load_timeline_config_or_default(repo_root)?;
+            let mut candidates = select_task_candidates_for_agent(
                 &state,
                 &agent_id,
                 &filters,
@@ -3731,10 +3906,67 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 now,
                 max,
             );
+            let mut auto_replenish = AutoReplenishEnsureResult::default();
+            let should_seed_auto_replenish = candidates.is_empty()
+                && config.auto_replenish_enabled
+                && !agent_has_available_standard_work(
+                    &state,
+                    &agent_id,
+                    !no_steal,
+                    steal_after_minutes,
+                    now,
+                );
+            if should_seed_auto_replenish {
+                auto_replenish = ensure_auto_replenish_tasks(&mut state, &config, &agent_id);
+                candidates = select_auto_replenish_candidates_for_agent(
+                    &state,
+                    &agent_id,
+                    !no_steal,
+                    !skip_owned,
+                    steal_after_minutes,
+                    now,
+                    max,
+                );
+            }
+
+            let mut timeline_events =
+                Vec::<(String, String, String, Option<TaskDispatchKind>)>::new();
+            for task_id in &auto_replenish.created_task_ids {
+                timeline_events.push((
+                    task_id.clone(),
+                    SYSTEM_AGENT_ID.to_string(),
+                    "add".to_string(),
+                    None,
+                ));
+            }
+            for task_id in &auto_replenish.updated_task_ids {
+                timeline_events.push((
+                    task_id.clone(),
+                    SYSTEM_AGENT_ID.to_string(),
+                    "edit".to_string(),
+                    None,
+                ));
+            }
+
             let Some((task_index, dispatch_kind)) = candidates.first().copied() else {
-                if state_changed {
+                if state_changed
+                    || !auto_replenish.created_task_ids.is_empty()
+                    || !auto_replenish.updated_task_ids.is_empty()
+                {
                     state.updated_at_utc = now_utc();
                     write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+                    for (task_id, event_agent_id, action, dispatch) in timeline_events {
+                        if let Some(task) = state.tasks.iter().find(|task| task.task_id == task_id)
+                        {
+                            append_task_timeline_event(
+                                repo_root,
+                                task,
+                                &event_agent_id,
+                                &action,
+                                dispatch,
+                            )?;
+                        }
+                    }
                 }
                 let payload = json!({
                     "schema_version": "fugit.task.request.v1",
@@ -3751,16 +3983,39 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                         "prefix": filters.prefix,
                         "contains": filters.contains
                     },
+                    "auto_replenish": {
+                        "enabled": config.auto_replenish_enabled,
+                        "triggered": should_seed_auto_replenish,
+                        "confirmation_required": config.auto_replenish_require_confirmation,
+                        "agent_ids": auto_replenish.agent_ids,
+                        "created_task_ids": auto_replenish.created_task_ids,
+                        "updated_task_ids": auto_replenish.updated_task_ids,
+                        "pending_confirmation_task_ids": auto_replenish.pending_confirmation_task_ids
+                    },
                     "tasks": [],
                     "task": null
                 });
                 if json {
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else {
-                    println!(
-                        "[fugit-task] no ready tasks available for agent={}",
-                        payload["agent_id"]
-                    );
+                    if payload["auto_replenish"]["triggered"]
+                        .as_bool()
+                        .unwrap_or(false)
+                        && payload["auto_replenish"]["pending_confirmation_task_ids"]
+                            .as_array()
+                            .map(|rows| !rows.is_empty())
+                            .unwrap_or(false)
+                    {
+                        println!(
+                            "[fugit-task] auto-replenish is waiting for confirmation for agent={}",
+                            payload["agent_id"]
+                        );
+                    } else {
+                        println!(
+                            "[fugit-task] no ready tasks available for agent={}",
+                            payload["agent_id"]
+                        );
+                    }
                 }
                 return Ok(());
             };
@@ -3776,20 +4031,33 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 state.updated_at_utc = now_utc();
                 write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
                 claimed = true;
-            } else if state_changed {
+                timeline_events.push((
+                    state.tasks[task_index].task_id.clone(),
+                    agent_id.clone(),
+                    "claim".to_string(),
+                    Some(dispatch_kind),
+                ));
+            }
+            if state_changed
+                || !auto_replenish.created_task_ids.is_empty()
+                || !auto_replenish.updated_task_ids.is_empty()
+                || claimed
+            {
                 state.updated_at_utc = now_utc();
                 write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+                for (task_id, event_agent_id, action, dispatch) in timeline_events {
+                    if let Some(task) = state.tasks.iter().find(|task| task.task_id == task_id) {
+                        append_task_timeline_event(
+                            repo_root,
+                            task,
+                            &event_agent_id,
+                            &action,
+                            dispatch,
+                        )?;
+                    }
+                }
             }
             let task = state.tasks[task_index].clone();
-            if claimed {
-                append_task_timeline_event(
-                    repo_root,
-                    &task,
-                    &agent_id,
-                    "claim",
-                    Some(dispatch_kind),
-                )?;
-            }
             let status_map = task_status_map(&state);
             let task_rows = candidates
                 .iter()
@@ -3815,6 +4083,15 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     "focus": filters.focus,
                     "prefix": filters.prefix,
                     "contains": filters.contains
+                },
+                "auto_replenish": {
+                    "enabled": config.auto_replenish_enabled,
+                    "triggered": should_seed_auto_replenish,
+                    "confirmation_required": config.auto_replenish_require_confirmation,
+                    "agent_ids": auto_replenish.agent_ids,
+                    "created_task_ids": auto_replenish.created_task_ids,
+                    "updated_task_ids": auto_replenish.updated_task_ids,
+                    "pending_confirmation_task_ids": auto_replenish.pending_confirmation_task_ids
                 },
                 "tasks": task_rows,
                 "task": task_to_json_payload(&task, &status_map)
@@ -3850,6 +4127,12 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             let task = &state.tasks[task_index];
             if task.status == TaskStatus::Done {
                 bail!("task already completed: {}", task.task_id);
+            }
+            if task.awaiting_confirmation {
+                bail!(
+                    "task {} is awaiting confirmation before it can be claimed",
+                    task.task_id
+                );
             }
             if let Some(owner) = task.claimed_by_agent_id.as_deref()
                 && owner != agent_id
@@ -4126,9 +4409,18 @@ fn task_timeline_summary(
     dispatch_kind: Option<TaskDispatchKind>,
 ) -> String {
     let title = task.title.trim();
+    let action_label = if task_is_auto_replenish(task) {
+        format!("auto-replenish {}", action)
+    } else {
+        action.to_string()
+    };
     match (action, dispatch_kind) {
-        ("add", _) => format!("task add: {} \"{}\"", task.task_id, title),
-        ("edit", _) => format!("task edit: {} \"{}\"", task.task_id, title),
+        ("add", _) if task_is_auto_replenish(task) => {
+            format!("task auto-replenish add: {} \"{}\"", task.task_id, title)
+        }
+        ("edit", _) if task_is_auto_replenish(task) => {
+            format!("task auto-replenish edit: {} \"{}\"", task.task_id, title)
+        }
         ("claim", Some(dispatch)) => format!(
             "task claim: {} \"{}\" (dispatch={})",
             task.task_id,
@@ -4140,7 +4432,7 @@ fn task_timeline_summary(
         ("reopen", _) => format!("task reopen: {} \"{}\"", task.task_id, title),
         ("remove", _) => format!("task remove: {} \"{}\"", task.task_id, title),
         ("release", _) => format!("task release: {} \"{}\"", task.task_id, title),
-        (other, _) => format!("task {}: {} \"{}\"", other, task.task_id, title),
+        (_, _) => format!("task {}: {} \"{}\"", action_label, task.task_id, title),
     }
 }
 
@@ -4156,6 +4448,12 @@ fn task_timeline_tags(
     ];
     if let Some(dispatch) = dispatch_kind {
         tags.push(format!("task_dispatch:{}", dispatch.as_str()));
+    }
+    if task_is_auto_replenish(task) {
+        tags.push("task_kind:auto_replenish".to_string());
+        if let Some(agent_id) = task_auto_replenish_agent_id(task) {
+            tags.push(format!("task_replenish_agent:{}", agent_id));
+        }
     }
     for tag in &task.tags {
         tags.push(format!("task_tag:{}", tag));
@@ -4409,6 +4707,28 @@ fn handle_task_gui_connection(
         }
         let selected_project = query.get("project").map(String::as_str).or(default_project);
         return match task_gui_remove_task(repo_root, selected_project, &request.body) {
+            Ok(payload) => write_http_json(stream, "200 OK", &payload),
+            Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
+        };
+    }
+
+    if path == "/api/tasks/approve" {
+        if method != "POST" {
+            return write_http_json_error(
+                stream,
+                "405 Method Not Allowed",
+                "POST required for /api/tasks/approve",
+            );
+        }
+        if !request_content_type_is_json(&request) {
+            return write_http_json_error(
+                stream,
+                "415 Unsupported Media Type",
+                "application/json body required for /api/tasks/approve",
+            );
+        }
+        let selected_project = query.get("project").map(String::as_str).or(default_project);
+        return match task_gui_approve_task(repo_root, selected_project, &request.body) {
             Ok(payload) => write_http_json(stream, "200 OK", &payload),
             Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
         };
@@ -4818,6 +5138,41 @@ fn task_gui_remove_task(
     }))
 }
 
+fn task_gui_approve_task(
+    repo_root: &Path,
+    project_selector: Option<&str>,
+    body: &[u8],
+) -> Result<serde_json::Value> {
+    let request: TaskGuiApproveRequest =
+        serde_json::from_slice(body).with_context(|| "invalid task gui approve payload")?;
+    let (_projects, selected, selected_repo) =
+        resolve_task_gui_project_selection(repo_root, project_selector)?;
+    let mut state = load_task_state(&selected_repo)?;
+    let _ = prune_expired_task_claims(&mut state)?;
+    let agent_id = normalize_agent_id(request.agent);
+    let approved = approve_tasks_in_state(
+        &mut state,
+        request.task_id.as_deref(),
+        request.all_pending_auto_replenish.unwrap_or(false),
+        &agent_id,
+    )?;
+    write_pretty_json(&timeline_tasks_path(&selected_repo), &state)?;
+    for task in &approved {
+        append_task_timeline_event(&selected_repo, task, &agent_id, "edit", None)?;
+    }
+    Ok(json!({
+        "ok": true,
+        "action": "approve",
+        "selected_project": {
+            "key": selected.key,
+            "name": selected.name,
+            "repo_root": selected.repo_root
+        },
+        "approved_count": approved.len(),
+        "tasks": approved
+    }))
+}
+
 fn task_gui_payload(repo_root: &Path, project_selector: Option<&str>) -> Result<serde_json::Value> {
     let (projects, selected, selected_repo) =
         resolve_task_gui_project_selection(repo_root, project_selector)?;
@@ -4827,6 +5182,7 @@ fn task_gui_payload(repo_root: &Path, project_selector: Option<&str>) -> Result<
         state.updated_at_utc = now_utc();
         write_pretty_json(&timeline_tasks_path(&selected_repo), &state)?;
     }
+    let config = load_timeline_config_or_default(&selected_repo)?;
     let status_map = task_status_map(&state);
     let mut indices: Vec<usize> = (0..state.tasks.len()).collect();
     sort_task_indices(&state, &mut indices);
@@ -4844,6 +5200,7 @@ fn task_gui_payload(repo_root: &Path, project_selector: Option<&str>) -> Result<
         },
         "projects": projects,
         "timeline_initialized": timeline_is_initialized(&selected_repo),
+        "policy": task_policy_payload(&state, &config),
         "count": tasks.len(),
         "tasks": tasks
     }))
@@ -5519,9 +5876,18 @@ fn task_gui_html() -> &'static str {
           : "";
         const deps = (task.depends_on || []).join(", ");
         const blockedBy = (task.blocked_by || []).join(", ");
+        const awaitingConfirmation = !!task.awaiting_confirmation;
         const stateLine = task.ready
           ? `<span class="ready">ready</span>`
-          : `<span class="blocked">blocked by: ${escapeHtml(blockedBy || "unknown")}</span>`;
+          : awaitingConfirmation
+            ? `<span class="blocked">awaiting approval before dispatch</span>`
+            : `<span class="blocked">blocked by: ${escapeHtml(blockedBy || "unknown")}</span>`;
+        const approveButton = awaitingConfirmation
+          ? `<button type="button" class="ghost-button approve-task" data-task-id="${escapeHtml(task.task_id)}">approve</button>`
+          : "";
+        const autoReplenishMeta = task.auto_replenish
+          ? `<div class="meta-row">auto replenish: ${escapeHtml(task.source_key || "system")}</div>`
+          : "";
         return `
           <article class="card">
             <div class="row">
@@ -5532,12 +5898,14 @@ fn task_gui_html() -> &'static str {
             ${detail}
             <div class="meta-row">claimed by: ${escapeHtml(task.claimed_by_agent_id || "none")}</div>
             <div class="meta-row">depends on: ${escapeHtml(deps || "none")}</div>
+            ${autoReplenishMeta}
             ${completedSummary}
             ${completionArtifacts}
             ${completionCommands}
             <div class="state">${stateLine}</div>
             <div class="tags">${tags}</div>
             <div class="task-actions">
+              ${approveButton}
               <button type="button" class="ghost-button edit-task" data-task-id="${escapeHtml(task.task_id)}">edit</button>
               <button type="button" class="ghost-button danger-button remove-task" data-task-id="${escapeHtml(task.task_id)}">remove</button>
             </div>
@@ -5577,6 +5945,30 @@ fn task_gui_html() -> &'static str {
             await refreshTimeline(true);
           } catch (error) {
             setActionMessage(`remove failed: ${error}`, "error");
+          }
+        };
+      });
+
+      byId("tasks").querySelectorAll(".approve-task").forEach((button) => {
+        button.onclick = async () => {
+          const task = tasks.find((candidate) => candidate.task_id === button.dataset.taskId);
+          if (!task) return;
+          try {
+            const payload = { task_id: task.task_id };
+            const agent = currentAgentId();
+            if (agent) payload.agent = agent;
+            const response = await fetch(`/api/tasks/approve${projectQuery()}`, {
+              method: "POST",
+              cache: "no-store",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload)
+            });
+            const result = await readJsonResponse(response);
+            setActionMessage(`approved ${result.tasks?.[0]?.task_id || task.task_id}`);
+            await refresh();
+            await refreshTimeline(true);
+          } catch (error) {
+            setActionMessage(`approve failed: ${error}`, "error");
           }
         };
       });
@@ -5655,7 +6047,9 @@ fn task_gui_html() -> &'static str {
         const project = payload.selected_project || {};
         const label = project.name ? `${project.name} • ${project.repo_root}` : "unknown project";
         const initState = payload.timeline_initialized ? "initialized" : "not initialized";
-        byId("meta").textContent = `project: ${label} • ${initState} • updated: ${new Date(payload.generated_at_utc).toLocaleString()} • total: ${tasks.length}`;
+        const policy = payload.policy || {};
+        const policyText = `auto_replenish=${policy.auto_replenish_enabled !== false ? "on" : "off"} • confirm=${policy.auto_replenish_confirmation ? "on" : "off"} • pending=${policy.pending_confirmation_count || 0}`;
+        byId("meta").textContent = `project: ${label} • ${initState} • ${policyText} • updated: ${new Date(payload.generated_at_utc).toLocaleString()} • total: ${tasks.length}`;
         renderSummary(tasks);
         renderTasks(tasks);
         if (selectedProject !== previousProject) {
@@ -5996,6 +6390,40 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
+            "name": "fugit_task_approve",
+            "description": "Approve one pending task or all pending auto-replenish tasks awaiting confirmation.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "all_pending_auto_replenish": { "type": "boolean" },
+                    "agent": { "type": "string" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_task_policy_show",
+            "description": "Inspect task auto-replenish policy and confirmation state.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }),
+        json!({
+            "name": "fugit_task_policy_set",
+            "description": "Update task auto-replenish policy and configured replenish agents.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "auto_replenish_enabled": { "type": "boolean" },
+                    "auto_replenish_confirmation": { "type": "boolean" },
+                    "replenish_agents": { "type": "array", "items": { "type": "string" } },
+                    "clear_replenish_agents": { "type": "boolean" },
+                    "agent": { "type": "string" }
+                }
+            }
+        }),
+        json!({
             "name": "fugit_task_sync",
             "description": "Reconcile a markdown/TSV plan file or markdown payload with the task queue.",
             "inputSchema": {
@@ -6043,7 +6471,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
         }),
         json!({
             "name": "fugit_task_request",
-            "description": "Request the next best task for an agent with dependency-aware ordering and work stealing.",
+            "description": "Request the next best task for an agent with dependency-aware ordering, work stealing, and auto-replenish fallback when the queue is exhausted.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -6547,6 +6975,83 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 task_id.to_string(),
                 "--json".to_string(),
             ];
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_task_approve" => {
+            let mut cli_args = vec![
+                "task".to_string(),
+                "approve".to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(task_id) = args.get("task_id").and_then(serde_json::Value::as_str) {
+                cli_args.push("--task-id".to_string());
+                cli_args.push(task_id.to_string());
+            }
+            if args
+                .get("all_pending_auto_replenish")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--all-pending-auto-replenish".to_string());
+            }
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_task_policy_show" => {
+            let cli_args = vec![
+                "task".to_string(),
+                "policy".to_string(),
+                "show".to_string(),
+                "--json".to_string(),
+            ];
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_task_policy_set" => {
+            let mut cli_args = vec![
+                "task".to_string(),
+                "policy".to_string(),
+                "set".to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(enabled) = args
+                .get("auto_replenish_enabled")
+                .and_then(serde_json::Value::as_bool)
+            {
+                cli_args.push("--auto-replenish-enabled".to_string());
+                cli_args.push(enabled.to_string());
+            }
+            if let Some(require_confirmation) = args
+                .get("auto_replenish_confirmation")
+                .and_then(serde_json::Value::as_bool)
+            {
+                cli_args.push("--auto-replenish-confirmation".to_string());
+                cli_args.push(require_confirmation.to_string());
+            }
+            if let Some(replenish_agents) = args
+                .get("replenish_agents")
+                .and_then(serde_json::Value::as_array)
+            {
+                for agent in replenish_agents {
+                    if let Some(agent_id) = agent.as_str() {
+                        cli_args.push("--replenish-agent".to_string());
+                        cli_args.push(agent_id.to_string());
+                    }
+                }
+            }
+            if args
+                .get("clear_replenish_agents")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--clear-replenish-agents".to_string());
+            }
             if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
                 cli_args.push("--agent".to_string());
                 cli_args.push(agent.to_string());
@@ -7476,6 +7981,33 @@ fn load_initialized_state(repo_root: &Path) -> Result<(TimelineConfig, BranchesS
     Ok((config, branches))
 }
 
+fn build_default_timeline_config(repo_root: &Path) -> TimelineConfig {
+    let now = now_utc();
+    let default_branch = detect_git_branch(repo_root).unwrap_or_else(|| "trunk".to_string());
+    TimelineConfig {
+        schema_version: SCHEMA_CONFIG.to_string(),
+        repo_root: ".".to_string(),
+        created_at_utc: now.clone(),
+        updated_at_utc: now,
+        backend_mode: default_backend_mode(),
+        default_bridge_remote: "origin".to_string(),
+        default_bridge_branch: default_branch,
+        cloud_endpoint: None,
+        storage_namespace: None,
+        billing_account_id: None,
+        auto_replenish_enabled: default_auto_replenish_enabled(),
+        auto_replenish_require_confirmation: default_auto_replenish_require_confirmation(),
+        auto_replenish_agents: Vec::new(),
+    }
+}
+
+fn load_timeline_config_or_default(repo_root: &Path) -> Result<TimelineConfig> {
+    Ok(
+        load_json_optional::<TimelineConfig>(&timeline_config_path(repo_root))?
+            .unwrap_or_else(|| build_default_timeline_config(repo_root)),
+    )
+}
+
 fn detect_git_branch(repo_root: &Path) -> Option<String> {
     let output = ProcessCommand::new("git")
         .current_dir(repo_root)
@@ -8022,6 +8554,9 @@ fn build_manual_task(
         completion_commands: Vec::new(),
         source_key: None,
         source_plan: None,
+        awaiting_confirmation: false,
+        approved_at_utc: None,
+        approved_by_agent_id: None,
     })
 }
 
@@ -8173,6 +8708,153 @@ fn reopen_task_in_state(state: &mut TaskState, task_id: &str, agent_id: &str) ->
     Ok(state.tasks[task_index].clone())
 }
 
+fn approve_tasks_in_state(
+    state: &mut TaskState,
+    task_id: Option<&str>,
+    all_pending_auto_replenish: bool,
+    agent_id: &str,
+) -> Result<Vec<FugitTask>> {
+    if task_id.is_some() && all_pending_auto_replenish {
+        bail!("task approve accepts either --task-id or --all-pending-auto-replenish");
+    }
+    if task_id.is_none() && !all_pending_auto_replenish {
+        bail!("task approve requires --task-id or --all-pending-auto-replenish");
+    }
+
+    let indices = if let Some(task_id) = task_id {
+        let task_index = state
+            .tasks
+            .iter()
+            .position(|task| task.task_id == task_id)
+            .ok_or_else(|| anyhow!("task not found: {}", task_id))?;
+        vec![task_index]
+    } else {
+        state
+            .tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, task)| {
+                task.status == TaskStatus::Open
+                    && task.awaiting_confirmation
+                    && task_is_auto_replenish(task)
+            })
+            .map(|(idx, _)| idx)
+            .collect::<Vec<_>>()
+    };
+
+    if indices.is_empty() {
+        bail!("no pending auto-replenish tasks are awaiting confirmation");
+    }
+
+    let mut approved = Vec::<FugitTask>::new();
+    let now = now_utc();
+    for task_index in indices {
+        if !state.tasks[task_index].awaiting_confirmation {
+            bail!(
+                "task {} is not awaiting confirmation",
+                state.tasks[task_index].task_id
+            );
+        }
+        state.tasks[task_index].awaiting_confirmation = false;
+        state.tasks[task_index].approved_at_utc = Some(now.clone());
+        state.tasks[task_index].approved_by_agent_id = Some(agent_id.to_string());
+        state.tasks[task_index].updated_at_utc = now.clone();
+        approved.push(state.tasks[task_index].clone());
+    }
+    state.updated_at_utc = now;
+    Ok(approved)
+}
+
+fn sync_auto_replenish_policy_in_state(
+    state: &mut TaskState,
+    config: &TimelineConfig,
+) -> Vec<String> {
+    let mut updated = Vec::<String>::new();
+    for task in &mut state.tasks {
+        if sync_auto_replenish_task_confirmation(task, config.auto_replenish_require_confirmation) {
+            updated.push(task.task_id.clone());
+        }
+    }
+    if !updated.is_empty() {
+        state.updated_at_utc = now_utc();
+    }
+    updated
+}
+
+fn update_task_policy_config(
+    config: &mut TimelineConfig,
+    auto_replenish_enabled: Option<bool>,
+    auto_replenish_confirmation: Option<bool>,
+    replenish_agents: Vec<String>,
+    clear_replenish_agents: bool,
+) -> bool {
+    let mut changed = false;
+    if let Some(enabled) = auto_replenish_enabled
+        && config.auto_replenish_enabled != enabled
+    {
+        config.auto_replenish_enabled = enabled;
+        changed = true;
+    }
+    if let Some(require_confirmation) = auto_replenish_confirmation
+        && config.auto_replenish_require_confirmation != require_confirmation
+    {
+        config.auto_replenish_require_confirmation = require_confirmation;
+        changed = true;
+    }
+    if clear_replenish_agents {
+        if !config.auto_replenish_agents.is_empty() {
+            config.auto_replenish_agents.clear();
+            changed = true;
+        }
+    }
+    let normalized_agents = dedupe_keep_order(
+        replenish_agents
+            .into_iter()
+            .filter_map(|value| {
+                let trimmed = value.trim().to_string();
+                if trimmed.is_empty() || trimmed == SYSTEM_AGENT_ID {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            })
+            .collect(),
+    );
+    for agent_id in normalized_agents {
+        if !config.auto_replenish_agents.contains(&agent_id) {
+            config.auto_replenish_agents.push(agent_id);
+            changed = true;
+        }
+    }
+    if changed {
+        config.updated_at_utc = now_utc();
+    }
+    changed
+}
+
+fn task_policy_payload(state: &TaskState, config: &TimelineConfig) -> serde_json::Value {
+    let pending_confirmation_task_ids = state
+        .tasks
+        .iter()
+        .filter(|task| {
+            task.status == TaskStatus::Open
+                && task.awaiting_confirmation
+                && task_is_auto_replenish(task)
+        })
+        .map(|task| task.task_id.clone())
+        .collect::<Vec<_>>();
+    json!({
+        "schema_version": "fugit.task.policy.v1",
+        "generated_at_utc": now_utc(),
+        "auto_replenish_enabled": config.auto_replenish_enabled,
+        "auto_replenish_confirmation": config.auto_replenish_require_confirmation,
+        "configured_replenish_agents": config.auto_replenish_agents,
+        "observed_replenish_agents": collect_auto_replenish_agents(state, config, ""),
+        "pending_confirmation_count": pending_confirmation_task_ids.len(),
+        "pending_confirmation_task_ids": pending_confirmation_task_ids
+    })
+}
+
 fn normalize_task_query_filter(
     tags: Vec<String>,
     focus: Option<String>,
@@ -8185,6 +8867,190 @@ fn normalize_task_query_filter(
         prefix: normalize_optional_text(prefix, "task prefix")?,
         contains: normalize_optional_text(contains, "task contains")?,
     })
+}
+
+fn auto_replenish_source_key(agent_id: &str) -> String {
+    format!("agent:{}", agent_id.trim())
+}
+
+fn task_is_auto_replenish(task: &FugitTask) -> bool {
+    task.source_plan.as_deref() == Some(AUTO_REPLENISH_SOURCE_PLAN)
+}
+
+fn task_auto_replenish_agent_id(task: &FugitTask) -> Option<&str> {
+    if !task_is_auto_replenish(task) {
+        return None;
+    }
+    task.source_key
+        .as_deref()
+        .and_then(|value| value.strip_prefix("agent:"))
+}
+
+fn task_is_auto_replenish_for_agent(task: &FugitTask, agent_id: &str) -> bool {
+    task_auto_replenish_agent_id(task) == Some(agent_id)
+}
+
+fn task_is_ready_for_dispatch(task: &FugitTask, status_map: &BTreeMap<String, TaskStatus>) -> bool {
+    task.status != TaskStatus::Done
+        && !task.awaiting_confirmation
+        && task_blocked_by(task, status_map).is_empty()
+}
+
+fn collect_auto_replenish_agents(
+    state: &TaskState,
+    config: &TimelineConfig,
+    requesting_agent_id: &str,
+) -> Vec<String> {
+    let mut agents = Vec::<String>::new();
+    for configured in &config.auto_replenish_agents {
+        let trimmed = configured.trim();
+        if trimmed.is_empty() || trimmed == SYSTEM_AGENT_ID {
+            continue;
+        }
+        agents.push(trimmed.to_string());
+    }
+    for task in &state.tasks {
+        for candidate in [
+            Some(task.created_by_agent_id.as_str()),
+            task.claimed_by_agent_id.as_deref(),
+            task.completed_by_agent_id.as_deref(),
+        ] {
+            let Some(agent_id) = candidate else {
+                continue;
+            };
+            let trimmed = agent_id.trim();
+            if trimmed.is_empty() || trimmed == SYSTEM_AGENT_ID {
+                continue;
+            }
+            agents.push(trimmed.to_string());
+        }
+    }
+    if !requesting_agent_id.trim().is_empty() && requesting_agent_id != SYSTEM_AGENT_ID {
+        agents.push(requesting_agent_id.to_string());
+    }
+    dedupe_keep_order(agents)
+}
+
+fn build_auto_replenish_task(agent_id: &str, require_confirmation: bool) -> FugitTask {
+    let now = now_utc();
+    FugitTask {
+        task_id: format!("task_{}", Uuid::new_v4().simple()),
+        title: format!("Scout for more tasks to add to fugit ({})", agent_id),
+        detail: Some(
+            "The ready queue is empty for this agent. Inspect the repo, identify the next useful backlog items, and add them to fugit after checking for duplicates.".to_string(),
+        ),
+        priority: 0,
+        tags: vec![
+            "system:auto-replenish".to_string(),
+            "workflow:queue-scout".to_string(),
+        ],
+        depends_on: Vec::new(),
+        status: TaskStatus::Open,
+        created_at_utc: now.clone(),
+        updated_at_utc: now.clone(),
+        created_by_agent_id: SYSTEM_AGENT_ID.to_string(),
+        claimed_by_agent_id: None,
+        claim_started_at_utc: None,
+        claim_expires_at_utc: None,
+        completed_at_utc: None,
+        completed_by_agent_id: None,
+        completed_summary: None,
+        completion_notes: Vec::new(),
+        completion_artifacts: Vec::new(),
+        completion_commands: Vec::new(),
+        source_key: Some(auto_replenish_source_key(agent_id)),
+        source_plan: Some(AUTO_REPLENISH_SOURCE_PLAN.to_string()),
+        awaiting_confirmation: require_confirmation,
+        approved_at_utc: None,
+        approved_by_agent_id: None,
+    }
+}
+
+fn sync_auto_replenish_task_confirmation(task: &mut FugitTask, require_confirmation: bool) -> bool {
+    if !task_is_auto_replenish(task) || task.status != TaskStatus::Open {
+        return false;
+    }
+    let mut changed = false;
+    let now = now_utc();
+    if require_confirmation {
+        if !task.awaiting_confirmation
+            && task.approved_at_utc.is_none()
+            && task.approved_by_agent_id.is_none()
+        {
+            task.awaiting_confirmation = true;
+            task.approved_at_utc = None;
+            task.approved_by_agent_id = None;
+            changed = true;
+        }
+    } else if task.awaiting_confirmation {
+        task.awaiting_confirmation = false;
+        task.approved_at_utc = Some(now.clone());
+        task.approved_by_agent_id = Some(SYSTEM_AGENT_ID.to_string());
+        changed = true;
+    }
+    if changed {
+        task.updated_at_utc = now;
+    }
+    changed
+}
+
+fn ensure_auto_replenish_tasks(
+    state: &mut TaskState,
+    config: &TimelineConfig,
+    requesting_agent_id: &str,
+) -> AutoReplenishEnsureResult {
+    let agent_ids = collect_auto_replenish_agents(state, config, requesting_agent_id);
+    let mut result = AutoReplenishEnsureResult {
+        agent_ids: agent_ids.clone(),
+        ..AutoReplenishEnsureResult::default()
+    };
+    for agent_id in agent_ids {
+        let mut active_indices = state
+            .tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, task)| {
+                task.status != TaskStatus::Done && task_is_auto_replenish_for_agent(task, &agent_id)
+            })
+            .map(|(idx, _)| idx)
+            .collect::<Vec<_>>();
+        active_indices.sort_by_key(|idx| state.tasks[*idx].updated_at_utc.clone());
+        if let Some(task_index) = active_indices.pop() {
+            if sync_auto_replenish_task_confirmation(
+                &mut state.tasks[task_index],
+                config.auto_replenish_require_confirmation,
+            ) {
+                result
+                    .updated_task_ids
+                    .push(state.tasks[task_index].task_id.clone());
+            }
+            result
+                .available_task_ids
+                .push(state.tasks[task_index].task_id.clone());
+            if state.tasks[task_index].awaiting_confirmation {
+                result
+                    .pending_confirmation_task_ids
+                    .push(state.tasks[task_index].task_id.clone());
+            }
+            continue;
+        }
+
+        let task = build_auto_replenish_task(&agent_id, config.auto_replenish_require_confirmation);
+        result.created_task_ids.push(task.task_id.clone());
+        result.available_task_ids.push(task.task_id.clone());
+        if task.awaiting_confirmation {
+            result
+                .pending_confirmation_task_ids
+                .push(task.task_id.clone());
+        }
+        state.tasks.push(task);
+    }
+
+    if !result.created_task_ids.is_empty() || !result.updated_task_ids.is_empty() {
+        state.updated_at_utc = now_utc();
+    }
+
+    result
 }
 
 fn task_search_haystacks(task: &FugitTask) -> Vec<String> {
@@ -8247,8 +9113,11 @@ fn task_to_json_payload(
     task: &FugitTask,
     status_map: &BTreeMap<String, TaskStatus>,
 ) -> serde_json::Value {
-    let blocked_by = task_blocked_by(task, status_map);
-    let ready = task.status != TaskStatus::Done && blocked_by.is_empty();
+    let mut blocked_by = task_blocked_by(task, status_map);
+    if task.awaiting_confirmation {
+        blocked_by.push("confirmation".to_string());
+    }
+    let ready = task_is_ready_for_dispatch(task, status_map);
     json!({
         "task_id": task.task_id,
         "title": task.title,
@@ -8271,7 +9140,11 @@ fn task_to_json_payload(
         "completion_commands": task.completion_commands,
         "claim_expires_at_utc": task.claim_expires_at_utc,
         "source_key": task.source_key,
-        "source_plan": task.source_plan
+        "source_plan": task.source_plan,
+        "auto_replenish": task_is_auto_replenish(task),
+        "awaiting_confirmation": task.awaiting_confirmation,
+        "approved_at_utc": task.approved_at_utc,
+        "approved_by_agent_id": task.approved_by_agent_id
     })
 }
 
@@ -8803,6 +9676,9 @@ fn sync_plan_into_task_state(
                     completion_commands: Vec::new(),
                     source_key: row.source_key.clone(),
                     source_plan: Some(plan_source.to_string()),
+                    awaiting_confirmation: false,
+                    approved_at_utc: None,
+                    approved_by_agent_id: None,
                 };
                 key_to_task_id.insert(row.key.clone(), task.task_id.clone());
                 expected_task_ids.insert(task.task_id.clone());
@@ -9195,10 +10071,13 @@ fn select_task_candidates_for_agent(
         if task.status == TaskStatus::Done {
             continue;
         }
+        if task_is_auto_replenish(task) {
+            continue;
+        }
         if !task_matches_query_filter(task, filters) {
             continue;
         }
-        if !task_blocked_by(task, &status_map).is_empty() {
+        if !task_is_ready_for_dispatch(task, &status_map) {
             continue;
         }
         match task.status {
@@ -9238,6 +10117,89 @@ fn select_task_candidates_for_agent(
         out.push((idx, TaskDispatchKind::Steal));
     }
     out
+}
+
+fn select_auto_replenish_candidates_for_agent(
+    state: &TaskState,
+    agent_id: &str,
+    allow_steal: bool,
+    include_owned_claims: bool,
+    steal_after_minutes: i64,
+    now: DateTime<Utc>,
+    max: usize,
+) -> Vec<(usize, TaskDispatchKind)> {
+    if max == 0 {
+        return Vec::new();
+    }
+    let status_map = task_status_map(state);
+    let mut owned_claims = Vec::<usize>::new();
+    let mut open_tasks = Vec::<usize>::new();
+    let mut stealable_tasks = Vec::<usize>::new();
+
+    for (idx, task) in state.tasks.iter().enumerate() {
+        if !task_is_auto_replenish_for_agent(task, agent_id) {
+            continue;
+        }
+        if !task_is_ready_for_dispatch(task, &status_map) {
+            continue;
+        }
+        match task.status {
+            TaskStatus::Open => open_tasks.push(idx),
+            TaskStatus::Claimed => {
+                if include_owned_claims && task.claimed_by_agent_id.as_deref() == Some(agent_id) {
+                    owned_claims.push(idx);
+                } else if allow_steal && task_claim_is_stale(task, now, steal_after_minutes) {
+                    stealable_tasks.push(idx);
+                }
+            }
+            TaskStatus::Done => {}
+        }
+    }
+
+    sort_task_indices(state, &mut owned_claims);
+    sort_task_indices(state, &mut open_tasks);
+    sort_task_indices(state, &mut stealable_tasks);
+
+    let mut out = Vec::<(usize, TaskDispatchKind)>::new();
+    for idx in owned_claims {
+        if out.len() >= max {
+            return out;
+        }
+        out.push((idx, TaskDispatchKind::OwnedClaim));
+    }
+    for idx in open_tasks {
+        if out.len() >= max {
+            return out;
+        }
+        out.push((idx, TaskDispatchKind::Open));
+    }
+    for idx in stealable_tasks {
+        if out.len() >= max {
+            return out;
+        }
+        out.push((idx, TaskDispatchKind::Steal));
+    }
+    out
+}
+
+fn agent_has_available_standard_work(
+    state: &TaskState,
+    agent_id: &str,
+    allow_steal: bool,
+    steal_after_minutes: i64,
+    now: DateTime<Utc>,
+) -> bool {
+    !select_task_candidates_for_agent(
+        state,
+        agent_id,
+        &TaskQueryFilter::default(),
+        allow_steal,
+        true,
+        steal_after_minutes,
+        now,
+        1,
+    )
+    .is_empty()
 }
 
 fn apply_task_claim(
@@ -9661,6 +10623,14 @@ fn default_backend_mode() -> String {
     BACKEND_MODE_GIT_BRIDGE.to_string()
 }
 
+fn default_auto_replenish_enabled() -> bool {
+    true
+}
+
+fn default_auto_replenish_require_confirmation() -> bool {
+    false
+}
+
 fn timeline_is_initialized(repo_root: &Path) -> bool {
     timeline_config_path(repo_root).exists() && timeline_branches_path(repo_root).exists()
 }
@@ -9775,6 +10745,35 @@ mod tests {
         }
     }
 
+    fn sample_task(task_id: &str, title: &str, priority: i32, status: TaskStatus) -> FugitTask {
+        FugitTask {
+            task_id: task_id.to_string(),
+            title: title.to_string(),
+            detail: None,
+            priority,
+            tags: vec![],
+            depends_on: vec![],
+            status,
+            created_at_utc: now_utc(),
+            updated_at_utc: now_utc(),
+            created_by_agent_id: "agent.seed".to_string(),
+            claimed_by_agent_id: None,
+            claim_started_at_utc: None,
+            claim_expires_at_utc: None,
+            completed_at_utc: None,
+            completed_by_agent_id: None,
+            completed_summary: None,
+            completion_notes: Vec::new(),
+            completion_artifacts: Vec::new(),
+            completion_commands: Vec::new(),
+            source_key: None,
+            source_plan: None,
+            awaiting_confirmation: false,
+            approved_at_utc: None,
+            approved_by_agent_id: None,
+        }
+    }
+
     #[test]
     fn normalize_user_path_collapses_tokens() {
         let raw = "./src//core\\utils/../index.rs";
@@ -9849,6 +10848,9 @@ mod tests {
                     completion_commands: Vec::new(),
                     source_key: None,
                     source_plan: None,
+                    awaiting_confirmation: false,
+                    approved_at_utc: None,
+                    approved_by_agent_id: None,
                 },
                 FugitTask {
                     task_id: "task_child".to_string(),
@@ -9872,6 +10874,9 @@ mod tests {
                     completion_commands: Vec::new(),
                     source_key: None,
                     source_plan: None,
+                    awaiting_confirmation: false,
+                    approved_at_utc: None,
+                    approved_by_agent_id: None,
                 },
             ],
         };
@@ -9915,6 +10920,9 @@ mod tests {
                     completion_commands: Vec::new(),
                     source_key: None,
                     source_plan: None,
+                    awaiting_confirmation: false,
+                    approved_at_utc: None,
+                    approved_by_agent_id: None,
                 },
                 FugitTask {
                     task_id: "task_simple".to_string(),
@@ -9938,6 +10946,9 @@ mod tests {
                     completion_commands: Vec::new(),
                     source_key: None,
                     source_plan: None,
+                    awaiting_confirmation: false,
+                    approved_at_utc: None,
+                    approved_by_agent_id: None,
                 },
                 FugitTask {
                     task_id: "task_priority_ready".to_string(),
@@ -9961,6 +10972,9 @@ mod tests {
                     completion_commands: Vec::new(),
                     source_key: None,
                     source_plan: None,
+                    awaiting_confirmation: false,
+                    approved_at_utc: None,
+                    approved_by_agent_id: None,
                 },
                 FugitTask {
                     task_id: "task_blocked".to_string(),
@@ -9984,6 +10998,9 @@ mod tests {
                     completion_commands: Vec::new(),
                     source_key: None,
                     source_plan: None,
+                    awaiting_confirmation: false,
+                    approved_at_utc: None,
+                    approved_by_agent_id: None,
                 },
             ],
         };
@@ -10033,6 +11050,9 @@ mod tests {
                 completion_commands: Vec::new(),
                 source_key: None,
                 source_plan: None,
+                awaiting_confirmation: false,
+                approved_at_utc: None,
+                approved_by_agent_id: None,
             }],
         };
 
@@ -10090,6 +11110,9 @@ mod tests {
                     completion_commands: Vec::new(),
                     source_key: None,
                     source_plan: None,
+                    awaiting_confirmation: false,
+                    approved_at_utc: None,
+                    approved_by_agent_id: None,
                 },
                 FugitTask {
                     task_id: "task_open".to_string(),
@@ -10113,6 +11136,9 @@ mod tests {
                     completion_commands: Vec::new(),
                     source_key: None,
                     source_plan: None,
+                    awaiting_confirmation: false,
+                    approved_at_utc: None,
+                    approved_by_agent_id: None,
                 },
             ],
         };
@@ -10142,6 +11168,90 @@ mod tests {
         .expect("expected open task when skipping owned");
         assert_eq!(skipped.1, TaskDispatchKind::Open);
         assert_eq!(state.tasks[skipped.0].task_id, "task_open");
+    }
+
+    #[test]
+    fn standard_selection_ignores_auto_replenish_tasks() {
+        let now = Utc::now();
+        let mut auto_task = build_auto_replenish_task("agent.worker", false);
+        apply_task_claim(&mut auto_task, "agent.worker", 30, now);
+        let state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![
+                auto_task,
+                sample_task("task_real", "real work", 5, TaskStatus::Open),
+            ],
+        };
+
+        let selected = select_task_for_agent(
+            &state,
+            "agent.worker",
+            &TaskQueryFilter::default(),
+            true,
+            true,
+            90,
+            now,
+        )
+        .expect("expected normal task");
+        assert_eq!(selected.1, TaskDispatchKind::Open);
+        assert_eq!(state.tasks[selected.0].task_id, "task_real");
+    }
+
+    #[test]
+    fn ensure_auto_replenish_creates_agent_scout_tasks() {
+        let mut state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![],
+        };
+        let config = TimelineConfig {
+            schema_version: SCHEMA_CONFIG.to_string(),
+            repo_root: ".".to_string(),
+            created_at_utc: now_utc(),
+            updated_at_utc: now_utc(),
+            backend_mode: default_backend_mode(),
+            default_bridge_remote: "origin".to_string(),
+            default_bridge_branch: "main".to_string(),
+            cloud_endpoint: None,
+            storage_namespace: None,
+            billing_account_id: None,
+            auto_replenish_enabled: true,
+            auto_replenish_require_confirmation: true,
+            auto_replenish_agents: vec!["agent.alpha".to_string(), "agent.beta".to_string()],
+        };
+
+        let result = ensure_auto_replenish_tasks(&mut state, &config, "agent.alpha");
+        assert_eq!(result.created_task_ids.len(), 2);
+        assert_eq!(result.pending_confirmation_task_ids.len(), 2);
+        assert_eq!(state.tasks.len(), 2);
+        assert!(state.tasks.iter().all(|task| task.awaiting_confirmation));
+        assert!(
+            state
+                .tasks
+                .iter()
+                .all(|task| task.source_plan.as_deref() == Some(AUTO_REPLENISH_SOURCE_PLAN))
+        );
+    }
+
+    #[test]
+    fn approve_tasks_in_state_clears_confirmation_gate() {
+        let mut state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![build_auto_replenish_task("agent.worker", true)],
+        };
+        let task_id = state.tasks[0].task_id.clone();
+
+        let approved =
+            approve_tasks_in_state(&mut state, Some(task_id.as_str()), false, "agent.reviewer")
+                .expect("approve task");
+        assert_eq!(approved.len(), 1);
+        assert!(!state.tasks[0].awaiting_confirmation);
+        assert_eq!(
+            state.tasks[0].approved_by_agent_id.as_deref(),
+            Some("agent.reviewer")
+        );
     }
 
     #[test]
@@ -10488,6 +11598,9 @@ mod tests {
             completion_commands: Vec::new(),
             source_key: None,
             source_plan: None,
+            awaiting_confirmation: false,
+            approved_at_utc: None,
+            approved_by_agent_id: None,
         };
 
         let tags = task_timeline_tags("done", &task, Some(TaskDispatchKind::Open));
@@ -10547,6 +11660,9 @@ mod tests {
                     completion_commands: Vec::new(),
                     source_key: None,
                     source_plan: None,
+                    awaiting_confirmation: false,
+                    approved_at_utc: None,
+                    approved_by_agent_id: None,
                 },
                 FugitTask {
                     task_id: "task_main".to_string(),
@@ -10570,6 +11686,9 @@ mod tests {
                     completion_commands: Vec::new(),
                     source_key: None,
                     source_plan: None,
+                    awaiting_confirmation: false,
+                    approved_at_utc: None,
+                    approved_by_agent_id: None,
                 },
             ],
         };
@@ -10622,6 +11741,9 @@ mod tests {
                     completion_commands: Vec::new(),
                     source_key: None,
                     source_plan: None,
+                    awaiting_confirmation: false,
+                    approved_at_utc: None,
+                    approved_by_agent_id: None,
                 },
                 FugitTask {
                     task_id: "task_child".to_string(),
@@ -10645,6 +11767,9 @@ mod tests {
                     completion_commands: Vec::new(),
                     source_key: None,
                     source_plan: None,
+                    awaiting_confirmation: false,
+                    approved_at_utc: None,
+                    approved_by_agent_id: None,
                 },
             ],
         };
@@ -10681,6 +11806,9 @@ mod tests {
                 completion_commands: vec!["cargo test".to_string()],
                 source_key: Some("A-01".to_string()),
                 source_plan: Some("the_final_plan.md".to_string()),
+                awaiting_confirmation: false,
+                approved_at_utc: None,
+                approved_by_agent_id: None,
             }],
         };
 
@@ -10723,6 +11851,9 @@ mod tests {
                     completion_commands: Vec::new(),
                     source_key: Some("A-01".to_string()),
                     source_plan: Some("the_final_plan.md".to_string()),
+                    awaiting_confirmation: false,
+                    approved_at_utc: None,
+                    approved_by_agent_id: None,
                 },
                 FugitTask {
                     task_id: "task_a02".to_string(),
@@ -10746,6 +11877,9 @@ mod tests {
                     completion_commands: Vec::new(),
                     source_key: Some("A-02".to_string()),
                     source_plan: Some("the_final_plan.md".to_string()),
+                    awaiting_confirmation: false,
+                    approved_at_utc: None,
+                    approved_by_agent_id: None,
                 },
             ],
         };

@@ -24,11 +24,15 @@ Use when multiple agents should coordinate by pulling from a shared queue.
 - `fugit --repo-root . task show --task-id <task_id>`
 - `fugit --repo-root . task list --jsonl --fields task_id,title,status`
 - `fugit --repo-root . task request --agent <agent_id> --no-claim --max 3 --json`
+- `fugit --repo-root . task policy show --json`
+- `fugit --repo-root . task approve --all-pending-auto-replenish --agent <agent_id>`
 - `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --summary "done summary"`
 
 Characteristics:
 - dependency-aware ordering via `--depends-on`,
 - lease-based claims with default stale-claim work stealing,
+- default-on auto-replenish scout tasks when no real work is dispatchable,
+- optional confirmation gate before scout tasks can start,
 - explicit release path for fast agent handoff,
 - easy plan maintenance through `task edit` / `task remove`.
 
@@ -43,7 +47,7 @@ Use when humans or lead agents need continuous visual awareness of queue state.
 
 Characteristics:
 - project switcher plus branch-aware timeline explorer,
-- direct create/edit/remove task controls in the browser,
+- direct create/edit/remove/approve task controls in the browser,
 - useful when humans need to fix queue drift without dropping to shell.
 
 ## Multi-Project Coordination

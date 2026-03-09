@@ -156,6 +156,20 @@ json_assert "$TMP_ROOT/task-a-done.json" 'payload.get("completed_summary") == "r
 json_assert "$TMP_ROOT/log-task.json" 'any("task done:" in row.get("summary","") for row in payload)' "task actions should be mirrored into timeline events"
 json_assert "$TMP_ROOT/log-task.json" 'any("task edit:" in row.get("summary","") for row in payload) and any("task remove:" in row.get("summary","") for row in payload)' "edit/remove actions should be mirrored into timeline events"
 
+echo "[vigorous-e2e] auto replenish policy"
+"$BIN" --repo-root "$REPO_B" init --branch trunk >/dev/null
+"$BIN" --repo-root "$REPO_B" task policy set --auto-replenish-enabled true --auto-replenish-confirmation true --clear-replenish-agents --replenish-agent agent.alpha --replenish-agent agent.beta --agent agent.admin --json >"$TMP_ROOT/task-policy-set.json"
+json_assert "$TMP_ROOT/task-policy-set.json" 'payload.get("auto_replenish_enabled") is True and payload.get("auto_replenish_confirmation") is True and payload.get("configured_replenish_agents") == ["agent.alpha", "agent.beta"]' "task policy set should persist replenish defaults"
+"$BIN" --repo-root "$REPO_B" task request --agent agent.alpha --json >"$TMP_ROOT/auto-request-pending.json"
+json_assert "$TMP_ROOT/auto-request-pending.json" 'payload.get("assigned") is False and payload.get("auto_replenish", {}).get("triggered") is True and len(payload.get("auto_replenish", {}).get("pending_confirmation_task_ids", [])) == 2' "empty queue should seed confirmation-gated auto replenish tasks"
+"$BIN" --repo-root "$REPO_B" task approve --all-pending-auto-replenish --agent agent.admin --json >"$TMP_ROOT/auto-approve.json"
+json_assert "$TMP_ROOT/auto-approve.json" 'payload.get("approved_count") == 2' "task approve should clear pending auto-replenish confirmations"
+"$BIN" --repo-root "$REPO_B" task request --agent agent.alpha --json >"$TMP_ROOT/auto-request-claimed.json"
+json_assert "$TMP_ROOT/auto-request-claimed.json" 'payload.get("assigned") is True and payload.get("task", {}).get("auto_replenish") is True and payload.get("claimed") is True' "approved auto-replenish task should become dispatchable"
+"$BIN" --repo-root "$REPO_B" task add --title "real follow-up" --priority 50 --agent agent.manager --json >"$TMP_ROOT/auto-real-task.json"
+"$BIN" --repo-root "$REPO_B" task request --agent agent.alpha --json >"$TMP_ROOT/auto-request-real.json"
+json_assert "$TMP_ROOT/auto-request-real.json" 'payload.get("assigned") is True and payload.get("task", {}).get("auto_replenish") is False and payload.get("task", {}).get("title") == "real follow-up"' "real tasks should outrank owned auto-replenish fallback work"
+
 echo "[vigorous-e2e] task sync + reopen"
 cat >"$REPO_A/the_final_plan.md" <<'EOF'
 - [ ] `A-01` Define compiler contract

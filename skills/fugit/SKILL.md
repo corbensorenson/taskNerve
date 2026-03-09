@@ -44,6 +44,11 @@ Use this skill when any of the following are true:
 5. Request next task (work-stealing by default on stale claims):
 - `fugit --repo-root . task request --agent <agent_id> --claim-ttl-minutes 30 --steal-after-minutes 90`
 - Optional routing hints: `--focus <token>`, `--prefix <token>`, `--contains <token>`, plus `--tag <tag>`
+- When the queue is genuinely exhausted, `task request` will auto-seed per-agent scout tasks by default so agents can replenish backlog instead of stalling.
+- To require human approval before those scout tasks run:
+- `fugit --repo-root . task policy set --auto-replenish-confirmation true --agent <agent_id>`
+- To approve them explicitly:
+- `fugit --repo-root . task approve --all-pending-auto-replenish --agent <agent_id>`
 - To bypass your currently claimed work and fetch the next ready task:
 - `fugit --repo-root . task request --agent <agent_id> --skip-owned --json`
 - optional dry assignment: `fugit --repo-root . task request --agent <agent_id> --no-claim`
@@ -69,6 +74,9 @@ Use this skill when any of the following are true:
 - For compact queue scans:
 - `fugit --repo-root . task list --jsonl --fields task_id,title,status`
 - `fugit --repo-root . task list --status in_progress --json`
+- Inspect or change auto-replenish policy:
+- `fugit --repo-root . task policy show --json`
+- `fugit --repo-root . task policy set --auto-replenish-enabled false --agent <agent_id>`
 - For preview scheduling without claiming:
 - `fugit --repo-root . task request --agent <agent_id> --no-claim --max 3 --json`
 
@@ -99,6 +107,7 @@ Recoverability repair:
 - CLI background: `fugit --repo-root . task gui --background`
 - Project-pinned GUI: `fugit --repo-root . task gui --project <project_name>`
 - Built-in board supports create/edit/remove directly from the browser.
+- Confirmation-gated scout tasks can also be approved directly from the browser.
 - Timeline explorer: use the branch selector and `load older` in the GUI to scroll project history.
 - MCP launch tool: `fugit_task_gui_launch`
 
@@ -140,7 +149,10 @@ Use this contract to keep task execution deterministic across agents.
 1. Before starting implementation, request work:
 - `fugit --repo-root . task request --agent <agent_id>`
 
-2. If no task is returned, create an explicit task instead of silent work:
+2. If no task is returned, first check whether auto-replenish is waiting for approval:
+- `fugit --repo-root . task policy show --json`
+- `fugit --repo-root . task approve --all-pending-auto-replenish --agent <agent_id>`
+- If auto-replenish is disabled or not appropriate, create an explicit task instead of silent work:
 - `fugit --repo-root . task add --title "<deliverable>" --priority <n>`
 - If a plan changes, update the existing task instead of leaving drift behind:
 - `fugit --repo-root . task edit --task-id <task_id> --title "<updated deliverable>"`
@@ -191,6 +203,9 @@ Expose these tools to agents via MCP:
 - `fugit_task_current`
 - `fugit_task_edit`
 - `fugit_task_remove`
+- `fugit_task_approve`
+- `fugit_task_policy_show`
+- `fugit_task_policy_set`
 - `fugit_task_sync`
 - `fugit_task_import`
 - `fugit_task_list`

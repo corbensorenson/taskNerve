@@ -143,6 +143,8 @@ fugit --repo-root . task add --title "Implement feature X" --priority 10 --tag f
 
 Task lifecycle operations (`add`, `edit`, `claim`, `done`, `reopen`, `release`, `remove`) are mirrored into timeline events.
 
+By default, `task request` also auto-seeds one queue-scout task per known agent when no real work is dispatchable. Use `task policy` to turn this off or require explicit approval before those scout tasks can be claimed.
+
 ## Bulk Task Import
 
 Use this when migrating large plan backlogs into fugit without fragile shell glue.
@@ -191,7 +193,7 @@ fugit --repo-root . task gui --background --project <project_name>
 GUI features:
 - Project switcher
 - Optional agent-id field for task mutations
-- Task board with create, edit, and remove controls
+- Task board with create, edit, remove, and approval controls for confirmation-gated scout tasks
 - Timeline explorer (branch selector + paged `load older`)
 - Scrollable history to correlate task completion with timeline events
 
@@ -204,6 +206,9 @@ fugit --repo-root . task list --jsonl --fields task_id,title,status
 fugit --repo-root . task list --status in_progress --json
 fugit --repo-root . task edit --task-id <task_id> --title "Updated title" --tag compiler
 fugit --repo-root . task remove --task-id <task_id>
+fugit --repo-root . task approve --all-pending-auto-replenish --agent reviewer
+fugit --repo-root . task policy show --json
+fugit --repo-root . task policy set --auto-replenish-confirmation true --replenish-agent agent.alpha --replenish-agent agent.beta --agent reviewer
 fugit --repo-root . task sync --plan the_final_plan.md --json
 fugit --repo-root . task request --agent agent.worker --no-claim --max 3 --json
 fugit --repo-root . task request --agent agent.worker --skip-owned --json
@@ -229,7 +234,7 @@ fugit --repo-root . bridge sync-github --no-push --repair-journal
 - `fugit checkout --event <event_id> --force`
 - `fugit branch list|create|switch`
 - `fugit lock add|list|remove`
-- `fugit task add|show|current|edit|remove|sync|import|list|request|claim|done|reopen|release|gui`
+- `fugit task add|show|current|edit|remove|approve|policy|sync|import|list|request|claim|done|reopen|release|gui`
 - `fugit project add|list|use|remove`
 - `fugit backend show|set`
 - `fugit bridge summary|auth|sync-github|pull-github`
@@ -241,7 +246,7 @@ fugit --repo-root . bridge sync-github --no-push --repair-journal
 Key tools include:
 - `fugit_status`, `fugit_checkpoint`, `fugit_log`, `fugit_checkout`
 - `fugit_lock_add`, `fugit_lock_list`
-- `fugit_task_show`, `fugit_task_current`, `fugit_task_add`, `fugit_task_edit`, `fugit_task_remove`, `fugit_task_sync`, `fugit_task_list`, `fugit_task_request`, `fugit_task_claim`, `fugit_task_done`, `fugit_task_reopen`, `fugit_task_release`, `fugit_task_gui_launch`
+- `fugit_task_show`, `fugit_task_current`, `fugit_task_add`, `fugit_task_edit`, `fugit_task_remove`, `fugit_task_approve`, `fugit_task_policy_show`, `fugit_task_policy_set`, `fugit_task_sync`, `fugit_task_list`, `fugit_task_request`, `fugit_task_claim`, `fugit_task_done`, `fugit_task_reopen`, `fugit_task_release`, `fugit_task_gui_launch`
 - `fugit_task_import` (supports file/tsv/markdown payload import)
 - `fugit_project_list`, `fugit_project_add`, `fugit_project_use`, `fugit_project_remove`
 - `fugit_gc`
