@@ -3082,12 +3082,7 @@ fn cmd_version(args: VersionArgs) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else {
-        println!(
-            "{}",
-            payload["version"]
-                .as_str()
-                .unwrap_or(PRODUCT_NAME)
-        );
+        println!("{}", payload["version"].as_str().unwrap_or(PRODUCT_NAME));
     }
     Ok(())
 }
@@ -3253,7 +3248,10 @@ fn cmd_update(args: UpdateArgs) -> Result<()> {
     Ok(())
 }
 
-fn tasknerve_skill_bundle(include_skill_body: bool, include_openai_yaml: bool) -> serde_json::Value {
+fn tasknerve_skill_bundle(
+    include_skill_body: bool,
+    include_openai_yaml: bool,
+) -> serde_json::Value {
     let mut bundle = json!({
         "schema_version": "tasknerve.skill.bundle.v1",
         "generated_at_utc": now_utc(),
@@ -3577,7 +3575,11 @@ fn unsupported_skill_command_paths(skill_body: &str) -> Vec<String> {
 fn current_cli_program_name() -> String {
     std::env::args_os()
         .next()
-        .and_then(|path| PathBuf::from(path).file_stem().map(|stem| stem.to_os_string()))
+        .and_then(|path| {
+            PathBuf::from(path)
+                .file_stem()
+                .map(|stem| stem.to_os_string())
+        })
         .and_then(|stem| stem.into_string().ok())
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| PRODUCT_NAME.to_string())
@@ -5884,11 +5886,7 @@ fn github_api_base_url_for_host(host: &str) -> String {
 }
 
 fn resolve_github_api_token(repo_root: &Path, host: &str) -> Result<Option<String>> {
-    for key in [
-        "TASKNERVE_GITHUB_TOKEN",
-        "GH_TOKEN",
-        "GITHUB_TOKEN",
-    ] {
+    for key in ["TASKNERVE_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] {
         if let Ok(value) = std::env::var(key) {
             let trimmed = value.trim();
             if !trimmed.is_empty() {
@@ -7096,7 +7094,10 @@ fn cmd_check(repo_root: &Path, args: CheckArgs) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&state.checks[index])?);
             } else {
-                println!("[tasknerve-check] deprecated {}", state.checks[index].check_id);
+                println!(
+                    "[tasknerve-check] deprecated {}",
+                    state.checks[index].check_id
+                );
             }
         }
         CheckAction::Run {
@@ -7552,7 +7553,10 @@ fn cmd_project(args: ProjectArgs) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
-                println!("[tasknerve-project] default project set to {}", normalized_name);
+                println!(
+                    "[tasknerve-project] default project set to {}",
+                    normalized_name
+                );
             }
         }
     }
@@ -8027,7 +8031,10 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 },
             )?;
             if let Some(object) = payload.as_object_mut() {
-                object.insert("schema_version".to_string(), json!("tasknerve.task.start.v1"));
+                object.insert(
+                    "schema_version".to_string(),
+                    json!("tasknerve.task.start.v1"),
+                );
                 object.insert("start_mode".to_string(), json!("request_next"));
                 if let Some(view) = resolved_view.as_ref() {
                     object.insert("view".to_string(), json!(view.name));
@@ -9574,7 +9581,10 @@ fn cmd_advisor(repo_root: &Path, args: AdvisorArgs) -> Result<()> {
                 if json {
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else {
-                    println!("[tasknerve-advisor-workflow] wrote {}", workflow_path.display());
+                    println!(
+                        "[tasknerve-advisor-workflow] wrote {}",
+                        workflow_path.display()
+                    );
                 }
             }
             AdvisorWorkflowAction::Show { path, json } => {
@@ -20196,7 +20206,11 @@ fn remove_task_from_state(
     Ok(removed)
 }
 
-fn reopen_task_in_state(state: &mut TaskState, task_id: &str, agent_id: &str) -> Result<TaskNerveTask> {
+fn reopen_task_in_state(
+    state: &mut TaskState,
+    task_id: &str,
+    agent_id: &str,
+) -> Result<TaskNerveTask> {
     let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id) else {
         bail!("task not found: {}", task_id);
     };
@@ -20859,7 +20873,10 @@ fn task_is_ready_for_dispatch_at(
         && task_schedule_state(task, today) == TaskScheduleState::Ready
 }
 
-fn task_is_ready_for_dispatch(task: &TaskNerveTask, status_map: &BTreeMap<String, TaskStatus>) -> bool {
+fn task_is_ready_for_dispatch(
+    task: &TaskNerveTask,
+    status_map: &BTreeMap<String, TaskStatus>,
+) -> bool {
     task_is_ready_for_dispatch_at(task, status_map, Utc::now().date_naive())
 }
 
@@ -20951,7 +20968,10 @@ fn build_auto_replenish_task(agent_id: &str, require_confirmation: bool) -> Task
     }
 }
 
-fn sync_auto_replenish_task_confirmation(task: &mut TaskNerveTask, require_confirmation: bool) -> bool {
+fn sync_auto_replenish_task_confirmation(
+    task: &mut TaskNerveTask,
+    require_confirmation: bool,
+) -> bool {
     if !task_is_auto_replenish(task) || task.status != TaskStatus::Open {
         return false;
     }
