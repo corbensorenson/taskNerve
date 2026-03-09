@@ -503,6 +503,8 @@ enum TaskAction {
         agent: Option<String>,
         #[arg(long, default_value_t = 0)]
         default_priority: i32,
+        #[arg(long, value_enum, default_value_t = TaskImportFormatArg::Auto)]
+        format: TaskImportFormatArg,
         #[arg(long, default_value_t = false)]
         dry_run: bool,
         #[arg(long, default_value_t = false)]
@@ -573,6 +575,13 @@ enum TaskStatusArg {
     Open,
     Claimed,
     Done,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum TaskImportFormatArg {
+    Auto,
+    Tsv,
+    Markdown,
 }
 
 impl TaskStatusArg {
@@ -1022,6 +1031,7 @@ fn fugit_skill_bundle(include_skill_body: bool, include_openai_yaml: bool) -> se
                 "fugit_lock_add",
                 "fugit_lock_list",
                 "fugit_task_add",
+                "fugit_task_import",
                 "fugit_task_list",
                 "fugit_task_request",
                 "fugit_task_claim",
@@ -1098,6 +1108,11 @@ fn fugit_skill_doctor_checks() -> (bool, Vec<serde_json::Value>) {
             "name": "task_contract_present",
             "pass": FUGIT_SKILL_MD.contains("## Task System Contract") && FUGIT_SKILL_MD.contains("task request"),
             "detail": "SKILL.md includes explicit task-system operating contract."
+        }),
+        json!({
+            "name": "task_import_guidance_present",
+            "pass": FUGIT_SKILL_MD.contains("task import"),
+            "detail": "SKILL.md includes bulk task import guidance."
         }),
         json!({
             "name": "project_registry_guidance_present",
@@ -2755,10 +2770,11 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             file,
             agent,
             default_priority,
+            format,
             dry_run,
             json,
         } => {
-            let rows = parse_task_import_rows(&file)?;
+            let rows = parse_task_import_rows(&file, format)?;
             if rows.is_empty() {
                 bail!("task import file contains no task rows: {}", file.display());
             }
@@ -2881,6 +2897,11 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 "schema_version": "fugit.task.import.v1",
                 "generated_at_utc": now_utc(),
                 "file": file.display().to_string(),
+                "format": match format {
+                    TaskImportFormatArg::Auto => "auto",
+                    TaskImportFormatArg::Tsv => "tsv",
+                    TaskImportFormatArg::Markdown => "markdown"
+                },
                 "dry_run": dry_run,
                 "imported_count": imported_records.len(),
                 "tasks": imported_records
@@ -4419,6 +4440,22 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             }
         }),
         json!({
+            "name": "fugit_task_import",
+            "description": "Bulk import tasks into the persistent queue from a TSV file, TSV content, or markdown checklist content.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "file": { "type": "string" },
+                    "tsv": { "type": "string" },
+                    "markdown": { "type": "string" },
+                    "format": { "type": "string", "enum": ["auto", "tsv", "markdown"] },
+                    "agent": { "type": "string" },
+                    "default_priority": { "type": "integer" },
+                    "dry_run": { "type": "boolean" }
+                }
+            }
+        }),
+        json!({
             "name": "fugit_task_list",
             "description": "List tasks from the persistent queue.",
             "inputSchema": {
@@ -4812,6 +4849,70 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 }
             }
             run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_task_import" => {
+            let mut cli_args = vec![
+                "task".to_string(),
+                "import".to_string(),
+                "--json".to_string(),
+            ];
+            let mut temp_file_to_remove: Option<PathBuf> = None;
+            let mut inferred_format: Option<&str> = None;
+
+            let import_file = if let Some(file) =
+                args.get("file").and_then(serde_json::Value::as_str)
+            {
+                PathBuf::from(file)
+            } else if let Some(tsv) = args.get("tsv").and_then(serde_json::Value::as_str) {
+                inferred_format = Some("tsv");
+                let temp_path = write_mcp_task_import_temp_file(repo_root, "tsv", tsv)?;
+                temp_file_to_remove = Some(temp_path.clone());
+                temp_path
+            } else if let Some(markdown) = args.get("markdown").and_then(serde_json::Value::as_str)
+            {
+                inferred_format = Some("markdown");
+                let temp_path = write_mcp_task_import_temp_file(repo_root, "markdown", markdown)?;
+                temp_file_to_remove = Some(temp_path.clone());
+                temp_path
+            } else {
+                bail!("fugit_task_import requires one of: file, tsv, markdown");
+            };
+
+            cli_args.push("--file".to_string());
+            cli_args.push(import_file.display().to_string());
+
+            if let Some(format) = args.get("format").and_then(serde_json::Value::as_str) {
+                cli_args.push("--format".to_string());
+                cli_args.push(format.to_string());
+            } else if let Some(format) = inferred_format {
+                cli_args.push("--format".to_string());
+                cli_args.push(format.to_string());
+            }
+
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            if let Some(priority) = args
+                .get("default_priority")
+                .and_then(serde_json::Value::as_i64)
+            {
+                cli_args.push("--default-priority".to_string());
+                cli_args.push(priority.to_string());
+            }
+            if args
+                .get("dry_run")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--dry-run".to_string());
+            }
+
+            let import_result = run_self_cli_json(repo_root, &cli_args);
+            if let Some(temp_file) = temp_file_to_remove {
+                let _ = fs::remove_file(&temp_file);
+            }
+            import_result?
         }
         "fugit_task_list" => {
             let mut cli_args = vec!["task".to_string(), "list".to_string(), "--json".to_string()];
@@ -5597,37 +5698,156 @@ fn load_task_state(repo_root: &Path) -> Result<TaskState> {
     Ok(state)
 }
 
-fn parse_task_import_rows(file: &Path) -> Result<Vec<TaskImportRow>> {
-    let reader = BufReader::new(
-        fs::File::open(file)
-            .with_context(|| format!("failed opening task import file {}", file.display()))?,
-    );
+fn parse_task_import_rows(file: &Path, format: TaskImportFormatArg) -> Result<Vec<TaskImportRow>> {
+    let content = fs::read_to_string(file)
+        .with_context(|| format!("failed reading task import file {}", file.display()))?;
+    let resolved_format = if matches!(format, TaskImportFormatArg::Auto) {
+        detect_task_import_format(file, &content)
+    } else {
+        format
+    };
+
     let mut rows = Vec::<TaskImportRow>::new();
-    for (index, line_result) in reader.lines().enumerate() {
+    for (index, line) in content.lines().enumerate() {
         let line_no = index + 1;
-        let line = line_result.with_context(|| {
-            format!(
-                "failed reading task import file {} line {}",
-                file.display(),
-                line_no
-            )
-        })?;
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
+        if trimmed.is_empty() {
             continue;
         }
-        if line_no == 1 {
-            let maybe_header = trimmed.to_ascii_lowercase();
-            if maybe_header.starts_with("key\t") {
-                continue;
+        match resolved_format {
+            TaskImportFormatArg::Tsv => {
+                if trimmed.starts_with('#') {
+                    continue;
+                }
+                if line_no == 1 {
+                    let maybe_header = trimmed.to_ascii_lowercase();
+                    if maybe_header.starts_with("key\t") {
+                        continue;
+                    }
+                }
+                let row = parse_task_import_tsv_line(trimmed).with_context(|| {
+                    format!("invalid task import row {} in {}", line_no, file.display())
+                })?;
+                rows.push(row);
             }
+            TaskImportFormatArg::Markdown => {
+                if let Some(row) = parse_task_import_markdown_line(trimmed, line_no)? {
+                    rows.push(row);
+                }
+            }
+            TaskImportFormatArg::Auto => unreachable!("auto format is resolved before parsing"),
         }
-        let row = parse_task_import_tsv_line(trimmed).with_context(|| {
-            format!("invalid task import row {} in {}", line_no, file.display())
-        })?;
-        rows.push(row);
     }
     Ok(rows)
+}
+
+fn detect_task_import_format(file: &Path, content: &str) -> TaskImportFormatArg {
+    if let Some(ext) = file.extension().and_then(|value| value.to_str()) {
+        let ext = ext.to_ascii_lowercase();
+        if ext == "md" || ext == "markdown" {
+            return TaskImportFormatArg::Markdown;
+        }
+    }
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if looks_like_markdown_task_line(trimmed) || looks_like_markdown_checked_task_line(trimmed)
+        {
+            return TaskImportFormatArg::Markdown;
+        }
+        if trimmed.contains('\t') {
+            return TaskImportFormatArg::Tsv;
+        }
+    }
+    TaskImportFormatArg::Tsv
+}
+
+fn looks_like_markdown_task_line(trimmed: &str) -> bool {
+    trimmed.starts_with("- [ ] ")
+        || trimmed.starts_with("* [ ] ")
+        || trimmed.starts_with("- [ ]\t")
+        || trimmed.starts_with("* [ ]\t")
+}
+
+fn looks_like_markdown_checked_task_line(trimmed: &str) -> bool {
+    trimmed.starts_with("- [x] ")
+        || trimmed.starts_with("- [X] ")
+        || trimmed.starts_with("* [x] ")
+        || trimmed.starts_with("* [X] ")
+}
+
+fn parse_task_import_markdown_line(trimmed: &str, line_no: usize) -> Result<Option<TaskImportRow>> {
+    let mut body = if let Some(rest) = trimmed.strip_prefix("- [ ] ") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("* [ ] ") {
+        rest
+    } else if looks_like_markdown_checked_task_line(trimmed) {
+        return Ok(None);
+    } else {
+        return Ok(None);
+    };
+
+    body = body.trim();
+    if body.is_empty() {
+        bail!("markdown task line {} has empty title", line_no);
+    }
+
+    let mut key = format!("md_{}", line_no);
+    if let Some(after_open_tick) = body.strip_prefix('`')
+        && let Some(end_tick_idx) = after_open_tick.find('`')
+    {
+        let candidate = normalize_markdown_import_key(&after_open_tick[..end_tick_idx]);
+        if !candidate.is_empty() {
+            key = candidate;
+            let remainder = after_open_tick[end_tick_idx + 1..].trim();
+            if !remainder.is_empty() {
+                body = remainder.trim_start_matches(|ch| matches!(ch, ':' | '-' | ' '));
+            }
+        }
+    }
+
+    let title = body.trim().to_string();
+    if title.is_empty() {
+        bail!("markdown task line {} has empty title", line_no);
+    }
+
+    Ok(Some(TaskImportRow {
+        key,
+        title,
+        detail: None,
+        priority: None,
+        tags: Vec::new(),
+        depends_on_keys: Vec::new(),
+        agent: None,
+    }))
+}
+
+fn normalize_markdown_import_key(raw: &str) -> String {
+    let mut out = String::new();
+    let mut last_was_sep = false;
+    for ch in raw.trim().chars() {
+        let normalized = if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
+            Some(ch)
+        } else if ch.is_whitespace() || matches!(ch, ':' | '/' | '\\' | '|' | ',') {
+            Some('_')
+        } else {
+            None
+        };
+        if let Some(candidate) = normalized {
+            if candidate == '_' {
+                if !last_was_sep {
+                    out.push('_');
+                    last_was_sep = true;
+                }
+            } else {
+                out.push(candidate);
+                last_was_sep = false;
+            }
+        }
+    }
+    out.trim_matches('_').to_string()
 }
 
 fn parse_task_import_tsv_line(line: &str) -> Result<TaskImportRow> {
@@ -5698,6 +5918,21 @@ fn parse_task_import_csv_tokens(value: &str) -> Vec<String> {
         .filter(|token| !token.is_empty())
         .map(ToString::to_string)
         .collect()
+}
+
+fn write_mcp_task_import_temp_file(repo_root: &Path, kind: &str, content: &str) -> Result<PathBuf> {
+    let dir = repo_root.join(".fugit").join("mcp_tmp");
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("failed creating mcp temp dir {}", dir.display()))?;
+    let filename = format!("task_import_{}_{}.txt", kind, Uuid::new_v4().simple());
+    let path = dir.join(filename);
+    fs::write(&path, content.as_bytes()).with_context(|| {
+        format!(
+            "failed writing mcp task import temp file {}",
+            path.display()
+        )
+    })?;
+    Ok(path)
 }
 
 fn resolve_fugit_home() -> Result<PathBuf> {

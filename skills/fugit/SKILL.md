@@ -33,6 +33,8 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . task list --ready-only`
 - For bulk backlog migration, import TSV once:
 - `fugit --repo-root . task import --file /path/to/tasks.tsv`
+- For markdown checklist plans, import directly:
+- `fugit --repo-root . task import --file /path/to/the_final_plan.md --format markdown`
 
 5. Request next task (work-stealing by default on stale claims):
 - `fugit --repo-root . task request --agent <agent_id> --claim-ttl-minutes 30 --steal-after-minutes 90`
@@ -117,6 +119,9 @@ Use this contract to keep task execution deterministic across agents.
 - For large imports, define key-based dependencies in TSV and let fugit resolve task IDs:
 - `fugit --repo-root . task import --file /path/to/tasks.tsv`
 - TSV columns: `key<TAB>priority<TAB>tags_csv<TAB>depends_on_keys_csv<TAB>title<TAB>detail<TAB>agent`
+- Markdown checklist ingestion is also supported:
+- `fugit --repo-root . task import --file /path/to/the_final_plan.md --format markdown`
+- Markdown import consumes unchecked lines (`- [ ]` / `* [ ]`) and ignores checked lines (`[x]`).
 
 4. Keep ownership explicit:
 - claim specific work when needed: `fugit --repo-root . task claim --task-id <task_id> --agent <agent_id>`
@@ -151,6 +156,7 @@ Expose these tools to agents via MCP:
 - `fugit_lock_add`
 - `fugit_lock_list`
 - `fugit_task_add`
+- `fugit_task_import`
 - `fugit_task_list`
 - `fugit_task_request`
 - `fugit_task_claim`

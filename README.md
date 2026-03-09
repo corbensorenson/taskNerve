@@ -77,8 +77,11 @@ bash ./install.sh --with-skill --overwrite-skill
 
 ```bash
 fugit --help
+fugit task --help
 fugit skill doctor
 ```
+
+`fugit task --help` should include `import`. If not, reinstall using the installer for this repo.
 
 ### 4. Agent Skill Setup
 
@@ -136,6 +139,12 @@ Use this when migrating large plan backlogs into fugit without fragile shell glu
 fugit --repo-root . task import --file /path/to/tasks.tsv
 ```
 
+Direct import from markdown checklist plans:
+
+```bash
+fugit --repo-root . task import --file /path/to/the_final_plan.md --format markdown
+```
+
 TSV format (tab-separated):
 
 `key<TAB>priority<TAB>tags_csv<TAB>depends_on_keys_csv<TAB>title<TAB>detail<TAB>agent`
@@ -151,6 +160,7 @@ Notes:
 - `depends_on_keys_csv` links by task keys and is resolved to real task IDs automatically.
 - Cycles and unknown dependency keys fail closed.
 - `detail` and `agent` columns are optional.
+- Markdown import consumes unchecked checklist lines (`- [ ] ...` / `* [ ] ...`) and skips completed lines (`[x]`).
 
 ## Task + Timeline GUI
 
@@ -188,6 +198,7 @@ Key tools include:
 - `fugit_status`, `fugit_checkpoint`, `fugit_log`, `fugit_checkout`
 - `fugit_lock_add`, `fugit_lock_list`
 - `fugit_task_add`, `fugit_task_list`, `fugit_task_request`, `fugit_task_claim`, `fugit_task_done`, `fugit_task_release`, `fugit_task_gui_launch`
+- `fugit_task_import` (supports file/tsv/markdown payload import)
 - `fugit_project_list`, `fugit_project_add`, `fugit_project_use`, `fugit_project_remove`
 - `fugit_gc`
 - `fugit_skill_bundle`, `fugit_skill_install_codex`
