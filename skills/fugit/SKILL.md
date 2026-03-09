@@ -59,7 +59,14 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . checkpoint --summary "<what changed>" --json`
 
 7. Mark tasks done or release claim:
-- `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --summary "<what finished>"`
+- `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --summary "<what finished>" --regression "<test command>"`
+- Default quality gate is on: every completed task should carry at least one regression or benchmark check, and active checks run before bridge sync.
+- Register or retire checks explicitly when needed:
+- `fugit --repo-root . check add --kind regression --task-id <task_id> --command "<test command>"`
+- `fugit --repo-root . check deprecate --check-id <check_id> --reason "<why obsolete>"`
+- Inspect or tune check policy with:
+- `fugit --repo-root . check policy show --json`
+- `fugit --repo-root . check policy set --require-on-task-done false`
 - By default this also queues a background bridge sync so the completed-task note is pushed without blocking the agent on network I/O.
 - Inspect that worker with:
 - `fugit --repo-root . bridge auto-sync show --json`
@@ -84,6 +91,8 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . task policy set --auto-replenish-enabled false --agent <agent_id>`
 - For preview scheduling without claiming:
 - `fugit --repo-root . task request --agent <agent_id> --no-claim --max 3 --json`
+- Run the active regression/benchmark suite manually:
+- `fugit --repo-root . check run --json`
 
 9. Coordinate ownership when multiple agents touch overlapping files:
 - `fugit --repo-root . lock add --pattern "src/**" --agent <agent_id> --ttl-minutes 30`
@@ -224,6 +233,12 @@ Expose these tools to agents via MCP:
 - `fugit_task_reopen`
 - `fugit_task_release`
 - `fugit_task_gui_launch`
+- `fugit_check_list`
+- `fugit_check_add`
+- `fugit_check_deprecate`
+- `fugit_check_run`
+- `fugit_check_policy_show`
+- `fugit_check_policy_set`
 - `fugit_project_list`
 - `fugit_project_add`
 - `fugit_project_use`

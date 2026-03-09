@@ -27,7 +27,9 @@ Use when multiple agents should coordinate by pulling from a shared queue.
 - `fugit --repo-root . task policy show --json`
 - `fugit --repo-root . task approve --all-pending-auto-replenish --agent <agent_id>`
 - `fugit --repo-root . bridge auto-sync show --json`
-- `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --summary "done summary"`
+- `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --summary "done summary" --regression "<test command>"`
+- `fugit --repo-root . check run --json`
+- `fugit --repo-root . check deprecate --check-id <check_id> --reason "obsolete"`
 
 Characteristics:
 - dependency-aware ordering via `--depends-on`,
@@ -35,6 +37,7 @@ Characteristics:
 - default-on auto-replenish scout tasks when no real work is dispatchable,
 - optional confirmation gate before scout tasks can start,
 - default-on background bridge sync after task completion,
+- default-on regression/benchmark gate before bridge sync,
 - explicit release path for fast agent handoff,
 - easy plan maintenance through `task edit` / `task remove`.
 

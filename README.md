@@ -131,7 +131,7 @@ fugit --repo-root . task import --file /path/to/tasks.tsv
 fugit --repo-root . task sync --plan /path/to/the_final_plan.md
 fugit --repo-root . task request --agent agent.worker --focus compiler
 fugit --repo-root . checkpoint --summary "implemented feature X" --agent agent.worker --tag feature
-fugit --repo-root . task done --task-id <task_id> --agent agent.worker --summary "validated feature X" --command "cargo test"
+fugit --repo-root . task done --task-id <task_id> --agent agent.worker --summary "validated feature X" --command "cargo test" --regression "cargo test"
 fugit --repo-root . log --limit 20
 ```
 
@@ -145,7 +145,7 @@ Task lifecycle operations (`add`, `edit`, `claim`, `done`, `reopen`, `release`, 
 
 By default, `task request` also auto-seeds one queue-scout task per known agent when no real work is dispatchable. Use `task policy` to turn this off or require explicit approval before those scout tasks can be claimed.
 
-By default, `task done` also queues a background `bridge sync-github` run. The bridge commit subject includes the completed task note, and `fugit bridge auto-sync show` lets agents verify that backup is healthy without blocking task completion on network I/O.
+By default, `task done` requires at least one regression or benchmark check (`--regression ...` / `--benchmark ...`) unless the task already has an active registered check. Those checks are then executed automatically before `bridge sync-github`, including background auto-sync after task completion. Use `fugit check deprecate --check-id ...` when a test is obsolete instead of silently deleting the record.
 
 ## Bulk Task Import
 
@@ -220,6 +220,10 @@ fugit --repo-root . task remove --task-id <task_id>
 fugit --repo-root . task approve --all-pending-auto-replenish --agent reviewer
 fugit --repo-root . task policy show --json
 fugit --repo-root . task policy set --auto-replenish-confirmation true --replenish-agent agent.alpha --replenish-agent agent.beta --agent reviewer
+fugit --repo-root . check add --kind regression --task-id <task_id> --command "cargo test"
+fugit --repo-root . check run --json
+fugit --repo-root . check deprecate --check-id <check_id> --reason "obsolete"
+fugit --repo-root . check policy show --json
 fugit --repo-root . bridge auto-sync show --json
 fugit --repo-root . bridge auto-sync set --enabled true --on-task-done true --event-count 12
 fugit --repo-root . bridge sync-github --background --note "manual backup sweep"
@@ -248,6 +252,7 @@ fugit --repo-root . bridge sync-github --no-push --repair-journal
 - `fugit checkout --event <event_id> --force`
 - `fugit branch list|create|switch`
 - `fugit lock add|list|remove`
+- `fugit check add|list|run|deprecate|policy`
 - `fugit task add|show|current|edit|remove|approve|policy|sync|import|list|request|claim|done|reopen|release|gui`
 - `fugit project add|list|use|remove`
 - `fugit backend show|set`
@@ -261,6 +266,7 @@ Key tools include:
 - `fugit_status`, `fugit_checkpoint`, `fugit_log`, `fugit_checkout`
 - `fugit_lock_add`, `fugit_lock_list`
 - `fugit_task_show`, `fugit_task_current`, `fugit_task_add`, `fugit_task_edit`, `fugit_task_remove`, `fugit_task_approve`, `fugit_task_policy_show`, `fugit_task_policy_set`, `fugit_task_sync`, `fugit_task_list`, `fugit_task_request`, `fugit_task_claim`, `fugit_task_done`, `fugit_task_reopen`, `fugit_task_release`, `fugit_task_gui_launch`
+- `fugit_check_list`, `fugit_check_add`, `fugit_check_deprecate`, `fugit_check_run`, `fugit_check_policy_show`, `fugit_check_policy_set`
 - `fugit_task_import` (supports file/tsv/markdown payload import)
 - `fugit_project_list`, `fugit_project_add`, `fugit_project_use`, `fugit_project_remove`
 - `fugit_gc`

@@ -6,7 +6,7 @@ use std::{
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, ExitCode, Stdio},
-    time::UNIX_EPOCH,
+    time::{Instant, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -28,6 +28,8 @@ const SCHEMA_FILE_RECORD: &str = "timeline.file_record.v1";
 const SCHEMA_EVENT: &str = "timeline.event.v1";
 const SCHEMA_LOCKS: &str = "timeline.locks.v1";
 const SCHEMA_TASKS: &str = "timeline.tasks.v1";
+const SCHEMA_CHECKS: &str = "fugit.checks.v1";
+const SCHEMA_CHECK_RUNS: &str = "fugit.check_runs.v1";
 const SCHEMA_PROJECTS: &str = "fugit.projects.v1";
 const SCHEMA_BRIDGE_AUTH: &str = "timeline.bridge_auth.v1";
 const SCHEMA_BRIDGE_AUTO_SYNC: &str = "timeline.bridge_auto_sync.v1";
@@ -86,6 +88,7 @@ enum Command {
     Bridge(BridgeArgs),
     Checkout(CheckoutArgs),
     Gc(GcArgs),
+    Check(CheckArgs),
     Lock(LockArgs),
     Task(TaskArgs),
     Project(ProjectArgs),
@@ -398,6 +401,86 @@ struct GcArgs {
     json: bool,
 }
 
+#[derive(Debug, Parser)]
+struct CheckArgs {
+    #[command(subcommand)]
+    action: CheckAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum CheckAction {
+    List {
+        #[arg(long)]
+        task_id: Option<String>,
+        #[arg(long, value_enum)]
+        kind: Option<CheckKindArg>,
+        #[arg(long, default_value_t = false)]
+        include_deprecated: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Add {
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, value_enum)]
+        kind: CheckKindArg,
+        #[arg(long)]
+        command: String,
+        #[arg(long)]
+        task_id: Option<String>,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Deprecate {
+        #[arg(long)]
+        check_id: String,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Run {
+        #[arg(long)]
+        task_id: Option<String>,
+        #[arg(long, value_enum)]
+        kind: Option<CheckKindArg>,
+        #[arg(long, default_value_t = false)]
+        include_deprecated: bool,
+        #[arg(long, default_value_t = false)]
+        fail_fast: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Policy {
+        #[command(subcommand)]
+        action: CheckPolicyAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CheckPolicyAction {
+    Show {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Set {
+        #[arg(long)]
+        enabled: Option<bool>,
+        #[arg(long)]
+        require_on_task_done: Option<bool>,
+        #[arg(long)]
+        run_before_sync: Option<bool>,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FileLock {
     lock_id: String,
@@ -419,6 +502,88 @@ enum TaskStatus {
     Open,
     Claimed,
     Done,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CheckKind {
+    Regression,
+    Benchmark,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CheckKindArg {
+    Regression,
+    Benchmark,
+}
+
+impl CheckKindArg {
+    fn into_check_kind(self) -> CheckKind {
+        match self {
+            CheckKindArg::Regression => CheckKind::Regression,
+            CheckKindArg::Benchmark => CheckKind::Benchmark,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FugitCheck {
+    check_id: String,
+    name: String,
+    command: String,
+    kind: CheckKind,
+    task_id: Option<String>,
+    created_at_utc: String,
+    updated_at_utc: String,
+    created_by_agent_id: String,
+    #[serde(default)]
+    deprecated_at_utc: Option<String>,
+    #[serde(default)]
+    deprecated_by_agent_id: Option<String>,
+    #[serde(default)]
+    deprecated_reason: Option<String>,
+    #[serde(default)]
+    last_run_at_utc: Option<String>,
+    #[serde(default)]
+    last_run_status: Option<String>,
+    #[serde(default)]
+    last_run_duration_ms: Option<u64>,
+    #[serde(default)]
+    last_run_exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CheckState {
+    schema_version: String,
+    updated_at_utc: String,
+    checks: Vec<FugitCheck>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CheckRunCheckResult {
+    check_id: String,
+    name: String,
+    kind: CheckKind,
+    task_id: Option<String>,
+    command: String,
+    ok: bool,
+    status: String,
+    exit_code: Option<i32>,
+    duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CheckRunRecord {
+    schema_version: String,
+    run_id: String,
+    generated_at_utc: String,
+    repo_root: String,
+    trigger: String,
+    ok: bool,
+    selected_count: usize,
+    passed_count: usize,
+    failed_count: usize,
+    checks: Vec<CheckRunCheckResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -854,6 +1019,12 @@ enum TaskAction {
         artifacts: Vec<String>,
         #[arg(long = "command")]
         commands: Vec<String>,
+        #[arg(long = "regression")]
+        regressions: Vec<String>,
+        #[arg(long = "benchmark")]
+        benchmarks: Vec<String>,
+        #[arg(long, default_value_t = false)]
+        skip_check_requirement: bool,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -1040,6 +1211,12 @@ struct TimelineConfig {
     auto_replenish_require_confirmation: bool,
     #[serde(default)]
     auto_replenish_agents: Vec<String>,
+    #[serde(default = "default_quality_checks_enabled")]
+    quality_checks_enabled: bool,
+    #[serde(default = "default_quality_checks_require_on_task_done")]
+    quality_checks_require_on_task_done: bool,
+    #[serde(default = "default_quality_checks_run_before_sync")]
+    quality_checks_run_before_sync: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1193,6 +1370,7 @@ fn try_main() -> Result<()> {
         Command::Bridge(args) => cmd_bridge(&repo_root, args),
         Command::Checkout(args) => cmd_checkout(&repo_root, args),
         Command::Gc(args) => cmd_gc(&repo_root, args),
+        Command::Check(args) => cmd_check(&repo_root, args),
         Command::Lock(args) => cmd_lock(&repo_root, args),
         Command::Task(args) => cmd_task(&repo_root, args),
         Command::Project(args) => cmd_project(args),
@@ -1529,6 +1707,12 @@ fn fugit_skill_bundle(include_skill_body: bool, include_openai_yaml: bool) -> se
                 "fugit_task_done",
                 "fugit_task_reopen",
                 "fugit_task_release",
+                "fugit_check_list",
+                "fugit_check_add",
+                "fugit_check_deprecate",
+                "fugit_check_run",
+                "fugit_check_policy_show",
+                "fugit_check_policy_set",
                 "fugit_skill_bundle",
                 "fugit_skill_install_codex",
                 "fugit_task_gui_launch",
@@ -3130,6 +3314,227 @@ fn cmd_gc(repo_root: &Path, args: GcArgs) -> Result<()> {
     Ok(())
 }
 
+fn cmd_check(repo_root: &Path, args: CheckArgs) -> Result<()> {
+    let mut state = load_check_state(repo_root)?;
+    let mut config = load_timeline_config_or_default(repo_root)?;
+    match args.action {
+        CheckAction::List {
+            task_id,
+            kind,
+            include_deprecated,
+            json,
+        } => {
+            let task_id = normalize_optional_text(task_id, "task id")?;
+            let kind = kind.map(CheckKindArg::into_check_kind);
+            let mut rows = state
+                .checks
+                .iter()
+                .filter(|check| {
+                    (include_deprecated || check_is_active(check))
+                        && task_id
+                            .as_deref()
+                            .map(|task_id| check.task_id.as_deref() == Some(task_id))
+                            .unwrap_or(true)
+                        && kind.map(|kind| check.kind == kind).unwrap_or(true)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            rows.sort_by(|lhs, rhs| {
+                check_is_active(rhs)
+                    .cmp(&check_is_active(lhs))
+                    .then_with(|| lhs.name.cmp(&rhs.name))
+                    .then_with(|| lhs.check_id.cmp(&rhs.check_id))
+            });
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else {
+                println!("[fugit-check] count={}", rows.len());
+                for check in rows {
+                    println!(
+                        "- {} [{}] {} task_id={} status={}",
+                        check.check_id,
+                        check_kind_label(check.kind),
+                        check.name,
+                        check.task_id.as_deref().unwrap_or("none"),
+                        if check_is_active(&check) {
+                            "active"
+                        } else {
+                            "deprecated"
+                        }
+                    );
+                }
+            }
+        }
+        CheckAction::Add {
+            name,
+            kind,
+            command,
+            task_id,
+            agent,
+            json,
+        } => {
+            let agent_id = agent.unwrap_or_else(default_agent_id);
+            let kind = kind.into_check_kind();
+            let command = normalize_check_command(command)?;
+            let task_id = normalize_optional_text(task_id, "task id")?;
+            if let Some(task_id) = task_id.as_deref() {
+                validate_check_task_id(repo_root, task_id)?;
+            }
+            let now = now_utc();
+            let check = FugitCheck {
+                check_id: format!("chk_{}", Uuid::new_v4().simple()),
+                name: normalize_check_name(name, kind, task_id.as_deref()),
+                command,
+                kind,
+                task_id,
+                created_at_utc: now.clone(),
+                updated_at_utc: now.clone(),
+                created_by_agent_id: agent_id.clone(),
+                deprecated_at_utc: None,
+                deprecated_by_agent_id: None,
+                deprecated_reason: None,
+                last_run_at_utc: None,
+                last_run_status: None,
+                last_run_duration_ms: None,
+                last_run_exit_code: None,
+            };
+            state.checks.push(check.clone());
+            state.updated_at_utc = now;
+            write_check_state(repo_root, &state)?;
+            append_check_timeline_event(repo_root, &check, &agent_id, "add")?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&check)?);
+            } else {
+                println!(
+                    "[fugit-check] added {} [{}] task_id={}",
+                    check.check_id,
+                    check_kind_label(check.kind),
+                    check.task_id.as_deref().unwrap_or("none")
+                );
+            }
+        }
+        CheckAction::Deprecate {
+            check_id,
+            reason,
+            agent,
+            json,
+        } => {
+            let agent_id = agent.unwrap_or_else(default_agent_id);
+            let reason = normalize_optional_text(reason, "deprecation reason")?;
+            let Some(index) = state
+                .checks
+                .iter()
+                .position(|check| check.check_id == check_id)
+            else {
+                bail!("check not found: {}", check_id);
+            };
+            if check_is_active(&state.checks[index]) {
+                let now = now_utc();
+                state.checks[index].deprecated_at_utc = Some(now.clone());
+                state.checks[index].deprecated_by_agent_id = Some(agent_id.clone());
+                state.checks[index].deprecated_reason = reason;
+                state.checks[index].updated_at_utc = now.clone();
+                state.updated_at_utc = now;
+                write_check_state(repo_root, &state)?;
+                append_check_timeline_event(
+                    repo_root,
+                    &state.checks[index],
+                    &agent_id,
+                    "deprecate",
+                )?;
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&state.checks[index])?);
+            } else {
+                println!("[fugit-check] deprecated {}", state.checks[index].check_id);
+            }
+        }
+        CheckAction::Run {
+            task_id,
+            kind,
+            include_deprecated,
+            fail_fast,
+            json,
+        } => {
+            let task_id = normalize_optional_text(task_id, "task id")?;
+            let kind = kind.map(CheckKindArg::into_check_kind);
+            let payload = run_quality_checks(
+                repo_root,
+                &mut state,
+                task_id.as_deref(),
+                kind,
+                include_deprecated,
+                fail_fast,
+                "manual",
+                true,
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+                if !payload["ok"].as_bool().unwrap_or(false) {
+                    return Err(JsonCommandError { payload }.into());
+                }
+            } else {
+                println!(
+                    "[fugit-check] status={} selected={} passed={} failed={}",
+                    payload["status"].as_str().unwrap_or("unknown"),
+                    payload["selected_count"].as_u64().unwrap_or(0),
+                    payload["passed_count"].as_u64().unwrap_or(0),
+                    payload["failed_count"].as_u64().unwrap_or(0)
+                );
+                if !payload["ok"].as_bool().unwrap_or(false) {
+                    bail!("quality checks failed");
+                }
+            }
+        }
+        CheckAction::Policy { action } => match action {
+            CheckPolicyAction::Show { json } => {
+                let payload = check_policy_payload(&state, &config);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    println!(
+                        "[fugit-check-policy] enabled={} require_on_task_done={} run_before_sync={} active={} deprecated={}",
+                        payload["enabled"].as_bool().unwrap_or(false),
+                        payload["require_on_task_done"].as_bool().unwrap_or(false),
+                        payload["run_before_sync"].as_bool().unwrap_or(false),
+                        payload["active_check_count"].as_u64().unwrap_or(0),
+                        payload["deprecated_check_count"].as_u64().unwrap_or(0)
+                    );
+                }
+            }
+            CheckPolicyAction::Set {
+                enabled,
+                require_on_task_done,
+                run_before_sync,
+                agent: _,
+                json,
+            } => {
+                let changed = update_check_policy_config(
+                    &mut config,
+                    enabled,
+                    require_on_task_done,
+                    run_before_sync,
+                );
+                if changed {
+                    write_pretty_json(&timeline_config_path(repo_root), &config)?;
+                }
+                let payload = check_policy_payload(&state, &config);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    println!(
+                        "[fugit-check-policy] enabled={} require_on_task_done={} run_before_sync={}",
+                        payload["enabled"].as_bool().unwrap_or(false),
+                        payload["require_on_task_done"].as_bool().unwrap_or(false),
+                        payload["run_before_sync"].as_bool().unwrap_or(false)
+                    );
+                }
+            }
+        },
+    }
+    Ok(())
+}
+
 fn cmd_lock(repo_root: &Path, args: LockArgs) -> Result<()> {
     let mut state = load_lock_state(repo_root)?;
     let state_changed = prune_expired_locks(&mut state)?;
@@ -4373,6 +4778,9 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             notes,
             artifacts,
             commands,
+            regressions,
+            benchmarks,
+            skip_check_requirement,
             json,
         } => {
             let agent_id = agent.unwrap_or_else(default_agent_id);
@@ -4389,6 +4797,79 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     task.task_id,
                     owner
                 );
+            }
+            let config = load_timeline_config_or_default(repo_root)?;
+            let mut check_state = load_check_state(repo_root)?;
+            let regression_commands = normalize_string_list(regressions);
+            let benchmark_commands = normalize_string_list(benchmarks);
+            let existing_active_checks =
+                task_active_check_count(&check_state, &state.tasks[task_index].task_id);
+            if config.quality_checks_enabled
+                && config.quality_checks_require_on_task_done
+                && !skip_check_requirement
+                && existing_active_checks == 0
+                && regression_commands.is_empty()
+                && benchmark_commands.is_empty()
+            {
+                bail!(
+                    "task {} requires at least one regression or benchmark check; use --regression/--benchmark, add one with `fugit check add --task-id {}` first, or opt out with `fugit check policy set --require-on-task-done false`",
+                    state.tasks[task_index].task_id,
+                    state.tasks[task_index].task_id
+                );
+            }
+            let mut created_checks = Vec::<FugitCheck>::new();
+            for command in regression_commands {
+                let normalized_command = normalize_check_command(command)?;
+                let now = now_utc();
+                let check = FugitCheck {
+                    check_id: format!("chk_{}", Uuid::new_v4().simple()),
+                    name: format!("regression {}", state.tasks[task_index].task_id),
+                    command: normalized_command,
+                    kind: CheckKind::Regression,
+                    task_id: Some(state.tasks[task_index].task_id.clone()),
+                    created_at_utc: now.clone(),
+                    updated_at_utc: now,
+                    created_by_agent_id: agent_id.clone(),
+                    deprecated_at_utc: None,
+                    deprecated_by_agent_id: None,
+                    deprecated_reason: None,
+                    last_run_at_utc: None,
+                    last_run_status: None,
+                    last_run_duration_ms: None,
+                    last_run_exit_code: None,
+                };
+                check_state.checks.push(check.clone());
+                created_checks.push(check);
+            }
+            for command in benchmark_commands {
+                let normalized_command = normalize_check_command(command)?;
+                let now = now_utc();
+                let check = FugitCheck {
+                    check_id: format!("chk_{}", Uuid::new_v4().simple()),
+                    name: format!("benchmark {}", state.tasks[task_index].task_id),
+                    command: normalized_command,
+                    kind: CheckKind::Benchmark,
+                    task_id: Some(state.tasks[task_index].task_id.clone()),
+                    created_at_utc: now.clone(),
+                    updated_at_utc: now,
+                    created_by_agent_id: agent_id.clone(),
+                    deprecated_at_utc: None,
+                    deprecated_by_agent_id: None,
+                    deprecated_reason: None,
+                    last_run_at_utc: None,
+                    last_run_status: None,
+                    last_run_duration_ms: None,
+                    last_run_exit_code: None,
+                };
+                check_state.checks.push(check.clone());
+                created_checks.push(check);
+            }
+            if !created_checks.is_empty() {
+                check_state.updated_at_utc = now_utc();
+                write_check_state(repo_root, &check_state)?;
+                for check in &created_checks {
+                    append_check_timeline_event(repo_root, check, &agent_id, "add")?;
+                }
             }
             let now = now_utc();
             state.tasks[task_index].status = TaskStatus::Done;
@@ -4407,20 +4888,31 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
             let task = state.tasks[task_index].clone();
             append_task_timeline_event(repo_root, &task, &agent_id, "done", None)?;
-            let config = load_timeline_config_or_default(repo_root)?;
             let auto_bridge_sync =
                 maybe_queue_auto_bridge_sync_for_task_done(repo_root, &config, &task);
             if json {
                 let mut payload = serde_json::to_value(&state.tasks[task_index])?;
                 if let Some(object) = payload.as_object_mut() {
                     object.insert("auto_bridge_sync".to_string(), auto_bridge_sync);
+                    object.insert(
+                        "quality_checks".to_string(),
+                        json!({
+                            "policy_enabled": config.quality_checks_enabled,
+                            "require_on_task_done": config.quality_checks_require_on_task_done,
+                            "skipped_requirement": skip_check_requirement,
+                            "existing_active_count": existing_active_checks,
+                            "created_count": created_checks.len(),
+                            "created": created_checks
+                        }),
+                    );
                 }
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!(
-                    "[fugit-task] completed {} by {} auto_bridge_sync={}",
+                    "[fugit-task] completed {} by {} quality_checks_added={} auto_bridge_sync={}",
                     state.tasks[task_index].task_id,
                     agent_id,
+                    created_checks.len(),
                     auto_bridge_sync["status"].as_str().unwrap_or("unknown")
                 );
             }
@@ -4663,6 +5155,86 @@ fn task_timeline_tags(
         tags.push(format!("task_tag:{}", tag));
     }
     dedupe_keep_order(tags)
+}
+
+fn append_check_timeline_event(
+    repo_root: &Path,
+    check: &FugitCheck,
+    agent_id: &str,
+    action: &str,
+) -> Result<()> {
+    if !timeline_is_initialized(repo_root) {
+        return Ok(());
+    }
+
+    let (_config, mut branches) = load_initialized_state(repo_root)?;
+    let active_branch = branches.active_branch.clone();
+    let parent_event_id = branches
+        .branches
+        .get(&active_branch)
+        .and_then(|row| row.head_event_id.clone());
+    let tracked_file_count = load_branch_index(repo_root, &active_branch)
+        .map(|index| index.len())
+        .unwrap_or(0);
+    let event_id = format!("evt_{}", Uuid::new_v4().simple());
+    let summary = match action {
+        "add" => format!(
+            "check add: {} [{}] \"{}\"",
+            check.check_id,
+            check_kind_label(check.kind),
+            check.name
+        ),
+        "deprecate" => format!(
+            "check deprecate: {} [{}] \"{}\"",
+            check.check_id,
+            check_kind_label(check.kind),
+            check.name
+        ),
+        _ => format!(
+            "check {}: {} [{}] \"{}\"",
+            action,
+            check.check_id,
+            check_kind_label(check.kind),
+            check.name
+        ),
+    };
+    let mut tags = vec![
+        "check".to_string(),
+        format!("check_action:{}", action),
+        format!("check_id:{}", check.check_id),
+        format!("check_kind:{}", check_kind_label(check.kind)),
+    ];
+    if let Some(task_id) = check.task_id.as_deref() {
+        tags.push(format!("task_id:{}", task_id));
+    }
+    let event = TimelineEvent {
+        schema_version: SCHEMA_EVENT.to_string(),
+        event_id: event_id.clone(),
+        created_at_utc: now_utc(),
+        branch: active_branch.clone(),
+        parent_event_id,
+        agent_id: agent_id.to_string(),
+        summary,
+        tags,
+        metrics: EventMetrics {
+            tracked_file_count,
+            changed_file_count: 0,
+            added_count: 0,
+            modified_count: 0,
+            deleted_count: 0,
+            changed_bytes_total: 0,
+        },
+        changes: Vec::new(),
+    };
+    append_jsonl(
+        &timeline_branch_events_path(repo_root, &active_branch),
+        &event,
+    )?;
+    if let Some(pointer) = branches.branches.get_mut(&active_branch) {
+        pointer.head_event_id = Some(event_id);
+    }
+    write_pretty_json(&timeline_branches_path(repo_root), &branches)?;
+    Ok(())
 }
 
 fn bind_task_gui_listener(host: &str, port: u16) -> Result<TcpListener> {
@@ -6743,7 +7315,10 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "summary": { "type": "string" },
                     "notes": { "type": "array", "items": { "type": "string" } },
                     "artifacts": { "type": "array", "items": { "type": "string" } },
-                    "commands": { "type": "array", "items": { "type": "string" } }
+                    "commands": { "type": "array", "items": { "type": "string" } },
+                    "regressions": { "type": "array", "items": { "type": "string" } },
+                    "benchmarks": { "type": "array", "items": { "type": "string" } },
+                    "skip_check_requirement": { "type": "boolean" }
                 }
             }
         }),
@@ -6767,6 +7342,77 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                 "required": ["task_id"],
                 "properties": {
                     "task_id": { "type": "string" },
+                    "agent": { "type": "string" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_check_list",
+            "description": "List registered regression and benchmark checks.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "kind": { "type": "string", "enum": ["regression", "benchmark"] },
+                    "include_deprecated": { "type": "boolean" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_check_add",
+            "description": "Register a regression or benchmark check.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["kind", "command"],
+                "properties": {
+                    "name": { "type": "string" },
+                    "kind": { "type": "string", "enum": ["regression", "benchmark"] },
+                    "command": { "type": "string" },
+                    "task_id": { "type": "string" },
+                    "agent": { "type": "string" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_check_deprecate",
+            "description": "Deprecate a stale regression or benchmark check.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["check_id"],
+                "properties": {
+                    "check_id": { "type": "string" },
+                    "reason": { "type": "string" },
+                    "agent": { "type": "string" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_check_run",
+            "description": "Run registered regression and benchmark checks.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "kind": { "type": "string", "enum": ["regression", "benchmark"] },
+                    "include_deprecated": { "type": "boolean" },
+                    "fail_fast": { "type": "boolean" }
+                }
+            }
+        }),
+        json!({
+            "name": "fugit_check_policy_show",
+            "description": "Inspect quality-gate policy for regression and benchmark checks.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "fugit_check_policy_set",
+            "description": "Update quality-gate policy for task completion and pre-sync check runs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": { "type": "boolean" },
+                    "require_on_task_done": { "type": "boolean" },
+                    "run_before_sync": { "type": "boolean" },
                     "agent": { "type": "string" }
                 }
             }
@@ -7594,6 +8240,32 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                     }
                 }
             }
+            if let Some(regressions) = args
+                .get("regressions")
+                .and_then(serde_json::Value::as_array)
+            {
+                for regression in regressions {
+                    if let Some(regression_value) = regression.as_str() {
+                        cli_args.push("--regression".to_string());
+                        cli_args.push(regression_value.to_string());
+                    }
+                }
+            }
+            if let Some(benchmarks) = args.get("benchmarks").and_then(serde_json::Value::as_array) {
+                for benchmark in benchmarks {
+                    if let Some(benchmark_value) = benchmark.as_str() {
+                        cli_args.push("--benchmark".to_string());
+                        cli_args.push(benchmark_value.to_string());
+                    }
+                }
+            }
+            if args
+                .get("skip_check_requirement")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--skip-check-requirement".to_string());
+            }
             run_self_cli_json(repo_root, &cli_args)?
         }
         "fugit_task_reopen" => {
@@ -7626,6 +8298,149 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 task_id.to_string(),
                 "--json".to_string(),
             ];
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_check_list" => {
+            let mut cli_args = vec![
+                "check".to_string(),
+                "list".to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(task_id) = args.get("task_id").and_then(serde_json::Value::as_str) {
+                cli_args.push("--task-id".to_string());
+                cli_args.push(task_id.to_string());
+            }
+            if let Some(kind) = args.get("kind").and_then(serde_json::Value::as_str) {
+                cli_args.push("--kind".to_string());
+                cli_args.push(kind.to_string());
+            }
+            if args
+                .get("include_deprecated")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--include-deprecated".to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_check_add" => {
+            let kind = args
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_check_add requires kind"))?;
+            let command = args
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_check_add requires command"))?;
+            let mut cli_args = vec![
+                "check".to_string(),
+                "add".to_string(),
+                "--kind".to_string(),
+                kind.to_string(),
+                "--command".to_string(),
+                command.to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(name) = args.get("name").and_then(serde_json::Value::as_str) {
+                cli_args.push("--name".to_string());
+                cli_args.push(name.to_string());
+            }
+            if let Some(task_id) = args.get("task_id").and_then(serde_json::Value::as_str) {
+                cli_args.push("--task-id".to_string());
+                cli_args.push(task_id.to_string());
+            }
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_check_deprecate" => {
+            let check_id = args
+                .get("check_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("fugit_check_deprecate requires check_id"))?;
+            let mut cli_args = vec![
+                "check".to_string(),
+                "deprecate".to_string(),
+                "--check-id".to_string(),
+                check_id.to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(reason) = args.get("reason").and_then(serde_json::Value::as_str) {
+                cli_args.push("--reason".to_string());
+                cli_args.push(reason.to_string());
+            }
+            if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
+                cli_args.push("--agent".to_string());
+                cli_args.push(agent.to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_check_run" => {
+            let mut cli_args = vec!["check".to_string(), "run".to_string(), "--json".to_string()];
+            if let Some(task_id) = args.get("task_id").and_then(serde_json::Value::as_str) {
+                cli_args.push("--task-id".to_string());
+                cli_args.push(task_id.to_string());
+            }
+            if let Some(kind) = args.get("kind").and_then(serde_json::Value::as_str) {
+                cli_args.push("--kind".to_string());
+                cli_args.push(kind.to_string());
+            }
+            if args
+                .get("include_deprecated")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--include-deprecated".to_string());
+            }
+            if args
+                .get("fail_fast")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--fail-fast".to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
+        }
+        "fugit_check_policy_show" => run_self_cli_json(
+            repo_root,
+            &[
+                "check".to_string(),
+                "policy".to_string(),
+                "show".to_string(),
+                "--json".to_string(),
+            ],
+        )?,
+        "fugit_check_policy_set" => {
+            let mut cli_args = vec![
+                "check".to_string(),
+                "policy".to_string(),
+                "set".to_string(),
+                "--json".to_string(),
+            ];
+            if let Some(enabled) = args.get("enabled").and_then(serde_json::Value::as_bool) {
+                cli_args.push("--enabled".to_string());
+                cli_args.push(enabled.to_string());
+            }
+            if let Some(require_on_task_done) = args
+                .get("require_on_task_done")
+                .and_then(serde_json::Value::as_bool)
+            {
+                cli_args.push("--require-on-task-done".to_string());
+                cli_args.push(require_on_task_done.to_string());
+            }
+            if let Some(run_before_sync) = args
+                .get("run_before_sync")
+                .and_then(serde_json::Value::as_bool)
+            {
+                cli_args.push("--run-before-sync".to_string());
+                cli_args.push(run_before_sync.to_string());
+            }
             if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
                 cli_args.push("--agent".to_string());
                 cli_args.push(agent.to_string());
@@ -7992,6 +8807,42 @@ fn perform_bridge_sync_github(
             );
         }
     }
+    let config = load_timeline_config_or_default(repo_root)?;
+    let quality_gate = if config.quality_checks_enabled && config.quality_checks_run_before_sync {
+        let mut check_state = load_check_state(repo_root)?;
+        let payload = run_quality_checks(
+            repo_root,
+            &mut check_state,
+            None,
+            None,
+            false,
+            false,
+            "bridge_sync",
+            false,
+        )?;
+        if !payload["ok"].as_bool().unwrap_or(false) {
+            bail!(
+                "bridge sync blocked by failing quality checks; run `fugit check run --json`, fix the failures, or deprecate stale checks with `fugit check deprecate --check-id ...`"
+            );
+        }
+        payload
+    } else {
+        json!({
+            "schema_version": "fugit.check.run.v1",
+            "generated_at_utc": now_utc(),
+            "ok": true,
+            "status": if !config.quality_checks_enabled {
+                "disabled"
+            } else {
+                "run_before_sync_disabled"
+            },
+            "trigger": "bridge_sync",
+            "selected_count": 0,
+            "passed_count": 0,
+            "failed_count": 0,
+            "checks": []
+        })
+    };
     let mut events = read_branch_events(repo_root, active_branch)?;
     if events.len() > options.event_count {
         let start = events.len().saturating_sub(options.event_count);
@@ -8020,6 +8871,7 @@ fn perform_bridge_sync_github(
             "committed": false,
             "pushed": false,
             "no_push": options.no_push,
+            "quality_gate": quality_gate,
             "message": "no staged changes after git add -A; skipping commit/push",
             "commit_subject": subject
         }));
@@ -8064,6 +8916,7 @@ fn perform_bridge_sync_github(
         "committed": true,
         "pushed": pushed,
         "no_push": options.no_push,
+        "quality_gate": quality_gate,
         "commit_subject": subject
     }))
 }
@@ -8635,6 +9488,9 @@ fn build_default_timeline_config(repo_root: &Path) -> TimelineConfig {
         auto_replenish_enabled: default_auto_replenish_enabled(),
         auto_replenish_require_confirmation: default_auto_replenish_require_confirmation(),
         auto_replenish_agents: Vec::new(),
+        quality_checks_enabled: default_quality_checks_enabled(),
+        quality_checks_require_on_task_done: default_quality_checks_require_on_task_done(),
+        quality_checks_run_before_sync: default_quality_checks_run_before_sync(),
     }
 }
 
@@ -9118,6 +9974,69 @@ fn load_task_state(repo_root: &Path) -> Result<TaskState> {
     Ok(state)
 }
 
+fn load_check_state(repo_root: &Path) -> Result<CheckState> {
+    let path = timeline_checks_path(repo_root);
+    let mut state = load_json_optional::<CheckState>(&path)?.unwrap_or(CheckState {
+        schema_version: SCHEMA_CHECKS.to_string(),
+        updated_at_utc: now_utc(),
+        checks: Vec::new(),
+    });
+    if state.schema_version.trim().is_empty() {
+        state.schema_version = SCHEMA_CHECKS.to_string();
+    }
+    Ok(state)
+}
+
+fn write_check_state(repo_root: &Path, state: &CheckState) -> Result<()> {
+    write_pretty_json(&timeline_checks_path(repo_root), state)
+}
+
+fn check_kind_label(kind: CheckKind) -> &'static str {
+    match kind {
+        CheckKind::Regression => "regression",
+        CheckKind::Benchmark => "benchmark",
+    }
+}
+
+fn check_is_active(check: &FugitCheck) -> bool {
+    check.deprecated_at_utc.is_none()
+}
+
+fn normalize_check_command(command: String) -> Result<String> {
+    normalize_optional_text(Some(command), "check command")?
+        .ok_or_else(|| anyhow!("check command cannot be empty"))
+}
+
+fn normalize_check_name(name: Option<String>, kind: CheckKind, task_id: Option<&str>) -> String {
+    if let Some(name) = name
+        && let Ok(Some(normalized)) = normalize_optional_text(Some(name), "check name")
+    {
+        return normalized;
+    }
+    let mut label = check_kind_label(kind).to_string();
+    if let Some(task_id) = task_id {
+        label.push(' ');
+        label.push_str(task_id);
+    }
+    label
+}
+
+fn validate_check_task_id(repo_root: &Path, task_id: &str) -> Result<()> {
+    let state = load_task_state(repo_root)?;
+    if !state.tasks.iter().any(|task| task.task_id == task_id) {
+        bail!("task not found for check: {}", task_id);
+    }
+    Ok(())
+}
+
+fn task_active_check_count(check_state: &CheckState, task_id: &str) -> usize {
+    check_state
+        .checks
+        .iter()
+        .filter(|check| check.task_id.as_deref() == Some(task_id) && check_is_active(check))
+        .count()
+}
+
 fn normalize_task_title(title: &str) -> Result<String> {
     let normalized = title.trim();
     if normalized.is_empty() {
@@ -9495,6 +10414,167 @@ fn approve_tasks_in_state(
     }
     state.updated_at_utc = now;
     Ok(approved)
+}
+
+fn update_check_policy_config(
+    config: &mut TimelineConfig,
+    enabled: Option<bool>,
+    require_on_task_done: Option<bool>,
+    run_before_sync: Option<bool>,
+) -> bool {
+    let mut changed = false;
+    if let Some(enabled) = enabled
+        && config.quality_checks_enabled != enabled
+    {
+        config.quality_checks_enabled = enabled;
+        changed = true;
+    }
+    if let Some(require_on_task_done) = require_on_task_done
+        && config.quality_checks_require_on_task_done != require_on_task_done
+    {
+        config.quality_checks_require_on_task_done = require_on_task_done;
+        changed = true;
+    }
+    if let Some(run_before_sync) = run_before_sync
+        && config.quality_checks_run_before_sync != run_before_sync
+    {
+        config.quality_checks_run_before_sync = run_before_sync;
+        changed = true;
+    }
+    if changed {
+        config.updated_at_utc = now_utc();
+    }
+    changed
+}
+
+fn check_policy_payload(state: &CheckState, config: &TimelineConfig) -> serde_json::Value {
+    let active_check_count = state
+        .checks
+        .iter()
+        .filter(|check| check_is_active(check))
+        .count();
+    json!({
+        "schema_version": "fugit.check.policy.v1",
+        "generated_at_utc": now_utc(),
+        "enabled": config.quality_checks_enabled,
+        "require_on_task_done": config.quality_checks_require_on_task_done,
+        "run_before_sync": config.quality_checks_run_before_sync,
+        "active_check_count": active_check_count,
+        "deprecated_check_count": state.checks.len().saturating_sub(active_check_count)
+    })
+}
+
+fn run_quality_checks(
+    repo_root: &Path,
+    state: &mut CheckState,
+    task_id: Option<&str>,
+    kind: Option<CheckKind>,
+    include_deprecated: bool,
+    fail_fast: bool,
+    trigger: &str,
+    persist_results: bool,
+) -> Result<serde_json::Value> {
+    let selected_indices = state
+        .checks
+        .iter()
+        .enumerate()
+        .filter(|(_, check)| {
+            (include_deprecated || check_is_active(check))
+                && task_id
+                    .map(|task_id| check.task_id.as_deref() == Some(task_id))
+                    .unwrap_or(true)
+                && kind.map(|kind| check.kind == kind).unwrap_or(true)
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+
+    let mut results = Vec::<CheckRunCheckResult>::new();
+    let mut failed_count = 0_usize;
+    for index in selected_indices {
+        let check = state.checks[index].clone();
+        let started_at = now_utc();
+        let started = Instant::now();
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let output = ProcessCommand::new(&shell)
+            .current_dir(repo_root)
+            .arg("-lc")
+            .arg(&check.command)
+            .output();
+        let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let (ok, status, exit_code) = match output {
+            Ok(output) => (
+                output.status.success(),
+                if output.status.success() {
+                    "passed".to_string()
+                } else {
+                    "failed".to_string()
+                },
+                output.status.code(),
+            ),
+            Err(err) => (false, format!("spawn_error: {}", err), None),
+        };
+        state.checks[index].last_run_at_utc = Some(started_at);
+        state.checks[index].last_run_status = Some(status.clone());
+        state.checks[index].last_run_duration_ms = Some(duration_ms);
+        state.checks[index].last_run_exit_code = exit_code;
+        state.checks[index].updated_at_utc = now_utc();
+        if !ok {
+            failed_count += 1;
+        }
+        results.push(CheckRunCheckResult {
+            check_id: check.check_id,
+            name: check.name,
+            kind: check.kind,
+            task_id: check.task_id,
+            command: check.command,
+            ok,
+            status,
+            exit_code,
+            duration_ms,
+        });
+        if fail_fast && failed_count > 0 {
+            break;
+        }
+    }
+
+    let passed_count = results.iter().filter(|row| row.ok).count();
+    if persist_results {
+        state.updated_at_utc = now_utc();
+        write_check_state(repo_root, state)?;
+        let record = CheckRunRecord {
+            schema_version: SCHEMA_CHECK_RUNS.to_string(),
+            run_id: format!("run_{}", Uuid::new_v4().simple()),
+            generated_at_utc: now_utc(),
+            repo_root: repo_root.display().to_string(),
+            trigger: trigger.to_string(),
+            ok: failed_count == 0,
+            selected_count: results.len(),
+            passed_count,
+            failed_count,
+            checks: results.clone(),
+        };
+        append_jsonl(&timeline_check_runs_path(repo_root), &record)?;
+    }
+
+    let status = if results.is_empty() {
+        "no_checks"
+    } else if failed_count == 0 {
+        "passed"
+    } else {
+        "failed"
+    };
+    Ok(json!({
+        "schema_version": "fugit.check.run.v1",
+        "generated_at_utc": now_utc(),
+        "ok": failed_count == 0,
+        "status": status,
+        "trigger": trigger,
+        "persisted": persist_results,
+        "selected_count": results.len(),
+        "passed_count": passed_count,
+        "failed_count": failed_count,
+        "checks": results
+    }))
 }
 
 fn sync_auto_replenish_policy_in_state(
@@ -10761,6 +11841,8 @@ fn detect_project_last_activity(repo_root: &Path) -> Option<String> {
     let mut latest = None;
     let candidate_paths = [
         timeline_tasks_path(repo_root),
+        timeline_checks_path(repo_root),
+        timeline_check_runs_path(repo_root),
         timeline_config_path(repo_root),
         timeline_branches_path(repo_root),
         timeline_bridge_auto_sync_state_path(repo_root),
@@ -11763,6 +12845,18 @@ fn default_auto_replenish_require_confirmation() -> bool {
     false
 }
 
+fn default_quality_checks_enabled() -> bool {
+    true
+}
+
+fn default_quality_checks_require_on_task_done() -> bool {
+    true
+}
+
+fn default_quality_checks_run_before_sync() -> bool {
+    true
+}
+
 fn timeline_is_initialized(repo_root: &Path) -> bool {
     timeline_config_path(repo_root).exists() && timeline_branches_path(repo_root).exists()
 }
@@ -11809,6 +12903,14 @@ fn timeline_locks_path(repo_root: &Path) -> PathBuf {
 
 fn timeline_tasks_path(repo_root: &Path) -> PathBuf {
     timeline_root(repo_root).join("tasks.json")
+}
+
+fn timeline_checks_path(repo_root: &Path) -> PathBuf {
+    timeline_root(repo_root).join("checks.json")
+}
+
+fn timeline_check_runs_path(repo_root: &Path) -> PathBuf {
+    timeline_root(repo_root).join("check_runs.jsonl")
 }
 
 fn timeline_bridge_auth_path(repo_root: &Path) -> PathBuf {
@@ -12363,6 +13465,9 @@ mod tests {
             auto_replenish_enabled: true,
             auto_replenish_require_confirmation: true,
             auto_replenish_agents: vec!["agent.alpha".to_string(), "agent.beta".to_string()],
+            quality_checks_enabled: true,
+            quality_checks_require_on_task_done: true,
+            quality_checks_run_before_sync: true,
         };
 
         let result = ensure_auto_replenish_tasks(&mut state, &config, "agent.alpha");

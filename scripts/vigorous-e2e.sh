@@ -160,6 +160,12 @@ import json,sys
 print(json.load(open(sys.argv[1]))["task_id"])
 PY
 )"
+"$BIN" --repo-root "$REPO_A" task add --title "task-d" --priority 1 --agent agent.d --json >"$TMP_ROOT/task-d.json"
+TASK_D="$(python3 - "$TMP_ROOT/task-d.json" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1]))["task_id"])
+PY
+)"
 "$BIN" --repo-root "$REPO_A" task request --agent agent.runner --no-claim --max 2 --json >"$TMP_ROOT/task-request-preview.json"
 json_assert "$TMP_ROOT/task-request-preview.json" 'payload.get("assigned_count", 0) >= 1 and isinstance(payload.get("tasks"), list)' "task request preview should return a prioritized slice"
 "$BIN" --repo-root "$REPO_A" task request --agent agent.runner --focus root --json >"$TMP_ROOT/task-request-1.json"
@@ -169,10 +175,14 @@ json_assert "$TMP_ROOT/task-current.json" 'payload.get("found") is True and payl
 "$BIN" --repo-root "$REPO_A" task list --status in_progress --json >"$TMP_ROOT/task-in-progress.json"
 json_assert "$TMP_ROOT/task-in-progress.json" 'any(row.get("task_id") == "'"$TASK_A"'" for row in payload)' "task list should accept in_progress as a claimed-task alias"
 "$BIN" --repo-root "$REPO_A" task request --agent agent.runner --skip-owned --json >"$TMP_ROOT/task-request-skip-owned.json"
-json_assert "$TMP_ROOT/task-request-skip-owned.json" 'payload.get("dispatch_kind") == "open" and payload.get("task",{}).get("task_id") == "'"$TASK_C"'" and payload.get("skip_owned") is True' "task request --skip-owned should bypass the agent's existing claim"
+json_assert "$TMP_ROOT/task-request-skip-owned.json" 'payload.get("dispatch_kind") == "open" and payload.get("task",{}).get("task_id") in {"'"$TASK_C"'","'"$TASK_D"'"} and payload.get("skip_owned") is True' "task request --skip-owned should bypass the agent's existing claim"
+if "$BIN" --repo-root "$REPO_A" task done --task-id "$TASK_D" --agent agent.runner >/dev/null 2>&1; then
+  echo "[vigorous-e2e] expected task done to require a regression or benchmark check by default" >&2
+  exit 1
+fi
 "$BIN" --repo-root "$REPO_A" task release --task-id "$TASK_C" --agent agent.runner >/dev/null
-"$BIN" --repo-root "$REPO_A" task done --task-id "$TASK_A" --agent agent.runner --summary "root lane complete" --artifact "$TMP_ROOT/task-a-edit.json" --command "cargo test" --json >"$TMP_ROOT/task-done.json"
-json_assert "$TMP_ROOT/task-done.json" 'payload.get("completed_summary") == "root lane complete" and payload.get("auto_bridge_sync", {}).get("status") is not None' "task done should include completion metadata and auto bridge sync status"
+"$BIN" --repo-root "$REPO_A" task done --task-id "$TASK_A" --agent agent.runner --summary "root lane complete" --artifact "$TMP_ROOT/task-a-edit.json" --command "cargo test" --regression "test -f README.txt" --json >"$TMP_ROOT/task-done.json"
+json_assert "$TMP_ROOT/task-done.json" 'payload.get("completed_summary") == "root lane complete" and payload.get("auto_bridge_sync", {}).get("status") is not None and payload.get("quality_checks", {}).get("created_count") == 1' "task done should include completion metadata, quality checks, and auto bridge sync status"
 wait_for_auto_sync "$REPO_A"
 "$BIN" --repo-root "$REPO_A" bridge auto-sync show --json >"$TMP_ROOT/auto-sync-after-task-done.json"
 json_assert "$TMP_ROOT/auto-sync-after-task-done.json" 'payload.get("status") in {"success","committed_local","noop"} and "task done:" in (payload.get("last_note") or "") and payload.get("last_trigger") == "task_done"' "task done should queue bridge auto-sync with task note"
@@ -185,10 +195,12 @@ fi
 json_assert "$TMP_ROOT/task-request-2.json" 'payload.get("assigned") is True' "second task request should assign dependent task after completion"
 "$BIN" --repo-root "$REPO_A" task show --task-id "$TASK_A" --json >"$TMP_ROOT/task-a-done.json"
 json_assert "$TMP_ROOT/task-a-done.json" 'payload.get("completed_summary") == "root lane complete" and "cargo test" in payload.get("completion_commands", [])' "task show should include completion metadata"
+"$BIN" --repo-root "$REPO_A" check list --json >"$TMP_ROOT/check-list.json"
+json_assert "$TMP_ROOT/check-list.json" 'any(row.get("task_id") == "'"$TASK_A"'" and row.get("kind") == "regression" for row in payload)' "task done should register a regression check"
 "$BIN" --repo-root "$REPO_A" task remove --task-id "$TASK_C" --agent agent.c >/dev/null
 "$BIN" --repo-root "$REPO_A" log --limit 50 --json >"$TMP_ROOT/log-task.json"
 json_assert "$TMP_ROOT/log-task.json" 'any("task done:" in row.get("summary","") for row in payload)' "task actions should be mirrored into timeline events"
-json_assert "$TMP_ROOT/log-task.json" 'any("task edit:" in row.get("summary","") for row in payload) and any("task remove:" in row.get("summary","") for row in payload)' "edit/remove actions should be mirrored into timeline events"
+json_assert "$TMP_ROOT/log-task.json" 'any("task edit:" in row.get("summary","") for row in payload) and any("task remove:" in row.get("summary","") for row in payload) and any("check add:" in row.get("summary","") for row in payload)' "task and check actions should be mirrored into timeline events"
 
 echo "[vigorous-e2e] auto replenish policy"
 "$BIN" --repo-root "$REPO_B" init --branch trunk >/dev/null
@@ -217,7 +229,7 @@ payload=json.load(open(sys.argv[1]))
 print(payload["created"][1]["task_id"])
 PY
 )"
-"$BIN" --repo-root "$REPO_A" task done --task-id "$SYNC_TASK_ID" --agent agent.sync >/dev/null
+"$BIN" --repo-root "$REPO_A" task done --task-id "$SYNC_TASK_ID" --agent agent.sync --regression "test -f README.txt" >/dev/null
 "$BIN" --repo-root "$REPO_A" task reopen --task-id "$SYNC_TASK_ID" --agent agent.sync --json >"$TMP_ROOT/task-reopen.json"
 json_assert "$TMP_ROOT/task-reopen.json" 'payload.get("status") == "open" and payload.get("completed_at_utc") is None' "task reopen should clear completion metadata"
 cat >"$REPO_A/the_final_plan.md" <<'EOF'
@@ -226,6 +238,25 @@ cat >"$REPO_A/the_final_plan.md" <<'EOF'
 EOF
 "$BIN" --repo-root "$REPO_A" task sync --plan "$REPO_A/the_final_plan.md" --json >"$TMP_ROOT/task-sync-2.json"
 json_assert "$TMP_ROOT/task-sync-2.json" 'len(payload.get("removed", [])) >= 1 and any(row.get("source_key") == "A-03" for row in payload.get("created", []))' "task sync should remove stale plan tasks and create new ones"
+
+echo "[vigorous-e2e] quality gate + deprecate"
+"$BIN" --repo-root "$REPO_A" check policy show --json >"$TMP_ROOT/check-policy-show.json"
+json_assert "$TMP_ROOT/check-policy-show.json" 'payload.get("enabled") is True and payload.get("require_on_task_done") is True and payload.get("run_before_sync") is True' "quality checks should be enabled by default"
+"$BIN" --repo-root "$REPO_A" check add --kind regression --command "exit 1" --task-id "$TASK_A" --agent agent.qa --json >"$TMP_ROOT/check-add-failing.json"
+FAILING_CHECK_ID="$(python3 - "$TMP_ROOT/check-add-failing.json" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1]))["check_id"])
+PY
+)"
+if "$BIN" --repo-root "$REPO_A" bridge sync-github --remote origin --branch trunk --no-push >/dev/null 2>&1; then
+  echo "[vigorous-e2e] expected bridge sync to fail when a quality check fails" >&2
+  exit 1
+fi
+"$BIN" --repo-root "$REPO_A" check deprecate --check-id "$FAILING_CHECK_ID" --reason "obsolete coverage" --agent agent.qa --json >"$TMP_ROOT/check-deprecate.json"
+json_assert "$TMP_ROOT/check-deprecate.json" 'payload.get("deprecated_reason") == "obsolete coverage"' "check deprecate should record the deprecation reason"
+"$BIN" --repo-root "$REPO_A" check run --json >"$TMP_ROOT/check-run.json"
+json_assert "$TMP_ROOT/check-run.json" 'payload.get("ok") is True and payload.get("selected_count", 0) >= 1' "check run should pass once the stale failing check is deprecated"
+"$BIN" --repo-root "$REPO_A" bridge sync-github --remote origin --branch trunk --no-push >/dev/null
 
 echo "[vigorous-e2e] project registry"
 "$BIN" project add --name proj-a --repo-root "$REPO_A" --set-default --json >"$TMP_ROOT/project-add-a.json"
@@ -414,6 +445,10 @@ if not any(t.get("name") == "fugit_task_sync" for t in tools):
     raise RuntimeError("missing fugit_task_sync in MCP tools")
 if not any(t.get("name") == "fugit_task_reopen" for t in tools):
     raise RuntimeError("missing fugit_task_reopen in MCP tools")
+if not any(t.get("name") == "fugit_check_run" for t in tools):
+    raise RuntimeError("missing fugit_check_run in MCP tools")
+if not any(t.get("name") == "fugit_check_deprecate" for t in tools):
+    raise RuntimeError("missing fugit_check_deprecate in MCP tools")
 
 send({
     "jsonrpc":"2.0",
@@ -510,11 +545,22 @@ send({
     "jsonrpc":"2.0",
     "id":72,
     "method":"tools/call",
-    "params":{"name":"fugit_task_done","arguments":{"task_id":sync_task_id,"agent":"agent.mcp","summary":"done via mcp"}}}
+    "params":{"name":"fugit_task_done","arguments":{"task_id":sync_task_id,"agent":"agent.mcp","summary":"done via mcp","regressions":["test -f README.txt"]}}}
 )
 resp = recv()
 if "result" not in resp:
     raise RuntimeError(f"fugit_task_done MCP call failed: {resp}")
+
+send({
+    "jsonrpc":"2.0",
+    "id":721,
+    "method":"tools/call",
+    "params":{"name":"fugit_check_run","arguments":{}}
+})
+resp = recv()
+quality_payload = resp.get("result", {}).get("structuredContent", {})
+if "result" not in resp or quality_payload.get("ok") is not True:
+    raise RuntimeError(f"fugit_check_run MCP call failed: {resp}")
 
 send({
     "jsonrpc":"2.0",
