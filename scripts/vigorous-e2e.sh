@@ -244,6 +244,8 @@ PY
 json_assert "$TMP_ROOT/task-in-progress.json" 'any(row.get("task_id") == "'"$TASK_A"'" for row in payload)' "task list should accept in_progress as a claimed-task alias"
 "$BIN" --repo-root "$REPO_A" task request --agent agent.runner --json >"$TMP_ROOT/task-request-owned.json"
 json_assert "$TMP_ROOT/task-request-owned.json" 'payload.get("dispatch_kind") == "owned_claim" and payload.get("claimed") is False and payload.get("task", {}).get("task_id") == "'"$TASK_A"'" and payload.get("task", {}).get("claim_ttl_remaining_seconds") is not None' "task request should resume the owned claim without creating a new lease"
+"$BIN" --repo-root "$REPO_A" task request --agent agent.runner --peek-open 2 --json >"$TMP_ROOT/task-request-peek-open.json"
+json_assert "$TMP_ROOT/task-request-peek-open.json" 'payload.get("dispatch_kind") == "owned_claim" and len(payload.get("peek_open", [])) == 2 and {row.get("task_id") for row in payload.get("peek_open", [])} == {"'"$TASK_C"'","'"$TASK_D"'"}' "task request --peek-open should surface ready open candidates alongside the owned claim"
 OWNED_REQUEST_EXPIRY="$(python3 - "$TMP_ROOT/task-request-owned.json" <<'PY'
 import json, sys
 payload = json.load(open(sys.argv[1]))
@@ -274,8 +276,8 @@ json_assert "$TMP_ROOT/task-update-clear-blocked.json" 'payload.get("blocked_rea
 json_assert "$TMP_ROOT/task-request-unblocked.json" 'payload.get("assigned") is True and payload.get("task",{}).get("task_id") == "'"$EXTRA_TASK"'"' "cleared blocked tasks should be dispatchable again"
 "$BIN" --repo-root "$REPO_A" task progress --task-id "$TASK_A" --agent agent.runner --note "implemented root workflow" --json >"$TMP_ROOT/task-progress.json"
 json_assert "$TMP_ROOT/task-progress.json" 'payload.get("progress_count") >= 2 and payload.get("last_progress_note") == "implemented root workflow"' "task progress should append an execution breadcrumb"
-"$BIN" --repo-root "$REPO_A" task note --task-id "$TASK_A" --agent agent.runner --artifact artifacts/report.json --artifact artifacts/trace.log --json >"$TMP_ROOT/task-note.json"
-json_assert "$TMP_ROOT/task-note.json" 'payload.get("artifact_count") == 3 and payload.get("last_artifact") == "artifacts/trace.log"' "task note should append artifact breadcrumbs for handoff and resume"
+"$BIN" --repo-root "$REPO_A" task note --task-id "$TASK_A" --agent agent.runner --message "captured handoff notes" --artifact artifacts/report.json --artifact artifacts/trace.log --json >"$TMP_ROOT/task-note.json"
+json_assert "$TMP_ROOT/task-note.json" 'payload.get("artifact_count") == 3 and payload.get("last_artifact") == "artifacts/trace.log" and payload.get("last_progress_note") == "captured handoff notes"' "task note should append lightweight messages and artifact breadcrumbs for handoff and resume"
 if "$BIN" --repo-root "$REPO_A" task list --all --limit 1 >/dev/null; then
   :
 else
@@ -451,7 +453,9 @@ json_assert "$TMP_ROOT/advisor-runs.json" 'len(payload) >= 3' "advisor runs shou
 echo "[vigorous-e2e] task sync + reopen"
 cat >"$REPO_A/the_final_plan.md" <<'EOF'
 - [ ] `A-01` Define compiler contract
+  - Lock the canonical schema fields
 - [ ] `A-02` Add checkpoint json payloads
+  - Emit missing old-object blobs in JSON
 EOF
 "$BIN" --repo-root "$REPO_A" task sync --plan "$REPO_A/the_final_plan.md" --json >"$TMP_ROOT/task-sync-1.json"
 json_assert "$TMP_ROOT/task-sync-1.json" 'payload.get("schema_version") == "fugit.task.sync.v1" and len(payload.get("created", [])) == 2' "task sync should create plan-backed tasks"
@@ -461,6 +465,8 @@ payload=json.load(open(sys.argv[1]))
 print(payload["created"][1]["task_id"])
 PY
 )"
+"$BIN" --repo-root "$REPO_A" task request --agent agent.sync --task-id "$SYNC_TASK_ID" --no-claim --include-context --json >"$TMP_ROOT/task-request-context.json"
+json_assert "$TMP_ROOT/task-request-context.json" 'payload.get("task", {}).get("context", {}).get("source", {}).get("reference") == "the_final_plan.md#A-02" and payload.get("task", {}).get("context", {}).get("acceptance_criteria", [None])[0] == "Emit missing old-object blobs in JSON"' "task request --include-context should surface plan-derived task context"
 "$BIN" --repo-root "$REPO_A" task done --task-id "$SYNC_TASK_ID" --agent agent.sync --regression "test -f README.txt" >/dev/null
 "$BIN" --repo-root "$REPO_A" task reopen --task-id "$SYNC_TASK_ID" --agent agent.sync --json >"$TMP_ROOT/task-reopen.json"
 json_assert "$TMP_ROOT/task-reopen.json" 'payload.get("status") == "open" and payload.get("completed_at_utc") is None' "task reopen should clear completion metadata"

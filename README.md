@@ -131,10 +131,10 @@ After migration, use fugit for daily coordination (`task`, `checkpoint`, `log`),
 fugit --repo-root . task import --file /path/to/tasks.tsv
 fugit --repo-root . task sync --plan /path/to/the_final_plan.md
 fugit --repo-root . task start --agent agent.worker
-fugit task start --repo-root . --agent agent.worker --focus compiler
+fugit task start --repo-root . --agent agent.worker --focus compiler --peek-open 3 --json
 fugit --repo-root . task start --agent agent.worker --task-id <task_id>
 fugit --repo-root . task progress --task-id <task_id> --agent agent.worker --note "landed parser wiring"
-fugit --repo-root . task note --task-id <task_id> --agent agent.worker --artifact artifacts/report.json
+fugit --repo-root . task note --task-id <task_id> --agent agent.worker --message "captured benchmark delta" --artifact artifacts/report.json
 fugit --repo-root . checkpoint --summary "implemented feature X" --agent agent.worker --tag feature
 fugit --repo-root . task done --task-id <task_id> --agent agent.worker --summary "validated feature X" --command "cargo test" --regression "cargo test" --claim-next
 fugit --repo-root . log --limit 20
@@ -149,6 +149,8 @@ fugit --repo-root . task add --title "Implement feature X" --priority 10 --tag f
 `task start` is the normal agent entrypoint: it resumes the agent's current claim if one exists, otherwise it claims the next best task. Use `task request` when you want preview mode (`--no-claim`, `--max`), explicit scheduling diagnostics, or to bypass your current claim with `--skip-owned`.
 
 When an agent already owns a claim, `task request` now returns that owned claim without silently shrinking its lease. If the agent explicitly wants an additional claim, use `--max-new-claims 1` (or higher) and branch on `selection_reason` / `claim_ttl_remaining_seconds` from the JSON payload.
+
+For tighter agent loops, `task request --peek-open N` and `task start --peek-open N` return the next ready open candidates alongside the selected task. JSON `task request`, `task start`, `task current`, and `task show` payloads can also include deterministic plan-derived `context` with source refs, acceptance criteria, and a next recommended substep.
 
 Task lifecycle operations (`add`, `edit`, `claim`, `done`, `reopen`, `release`, `remove`) are mirrored into timeline events.
 
@@ -291,8 +293,10 @@ Task maintenance from CLI:
 ```bash
 fugit project discover --json
 fugit --repo-root . task show <task_id>
+fugit --repo-root . task show <task_id> --include-context --json
 fugit task start --repo-root . --agent <agent_id> --json
-fugit --repo-root . task current --agent <agent_id> --json
+fugit --repo-root . task start --repo-root . --agent <agent_id> --peek-open 3 --include-context --json
+fugit --repo-root . task current --agent <agent_id> --include-context --json
 fugit --repo-root . task status --agent <agent_id> --json
 fugit --repo-root . task list --agent <agent_id> --mine --json
 fugit --repo-root . task list --jsonl --fields task_id,title,status
@@ -302,7 +306,7 @@ fugit --repo-root . task update --task-id <task_id> --clear-blocked --agent <age
 fugit --repo-root . task claim <task_id> --agent <agent_id> --extend-only --claim-ttl-minutes 60
 fugit --repo-root . task heartbeat <task_id> --agent <agent_id> --claim-ttl-minutes 60 --note "reran flaky benchmark"
 fugit --repo-root . task progress <task_id> --note "waiting on benchmark rerun"
-fugit --repo-root . task note <task_id> --artifact artifacts/report.json --artifact artifacts/trace.log
+fugit --repo-root . task note <task_id> --message "captured handoff notes" --artifact artifacts/report.json --artifact artifacts/trace.log
 fugit --repo-root . task release <task_id> --agent <agent_id> --state blocked --reason "waiting on upstream API"
 fugit --repo-root . task cancel <task_id> --agent <agent_id> --reason "superseded by replacement plan"
 fugit --repo-root . task remove --task-id <task_id>
@@ -324,9 +328,11 @@ fugit --repo-root . task sync --plan the_final_plan.md --json
 fugit --repo-root . task request --agent agent.worker --no-claim --max 3 --json
 fugit --repo-root . task request --agent agent.worker --skip-owned --json
 fugit --repo-root . task request --agent agent.worker --max-new-claims 1 --json
+fugit --repo-root . task request --agent agent.worker --peek-open 3 --json
 fugit --repo-root . task request --agent agent.worker --title-contains "compiler" --json
 fugit --repo-root . task request --agent agent.worker --task-id <task_id> --json
-fugit --repo-root . task request --agent agent.worker --json   # includes selection_reason + claim_ttl_remaining_seconds
+fugit --repo-root . task request --agent agent.worker --include-context --json
+fugit --repo-root . task request --agent agent.worker --json   # includes selection_reason + claim_ttl_remaining_seconds, with peek_open/context when requested
 fugit --repo-root . status --json --summary-only              # fast health polling without file list
 fugit --repo-root . task done --task-id <task_id> --claim-next --json
 fugit --repo-root . task done --task-id <task_id> --state blocked --reason "needs schema decision" --claim-next --json

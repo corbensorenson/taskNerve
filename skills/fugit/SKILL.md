@@ -59,11 +59,14 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . task approve --all-pending-auto-replenish --agent <agent_id>`
 - To bypass your currently claimed work and fetch the next ready task:
 - `fugit --repo-root . task request --agent <agent_id> --skip-owned --json`
+- To inspect the next ready open candidates without extra list/filter loops:
+- `fugit --repo-root . task request --agent <agent_id> --peek-open 3 --json`
 - To explicitly allow one extra concurrent claim when you already own work:
 - `fugit --repo-root . task request --agent <agent_id> --max-new-claims 1 --json`
 - To request a specific task after scanning the queue:
 - `fugit --repo-root . task request --agent <agent_id> --task-id <task_id> --json`
 - `task request --json` also returns `selection_reason` plus `claim_ttl_remaining_seconds` so agents can branch on why a task was or was not selected and renew leases just-in-time.
+- Add `--include-context` when you want plan-derived source refs, acceptance criteria, and a next recommended substep in the JSON payload.
 - optional dry assignment: `fugit --repo-root . task request --agent <agent_id> --no-claim`
 
 6. Capture progress as checkpoints:
@@ -77,6 +80,7 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . task progress <task_id> --agent <agent_id> --note "<what changed>"`
 - To attach machine-readable artifact breadcrumbs for handoff/resume:
 - `fugit --repo-root . task note <task_id> --agent <agent_id> --artifact <path>`
+- `task note` also accepts `--message "<what changed>"` so agents can leave lightweight progress without switching commands.
 - To renew a long-running claim and log progress in one round trip:
 - `fugit --repo-root . task heartbeat <task_id> --agent <agent_id> --claim-ttl-minutes 60 --note "<what changed>"`
 - To close work and pull the next ready item in one round trip:
@@ -115,7 +119,7 @@ Use this skill when any of the following are true:
 - Resume or claim work in one step:
 - `fugit --repo-root . task start --agent <agent_id> --json`
 - Inspect your active claim directly:
-- `fugit --repo-root . task current --agent <agent_id> --json`
+- `fugit --repo-root . task current --agent <agent_id> --include-context --json`
 - Inspect your queue/ownership summary directly:
 - `fugit --repo-root . task status --agent <agent_id> --json`
 - For compact queue scans:

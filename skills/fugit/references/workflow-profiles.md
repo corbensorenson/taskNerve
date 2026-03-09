@@ -25,6 +25,7 @@ Use when multiple agents should coordinate by pulling from a shared queue.
 - `fugit --repo-root . task request --agent <agent_id> --title-contains "compiler" --json`
 - `fugit --repo-root . task request --agent <agent_id> --task-id <task_id> --json`
 - `fugit --repo-root . task request --agent <agent_id> --max-new-claims 1 --json`
+- `fugit --repo-root . task request --agent <agent_id> --peek-open 3 --include-context --json`
 - `fugit --repo-root . task edit --task-id <task_id> --title "Updated X"`
 - `fugit --repo-root . task show <task_id>`
 - `fugit --repo-root . task list --jsonl --fields task_id,title,status`
@@ -32,13 +33,13 @@ Use when multiple agents should coordinate by pulling from a shared queue.
 - `fugit --repo-root . task status --agent <agent_id> --json`
 - `fugit --repo-root . status --json --summary-only`
 - `fugit --repo-root . task request --agent <agent_id> --no-claim --max 3 --json`
-- `task request --json` returns `selection_reason` and `claim_ttl_remaining_seconds` for agent-side branching.
+- `task request --json` returns `selection_reason`, `claim_ttl_remaining_seconds`, optional `peek_open`, and plan-derived `context` for agent-side branching.
 - `fugit --repo-root . task policy show --json`
 - `fugit --repo-root . task approve --all-pending-auto-replenish --agent <agent_id>`
 - `fugit --repo-root . bridge auto-sync show --json`
 - `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --summary "done summary" --regression "<test command>"`
 - `fugit --repo-root . task progress <task_id> --agent <agent_id> --note "implemented parser wiring"`
-- `fugit --repo-root . task note <task_id> --agent <agent_id> --artifact artifacts/report.json`
+- `fugit --repo-root . task note <task_id> --agent <agent_id> --message "captured handoff notes" --artifact artifacts/report.json`
 - `fugit --repo-root . task heartbeat <task_id> --agent <agent_id> --claim-ttl-minutes 60 --note "reran flaky benchmark"`
 - `fugit --repo-root . task claim <task_id> --agent <agent_id> --extend-only --claim-ttl-minutes 60`
 - `fugit --repo-root . task done --task-id <task_id> --agent <agent_id> --claim-next --regression "<test command>"`

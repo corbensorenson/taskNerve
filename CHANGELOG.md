@@ -22,6 +22,7 @@
 - Added `task status`, `task progress`, `task list --mine`, date-gated task filtering with `task request --ignore-date-gates`, and `task done --claim-next` for tighter agent execution loops.
 - Added `task claim --extend-only`, `task note --artifact ...`, and machine-readable `selection_reason` on `task request --json` for cleaner long-running agent loops and handoff breadcrumbs.
 - Added agent-speed task controls: `task request --max-new-claims`, stable owned-claim lease handling, `claim_ttl_remaining_seconds` in task JSON, `task heartbeat`, `task cancel`, blocker-aware `task done|release --state blocked --reason ...`, `task update --clear-blocked`, `task list --all`, and `checkpoint --preflight`.
+- Added agent-friendly task context and queue peeking: `task request|start --peek-open`, plan-derived `--include-context` payloads on request/start/current/show JSON, and `task note --message ...` alongside artifact breadcrumbs.
 - Added `status --summary-only` / `--no-changes`, and included consistent claim lease metadata on task claim/request/show/list JSON payloads.
 - Added default-on task auto-replenish fallback: when no real work is dispatchable, `task request` seeds per-agent scout tasks, with `task policy show|set`, `task approve`, GUI approval controls, and MCP tools for operating the flow.
 - Added default-on background bridge auto-sync after `task done`, with task-note commit subjects, `bridge auto-sync show|set`, and manual detached `bridge sync-github --background`.

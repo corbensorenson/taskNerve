@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
@@ -1254,12 +1256,28 @@ struct TaskRequestExecutionOptions {
     filters: TaskQueryFilter,
     max: usize,
     max_new_claims: usize,
+    peek_open: usize,
     claim_ttl_minutes: i64,
     steal_after_minutes: i64,
     allow_steal: bool,
     skip_owned: bool,
     respect_date_gates: bool,
     no_claim: bool,
+    include_context: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TaskPlanNeighbor {
+    source_key: Option<String>,
+    title: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TaskPlanContext {
+    source_line: Option<String>,
+    context_lines: Vec<String>,
+    previous_task: Option<TaskPlanNeighbor>,
+    next_task: Option<TaskPlanNeighbor>,
 }
 
 #[derive(Debug, Clone)]
@@ -1489,6 +1507,8 @@ enum TaskAction {
         #[arg(value_name = "TASK_ID")]
         task_id_arg: Option<String>,
         #[arg(long, default_value_t = false)]
+        include_context: bool,
+        #[arg(long, default_value_t = false)]
         json: bool,
     },
     #[command(visible_aliases = ["work", "continue"])]
@@ -1517,6 +1537,10 @@ enum TaskAction {
         no_steal: bool,
         #[arg(long, default_value_t = false)]
         ignore_date_gates: bool,
+        #[arg(long, default_value_t = 0)]
+        peek_open: usize,
+        #[arg(long, default_value_t = false)]
+        include_context: bool,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -1524,6 +1548,8 @@ enum TaskAction {
     Current {
         #[arg(long)]
         agent: Option<String>,
+        #[arg(long, default_value_t = false)]
+        include_context: bool,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -1660,6 +1686,10 @@ enum TaskAction {
         ignore_date_gates: bool,
         #[arg(long, default_value_t = false)]
         no_claim: bool,
+        #[arg(long, default_value_t = 0)]
+        peek_open: usize,
+        #[arg(long, default_value_t = false)]
+        include_context: bool,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -1728,6 +1758,8 @@ enum TaskAction {
         task_id: Option<String>,
         #[arg(value_name = "TASK_ID")]
         task_id_arg: Option<String>,
+        #[arg(long = "message")]
+        messages: Vec<String>,
         #[arg(long = "artifact")]
         artifacts: Vec<String>,
         #[arg(long)]
@@ -4823,6 +4855,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
         TaskAction::Show {
             task_id,
             task_id_arg,
+            include_context,
             json,
         } => {
             if state_changed {
@@ -4836,7 +4869,13 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 .iter()
                 .find(|task| task.task_id == task_id)
                 .ok_or_else(|| anyhow!("task not found: {}", task_id))?;
-            let payload = task_to_json_payload(task, &status_map);
+            let payload = task_to_response_payload(
+                repo_root,
+                &state,
+                task,
+                &status_map,
+                json || include_context,
+            );
             let _ = json;
             println!("{}", serde_json::to_string_pretty(&payload)?);
         }
@@ -4853,6 +4892,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             steal_after_minutes,
             no_steal,
             ignore_date_gates,
+            peek_open,
+            include_context,
             json,
         } => {
             let agent_id = agent.unwrap_or_else(default_agent_id);
@@ -4870,12 +4911,15 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 (None, Some(task_id)) => Some(task_id),
                 (None, None) => None,
             };
+            let filters =
+                normalize_task_query_filter(tags, focus, prefix, contains, title_contains)?;
             if requested_task_id.is_none() {
                 if state_changed {
                     state.updated_at_utc = now_utc();
                     write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
                 }
-                let current = task_current_payload(&state, &agent_id);
+                let current =
+                    task_current_payload(repo_root, &state, &agent_id, json || include_context);
                 if current["found"].as_bool().unwrap_or(false) {
                     let payload = json!({
                         "schema_version": "fugit.task.start.v1",
@@ -4887,6 +4931,19 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                         "claimed": false,
                         "dispatch_kind": "owned_claim",
                         "selection_reason": "resume_current",
+                        "peek_open_requested": peek_open,
+                        "peek_open": build_peek_open_payload(
+                            repo_root,
+                            &state,
+                            &agent_id,
+                            &filters,
+                            peek_open,
+                            !ignore_date_gates,
+                            steal_after_minutes,
+                            Utc::now(),
+                            json || include_context,
+                            current["task"]["task_id"].as_str()
+                        ),
                         "task": current["task"].clone(),
                         "tasks": current["tasks"].clone()
                     });
@@ -4902,8 +4959,6 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     return Ok(());
                 }
             }
-            let filters =
-                normalize_task_query_filter(tags, focus, prefix, contains, title_contains)?;
             let mut payload = execute_task_request(
                 repo_root,
                 &mut state,
@@ -4914,12 +4969,14 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     filters,
                     max: 1,
                     max_new_claims: 0,
+                    peek_open,
                     claim_ttl_minutes,
                     steal_after_minutes,
                     allow_steal: !no_steal,
                     skip_owned: false,
                     respect_date_gates: !ignore_date_gates,
                     no_claim: false,
+                    include_context: json || include_context,
                 },
             )?;
             if let Some(object) = payload.as_object_mut() {
@@ -4928,13 +4985,18 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             }
             print_task_request_payload(&payload, json)?;
         }
-        TaskAction::Current { agent, json } => {
+        TaskAction::Current {
+            agent,
+            include_context,
+            json,
+        } => {
             if state_changed {
                 state.updated_at_utc = now_utc();
                 write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
             }
             let agent_id = agent.unwrap_or_else(default_agent_id);
-            let payload = task_current_payload(&state, &agent_id);
+            let payload =
+                task_current_payload(repo_root, &state, &agent_id, json || include_context);
             if json {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else if let Some(task) = payload.get("task").and_then(|row| row.as_object()) {
@@ -5469,6 +5531,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             skip_owned,
             ignore_date_gates,
             no_claim,
+            peek_open,
+            include_context,
             json,
         } => {
             let agent_id = agent.unwrap_or_else(default_agent_id);
@@ -5485,12 +5549,14 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     filters,
                     max,
                     max_new_claims,
+                    peek_open,
                     claim_ttl_minutes,
                     steal_after_minutes,
                     allow_steal: !no_steal,
                     skip_owned,
                     respect_date_gates: !ignore_date_gates,
                     no_claim,
+                    include_context: json || include_context,
                 },
             )?;
             print_task_request_payload(&payload, json)?;
@@ -5926,6 +5992,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
         TaskAction::Note {
             task_id,
             task_id_arg,
+            messages,
             artifacts,
             agent,
             json,
@@ -5946,13 +6013,23 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 && owner != agent_id
             {
                 bail!(
-                    "task {} is claimed by {}; cannot attach artifacts as {}",
+                    "task {} is claimed by {}; cannot append note entries as {}",
                     state.tasks[task_index].task_id,
                     owner,
                     agent_id
                 );
             }
-            let task = add_task_artifact_entries(&mut state, &task_id, &agent_id, artifacts)?;
+            let normalized_messages = normalize_string_list(messages);
+            if normalized_messages.is_empty() && artifacts.is_empty() {
+                bail!("task note requires at least one --message or --artifact");
+            }
+            for message in normalized_messages {
+                let _ = add_task_progress_entry(&mut state, &task_id, &agent_id, message)?;
+            }
+            if !artifacts.is_empty() {
+                let _ = add_task_artifact_entries(&mut state, &task_id, &agent_id, artifacts)?;
+            }
+            let task = state.tasks[task_index].clone();
             write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
             append_task_timeline_event(repo_root, &task, &agent_id, "note", None)?;
             let payload = task_to_json_payload(&task, &task_status_map(&state));
@@ -5960,9 +6037,11 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!(
-                    "[fugit-task] note task_id={} artifact_count={} last_artifact={}",
+                    "[fugit-task] note task_id={} progress_count={} artifact_count={} last_note={} last_artifact={}",
                     payload["task_id"].as_str().unwrap_or("unknown"),
+                    payload["progress_count"].as_u64().unwrap_or(0),
                     payload["artifact_count"].as_u64().unwrap_or(0),
+                    payload["last_progress_note"].as_str().unwrap_or(""),
                     payload["last_artifact"].as_str().unwrap_or("")
                 );
             }
@@ -9529,7 +9608,8 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                 "type": "object",
                 "required": ["task_id"],
                 "properties": {
-                    "task_id": { "type": "string" }
+                    "task_id": { "type": "string" },
+                    "include_context": { "type": "boolean" }
                 }
             }
         }),
@@ -9539,7 +9619,8 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "agent": { "type": "string" }
+                    "agent": { "type": "string" },
+                    "include_context": { "type": "boolean" }
                 }
             }
         }),
@@ -9704,7 +9785,9 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "no_steal": { "type": "boolean" },
                     "skip_owned": { "type": "boolean" },
                     "ignore_date_gates": { "type": "boolean" },
-                    "no_claim": { "type": "boolean" }
+                    "no_claim": { "type": "boolean" },
+                    "peek_open": { "type": "integer", "minimum": 0 },
+                    "include_context": { "type": "boolean" }
                 }
             }
         }),
@@ -9724,7 +9807,9 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "claim_ttl_minutes": { "type": "integer" },
                     "steal_after_minutes": { "type": "integer" },
                     "no_steal": { "type": "boolean" },
-                    "ignore_date_gates": { "type": "boolean" }
+                    "ignore_date_gates": { "type": "boolean" },
+                    "peek_open": { "type": "integer", "minimum": 0 },
+                    "include_context": { "type": "boolean" }
                 }
             }
         }),
@@ -9781,12 +9866,13 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
         }),
         json!({
             "name": "fugit_task_note",
-            "description": "Attach one or more artifact breadcrumbs to a task for handoff and resume.",
+            "description": "Attach lightweight progress messages and/or artifact breadcrumbs to a task for handoff and resume.",
             "inputSchema": {
                 "type": "object",
-                "required": ["task_id", "artifacts"],
+                "required": ["task_id"],
                 "properties": {
                     "task_id": { "type": "string" },
+                    "messages": { "type": "array", "items": { "type": "string" } },
                     "artifacts": { "type": "array", "items": { "type": "string" } },
                     "agent": { "type": "string" }
                 }
@@ -10359,16 +10445,21 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 .get("task_id")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| anyhow!("fugit_task_show requires task_id"))?;
-            run_self_cli_json(
-                repo_root,
-                &[
-                    "task".to_string(),
-                    "show".to_string(),
-                    "--task-id".to_string(),
-                    task_id.to_string(),
-                    "--json".to_string(),
-                ],
-            )?
+            let mut cli_args = vec![
+                "task".to_string(),
+                "show".to_string(),
+                "--task-id".to_string(),
+                task_id.to_string(),
+                "--json".to_string(),
+            ];
+            if args
+                .get("include_context")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--include-context".to_string());
+            }
+            run_self_cli_json(repo_root, &cli_args)?
         }
         "fugit_task_current" => {
             let mut cli_args = vec![
@@ -10379,6 +10470,13 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
                 cli_args.push("--agent".to_string());
                 cli_args.push(agent.to_string());
+            }
+            if args
+                .get("include_context")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--include-context".to_string());
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
@@ -10849,6 +10947,17 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             {
                 cli_args.push("--ignore-date-gates".to_string());
             }
+            if let Some(peek_open) = args.get("peek_open").and_then(serde_json::Value::as_u64) {
+                cli_args.push("--peek-open".to_string());
+                cli_args.push(peek_open.to_string());
+            }
+            if args
+                .get("include_context")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--include-context".to_string());
+            }
             run_self_cli_json(repo_root, &cli_args)?
         }
         "fugit_task_request" => {
@@ -10944,6 +11053,17 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 .unwrap_or(false)
             {
                 cli_args.push("--no-claim".to_string());
+            }
+            if let Some(peek_open) = args.get("peek_open").and_then(serde_json::Value::as_u64) {
+                cli_args.push("--peek-open".to_string());
+                cli_args.push(peek_open.to_string());
+            }
+            if args
+                .get("include_context")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--include-context".to_string());
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
@@ -11109,10 +11229,6 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 .get("task_id")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| anyhow!("fugit_task_note requires task_id"))?;
-            let artifacts = args
-                .get("artifacts")
-                .and_then(serde_json::Value::as_array)
-                .ok_or_else(|| anyhow!("fugit_task_note requires artifacts"))?;
             let mut cli_args = vec![
                 "task".to_string(),
                 "note".to_string(),
@@ -11120,11 +11236,27 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 task_id.to_string(),
                 "--json".to_string(),
             ];
-            for artifact in artifacts {
-                if let Some(artifact_value) = artifact.as_str() {
-                    cli_args.push("--artifact".to_string());
-                    cli_args.push(artifact_value.to_string());
+            let mut has_entry = false;
+            if let Some(messages) = args.get("messages").and_then(serde_json::Value::as_array) {
+                for message in messages {
+                    if let Some(message_value) = message.as_str() {
+                        cli_args.push("--message".to_string());
+                        cli_args.push(message_value.to_string());
+                        has_entry = true;
+                    }
                 }
+            }
+            if let Some(artifacts) = args.get("artifacts").and_then(serde_json::Value::as_array) {
+                for artifact in artifacts {
+                    if let Some(artifact_value) = artifact.as_str() {
+                        cli_args.push("--artifact".to_string());
+                        cli_args.push(artifact_value.to_string());
+                        has_entry = true;
+                    }
+                }
+            }
+            if !has_entry {
+                bail!("fugit_task_note requires messages and/or artifacts");
             }
             if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
                 cli_args.push("--agent".to_string());
@@ -16719,6 +16851,206 @@ fn task_to_json_payload(
     })
 }
 
+fn task_to_response_payload(
+    repo_root: &Path,
+    state: &TaskState,
+    task: &FugitTask,
+    status_map: &BTreeMap<String, TaskStatus>,
+    include_context: bool,
+) -> serde_json::Value {
+    let mut payload = task_to_json_payload(task, status_map);
+    if include_context && let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "context".to_string(),
+            build_task_context_payload(repo_root, state, task),
+        );
+    }
+    payload
+}
+
+fn build_task_context_payload(
+    repo_root: &Path,
+    state: &TaskState,
+    task: &FugitTask,
+) -> serde_json::Value {
+    let unresolved_dependencies = task
+        .depends_on
+        .iter()
+        .filter_map(|dependency_id| {
+            state
+                .tasks
+                .iter()
+                .find(|candidate| {
+                    candidate.task_id == *dependency_id && candidate.status != TaskStatus::Done
+                })
+                .map(|dependency| {
+                    json!({
+                        "task_id": dependency.task_id,
+                        "title": dependency.title,
+                        "status": task_status_label(&dependency.status)
+                    })
+                })
+        })
+        .collect::<Vec<_>>();
+    let plan_context = load_task_plan_context(repo_root, task);
+    let acceptance_criteria = derive_task_acceptance_criteria(task, plan_context.as_ref());
+    let next_recommended_substep = if let Some(dependency) = unresolved_dependencies.first() {
+        Some(format!(
+            "Unblock dependency {} ({})",
+            dependency["task_id"].as_str().unwrap_or("unknown"),
+            dependency["title"].as_str().unwrap_or("unknown")
+        ))
+    } else {
+        acceptance_criteria
+            .first()
+            .cloned()
+            .or_else(|| Some(format!("Implement {}", task.title)))
+    };
+    let source_reference = match (task.source_plan.as_deref(), task.source_key.as_deref()) {
+        (Some(plan), Some(key)) => Some(format!("{plan}#{key}")),
+        (Some(plan), None) => Some(plan.to_string()),
+        (None, Some(key)) => Some(key.to_string()),
+        (None, None) => None,
+    };
+    json!({
+        "source": {
+            "plan": task.source_plan,
+            "key": task.source_key,
+            "reference": source_reference
+        },
+        "acceptance_criteria": acceptance_criteria,
+        "next_recommended_substep": next_recommended_substep,
+        "dependency_blockers": unresolved_dependencies,
+        "source_excerpt": plan_context.as_ref().and_then(|ctx| ctx.source_line.clone()),
+        "plan_notes": plan_context
+            .as_ref()
+            .map(|ctx| ctx.context_lines.clone())
+            .unwrap_or_default(),
+        "neighbor_tasks": {
+            "previous": plan_context
+                .as_ref()
+                .and_then(|ctx| serde_json::to_value(ctx.previous_task.clone()).ok())
+                .unwrap_or(serde_json::Value::Null),
+            "next": plan_context
+                .as_ref()
+                .and_then(|ctx| serde_json::to_value(ctx.next_task.clone()).ok())
+                .unwrap_or(serde_json::Value::Null)
+        }
+    })
+}
+
+fn load_task_plan_context(repo_root: &Path, task: &FugitTask) -> Option<TaskPlanContext> {
+    let plan = task.source_plan.as_deref()?;
+    let plan_path = if Path::new(plan).is_absolute() {
+        PathBuf::from(plan)
+    } else {
+        repo_root.join(plan)
+    };
+    let content = fs::read_to_string(plan_path).ok()?;
+    let lines = content.lines().collect::<Vec<_>>();
+    let mut plan_tasks = Vec::<(usize, usize, TaskPlanNeighbor)>::new();
+    for (line_idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        let Ok(Some(row)) = parse_task_import_markdown_line(trimmed, line_idx + 1) else {
+            continue;
+        };
+        plan_tasks.push((
+            line_idx,
+            line.chars().take_while(|ch| ch.is_whitespace()).count(),
+            TaskPlanNeighbor {
+                source_key: row.source_key,
+                title: row.title,
+            },
+        ));
+    }
+    let target_pos = plan_tasks.iter().position(|(_, _, neighbor)| {
+        if let Some(source_key) = task.source_key.as_deref() {
+            neighbor.source_key.as_deref() == Some(source_key)
+        } else {
+            neighbor.title == task.title
+        }
+    })?;
+    let (target_line_idx, target_indent, _) = &plan_tasks[target_pos];
+    let mut context_lines = Vec::<String>::new();
+    for line in lines.iter().skip(*target_line_idx + 1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if looks_like_markdown_task_line(trimmed) || looks_like_markdown_checked_task_line(trimmed)
+        {
+            break;
+        }
+        let indent = line.chars().take_while(|ch| ch.is_whitespace()).count();
+        if trimmed.starts_with('#') && indent <= *target_indent {
+            break;
+        }
+        let cleaned = trim_task_context_line(trimmed);
+        if !cleaned.is_empty() {
+            context_lines.push(cleaned);
+        }
+        if context_lines.len() >= 6 {
+            break;
+        }
+    }
+    Some(TaskPlanContext {
+        source_line: Some(lines[*target_line_idx].trim().to_string()),
+        context_lines: dedupe_keep_order(context_lines),
+        previous_task: target_pos
+            .checked_sub(1)
+            .map(|idx| plan_tasks[idx].2.clone()),
+        next_task: plan_tasks
+            .get(target_pos + 1)
+            .map(|(_, _, neighbor)| neighbor.clone()),
+    })
+}
+
+fn trim_task_context_line(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let trimmed = trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+        .or_else(|| trimmed.strip_prefix("+ "))
+        .unwrap_or(trimmed);
+    let trimmed = if let Some((prefix, rest)) = trimmed.split_once(". ") {
+        if !prefix.is_empty() && prefix.chars().all(|ch| ch.is_ascii_digit()) {
+            rest
+        } else {
+            trimmed
+        }
+    } else {
+        trimmed
+    };
+    trimmed.trim().trim_matches('`').to_string()
+}
+
+fn split_task_context_lines(raw: &str) -> Vec<String> {
+    raw.lines()
+        .map(trim_task_context_line)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+}
+
+fn derive_task_acceptance_criteria(
+    task: &FugitTask,
+    plan_context: Option<&TaskPlanContext>,
+) -> Vec<String> {
+    let mut criteria = task
+        .detail
+        .as_deref()
+        .map(split_task_context_lines)
+        .unwrap_or_default();
+    if criteria.is_empty()
+        && let Some(plan_context) = plan_context
+    {
+        criteria.extend(plan_context.context_lines.clone());
+    }
+    if criteria.is_empty() {
+        criteria.push(format!("Deliver {}", task.title));
+    }
+    dedupe_keep_order(criteria).into_iter().take(6).collect()
+}
+
 fn task_request_selection_reason(
     task: &FugitTask,
     dispatch_kind: TaskDispatchKind,
@@ -16853,7 +17185,7 @@ fn task_status_summary_payload(
             task.status == TaskStatus::Claimed
                 && task.claimed_by_agent_id.as_deref() == Some(agent_id)
         })
-        .map(|task| task_to_json_payload(task, &status_map))
+        .map(|task| task_to_response_payload(repo_root, state, task, &status_map, false))
         .collect::<Vec<_>>();
     let ready_open_count = state
         .tasks
@@ -16906,7 +17238,7 @@ fn task_status_summary_payload(
     .map(|(idx, dispatch)| {
         json!({
             "dispatch_kind": dispatch.as_str(),
-            "task": task_to_json_payload(&state.tasks[*idx], &status_map)
+            "task": task_to_response_payload(repo_root, state, &state.tasks[*idx], &status_map, false)
         })
     })
     .unwrap_or(serde_json::Value::Null);
@@ -16940,12 +17272,25 @@ fn task_status_summary_payload(
     })
 }
 
-fn task_current_payload(state: &TaskState, agent_id: &str) -> serde_json::Value {
+fn task_current_payload(
+    repo_root: &Path,
+    state: &TaskState,
+    agent_id: &str,
+    include_context: bool,
+) -> serde_json::Value {
     let status_map = task_status_map(state);
     let indices = agent_owned_claim_indices(state, agent_id);
     let rows = indices
         .iter()
-        .map(|idx| task_to_json_payload(&state.tasks[*idx], &status_map))
+        .map(|idx| {
+            task_to_response_payload(
+                repo_root,
+                state,
+                &state.tasks[*idx],
+                &status_map,
+                include_context,
+            )
+        })
         .collect::<Vec<_>>();
     json!({
         "schema_version": "fugit.task.current.v1",
@@ -16956,6 +17301,56 @@ fn task_current_payload(state: &TaskState, agent_id: &str) -> serde_json::Value 
         "task": rows.first().cloned().unwrap_or(serde_json::Value::Null),
         "tasks": rows
     })
+}
+
+fn build_peek_open_payload(
+    repo_root: &Path,
+    state: &TaskState,
+    agent_id: &str,
+    filters: &TaskQueryFilter,
+    peek_open: usize,
+    respect_date_gates: bool,
+    now: DateTime<Utc>,
+    include_context: bool,
+    exclude_task_id: Option<&str>,
+) -> Vec<serde_json::Value> {
+    if peek_open == 0 {
+        return Vec::new();
+    }
+    let status_map = task_status_map(state);
+    let today = now.date_naive();
+    let mut candidates = state
+        .tasks
+        .iter()
+        .enumerate()
+        .filter(|(_, task)| {
+            task.status == TaskStatus::Open
+                && exclude_task_id != Some(task.task_id.as_str())
+                && (!task_is_auto_replenish(task)
+                    || task_is_auto_replenish_for_agent(task, agent_id))
+                && task_matches_query_filter(task, filters)
+                && if respect_date_gates {
+                    task_is_ready_for_dispatch_at(task, &status_map, today)
+                } else {
+                    task_is_dispatchable_without_date_gate(task, &status_map)
+                }
+        })
+        .map(|(idx, _)| idx)
+        .collect::<Vec<_>>();
+    sort_task_indices(state, &mut candidates);
+    candidates
+        .into_iter()
+        .take(peek_open)
+        .map(|idx| {
+            task_to_response_payload(
+                repo_root,
+                state,
+                &state.tasks[idx],
+                &status_map,
+                include_context,
+            )
+        })
+        .collect()
 }
 
 fn execute_task_request(
@@ -17131,6 +17526,7 @@ fn execute_task_request(
                 }
             }
         }
+        let status_map = task_status_map(state);
         return Ok(json!({
             "schema_version": "fugit.task.request.v1",
             "generated_at_utc": now_utc(),
@@ -17143,6 +17539,18 @@ fn execute_task_request(
             "requested_task_id": options.requested_task_id.clone(),
             "owned_claim_count": owned_claim_indices.len(),
             "skip_owned": options.skip_owned,
+            "peek_open_requested": options.peek_open,
+            "peek_open": build_peek_open_payload(
+                repo_root,
+                state,
+                &options.agent_id,
+                &options.filters,
+                options.peek_open,
+                options.respect_date_gates,
+                now,
+                options.include_context,
+                options.requested_task_id.as_deref()
+            ),
             "selection_reason": selection_reason,
             "request_reason": request_reason_value,
             "filters": {
@@ -17165,7 +17573,13 @@ fn execute_task_request(
             "advisor": advisor,
             "tasks": [],
             "task": requested_task_index.map(|task_index| {
-                task_to_json_payload(&state.tasks[task_index], &task_status_map(state))
+                task_to_response_payload(
+                    repo_root,
+                    state,
+                    &state.tasks[task_index],
+                    &status_map,
+                    options.include_context,
+                )
             })
         }));
     };
@@ -17201,12 +17615,29 @@ fn execute_task_request(
     }
     let task = state.tasks[task_index].clone();
     let status_map = task_status_map(state);
+    let peek_open = build_peek_open_payload(
+        repo_root,
+        state,
+        &options.agent_id,
+        &options.filters,
+        options.peek_open,
+        options.respect_date_gates,
+        now,
+        options.include_context,
+        Some(task.task_id.as_str()),
+    );
     let task_rows = candidates
         .iter()
         .map(|(idx, dispatch)| {
             json!({
                 "dispatch_kind": dispatch.as_str(),
-                "task": task_to_json_payload(&state.tasks[*idx], &status_map)
+                "task": task_to_response_payload(
+                    repo_root,
+                    state,
+                    &state.tasks[*idx],
+                    &status_map,
+                    options.include_context,
+                )
             })
         })
         .collect::<Vec<_>>();
@@ -17222,6 +17653,8 @@ fn execute_task_request(
         "requested_task_id": options.requested_task_id.clone(),
         "owned_claim_count": owned_claim_indices.len(),
         "skip_owned": options.skip_owned,
+        "peek_open_requested": options.peek_open,
+        "peek_open": peek_open,
         "dispatch_kind": dispatch_kind.as_str(),
         "selection_reason": task_request_selection_reason(
             &task,
@@ -17247,7 +17680,13 @@ fn execute_task_request(
         },
         "advisor": advisor,
         "tasks": task_rows,
-        "task": task_to_json_payload(&task, &status_map)
+        "task": task_to_response_payload(
+            repo_root,
+            state,
+            &task,
+            &status_map,
+            options.include_context,
+        )
     }))
 }
 
@@ -19594,12 +20033,55 @@ mod tests {
             updated_at_utc: now_utc(),
             tasks: vec![claimed],
         };
-        let payload = task_current_payload(&state, "agent.runner");
+        let payload = task_current_payload(Path::new("."), &state, "agent.runner", false);
         assert_eq!(payload["found"], serde_json::Value::Bool(true));
         assert_eq!(payload["count"], serde_json::Value::from(1_u64));
         assert_eq!(
             payload["task"]["task_id"],
             serde_json::Value::from("task_claimed")
+        );
+    }
+
+    #[test]
+    fn task_current_payload_can_include_plan_context() {
+        let repo = TestRepo::new("task-current-context");
+        repo.write_file(
+            "plan.md",
+            "- [ ] `A-01` Ship parser updates\n  - Verify JSON payload\n  - Add regression coverage\n- [ ] `A-02` Follow-up cleanup\n",
+        );
+        let mut claimed = sample_task(
+            "task_claimed",
+            "Ship parser updates",
+            10,
+            TaskStatus::Claimed,
+        );
+        claimed.claimed_by_agent_id = Some("agent.runner".to_string());
+        claimed.claim_started_at_utc = Some(now_utc());
+        claimed.claim_expires_at_utc = Some(now_utc());
+        claimed.source_plan = Some("plan.md".to_string());
+        claimed.source_key = Some("A-01".to_string());
+        let state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![claimed],
+        };
+
+        let payload = task_current_payload(repo.path(), &state, "agent.runner", true);
+        assert_eq!(
+            payload["task"]["context"]["source"]["reference"],
+            serde_json::Value::from("plan.md#A-01")
+        );
+        assert_eq!(
+            payload["task"]["context"]["acceptance_criteria"][0],
+            serde_json::Value::from("Verify JSON payload")
+        );
+        assert_eq!(
+            payload["task"]["context"]["next_recommended_substep"],
+            serde_json::Value::from("Verify JSON payload")
+        );
+        assert_eq!(
+            payload["task"]["context"]["neighbor_tasks"]["next"]["source_key"],
+            serde_json::Value::from("A-02")
         );
     }
 
@@ -20336,12 +20818,14 @@ mod tests {
                 filters: TaskQueryFilter::default(),
                 max: 1,
                 max_new_claims: 0,
+                peek_open: 0,
                 claim_ttl_minutes: 30,
                 steal_after_minutes: 90,
                 allow_steal: true,
                 skip_owned: false,
                 respect_date_gates: true,
                 no_claim: false,
+                include_context: false,
             },
         )
         .expect("request succeeds");
@@ -20424,12 +20908,14 @@ mod tests {
                 filters: TaskQueryFilter::default(),
                 max: 1,
                 max_new_claims: 1,
+                peek_open: 0,
                 claim_ttl_minutes: 45,
                 steal_after_minutes: 90,
                 allow_steal: true,
                 skip_owned: false,
                 respect_date_gates: true,
                 no_claim: false,
+                include_context: false,
             },
         )
         .expect("request succeeds");
@@ -20448,6 +20934,83 @@ mod tests {
         assert_eq!(
             claimed_open.claimed_by_agent_id.as_deref(),
             Some("agent.worker")
+        );
+    }
+
+    #[test]
+    fn execute_task_request_peek_open_returns_ready_open_candidates() {
+        let repo = TestRepo::new("peek-open");
+        cmd_init(
+            repo.path(),
+            InitArgs {
+                branch: "trunk".to_string(),
+                bridge_branch: None,
+                bridge_remote: "origin".to_string(),
+            },
+        )
+        .expect("init timeline");
+
+        let mut owned = sample_task("task_owned", "owned", 100, TaskStatus::Claimed);
+        owned.claimed_by_agent_id = Some("agent.worker".to_string());
+        owned.claim_started_at_utc = Some(now_utc());
+        owned.claim_expires_at_utc = Some(now_utc());
+        let state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![
+                owned,
+                sample_task("task_open_high", "high", 20, TaskStatus::Open),
+                sample_task("task_open_low", "low", 5, TaskStatus::Open),
+            ],
+        };
+        write_pretty_json(&timeline_tasks_path(repo.path()), &state).expect("write task state");
+
+        let mut state = load_task_state(repo.path()).expect("load task state");
+        let payload = execute_task_request(
+            repo.path(),
+            &mut state,
+            false,
+            &TaskRequestExecutionOptions {
+                agent_id: "agent.worker".to_string(),
+                requested_task_id: None,
+                filters: TaskQueryFilter::default(),
+                max: 1,
+                max_new_claims: 0,
+                peek_open: 2,
+                claim_ttl_minutes: 30,
+                steal_after_minutes: 90,
+                allow_steal: true,
+                skip_owned: false,
+                respect_date_gates: true,
+                no_claim: false,
+                include_context: false,
+            },
+        )
+        .expect("request succeeds");
+
+        assert_eq!(
+            payload["dispatch_kind"],
+            serde_json::Value::from("owned_claim")
+        );
+        let peek_open = payload["peek_open"]
+            .as_array()
+            .expect("peek_open array should exist");
+        assert_eq!(peek_open.len(), 2);
+        assert_eq!(
+            peek_open[0]["task_id"],
+            serde_json::Value::from("task_open_high")
+        );
+        assert_eq!(
+            peek_open[1]["task_id"],
+            serde_json::Value::from("task_open_low")
+        );
+        assert_eq!(
+            state
+                .tasks
+                .iter()
+                .filter(|task| task.status == TaskStatus::Claimed)
+                .count(),
+            1
         );
     }
 
