@@ -160,6 +160,8 @@ import json,sys
 print(json.load(open(sys.argv[1]))["task_id"])
 PY
 )"
+"$BIN" --repo-root "$REPO_A" task request --agent agent.picker --task-id "$TASK_C" --no-claim --json >"$TMP_ROOT/task-request-specific.json"
+json_assert "$TMP_ROOT/task-request-specific.json" 'payload.get("assigned") is True and payload.get("task",{}).get("task_id") == "'"$TASK_C"'" and payload.get("requested_task_id") == "'"$TASK_C"'"' "task request --task-id should target the requested task directly"
 "$BIN" --repo-root "$REPO_A" task add --title "task-d" --priority 1 --agent agent.d --json >"$TMP_ROOT/task-d.json"
 TASK_D="$(python3 - "$TMP_ROOT/task-d.json" <<'PY'
 import json,sys
@@ -517,6 +519,17 @@ resp = recv()
 shown = resp.get("result", {}).get("structuredContent", {})
 if "result" not in resp or shown.get("task_id") != mcp_task_id:
     raise RuntimeError(f"fugit_task_show MCP call failed: {resp}")
+
+send({
+    "jsonrpc":"2.0",
+    "id":75,
+    "method":"tools/call",
+    "params":{"name":"fugit_task_request","arguments":{"agent":"agent.targeted","task_id":mcp_task_id,"no_claim":True}}}
+)
+resp = recv()
+targeted = resp.get("result", {}).get("structuredContent", {})
+if "result" not in resp or targeted.get("task", {}).get("task_id") != mcp_task_id:
+    raise RuntimeError(f"fugit_task_request targeted MCP call failed: {resp}")
 
 send({
     "jsonrpc":"2.0",

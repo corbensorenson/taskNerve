@@ -130,6 +130,7 @@ After migration, use fugit for daily coordination (`task`, `checkpoint`, `log`),
 fugit --repo-root . task import --file /path/to/tasks.tsv
 fugit --repo-root . task sync --plan /path/to/the_final_plan.md
 fugit --repo-root . task request --agent agent.worker --focus compiler
+fugit --repo-root . task request --agent agent.worker --task-id <task_id>
 fugit --repo-root . checkpoint --summary "implemented feature X" --agent agent.worker --tag feature
 fugit --repo-root . task done --task-id <task_id> --agent agent.worker --summary "validated feature X" --command "cargo test" --regression "cargo test"
 fugit --repo-root . log --limit 20
@@ -230,6 +231,7 @@ fugit --repo-root . bridge sync-github --background --note "manual backup sweep"
 fugit --repo-root . task sync --plan the_final_plan.md --json
 fugit --repo-root . task request --agent agent.worker --no-claim --max 3 --json
 fugit --repo-root . task request --agent agent.worker --skip-owned --json
+fugit --repo-root . task request --agent agent.worker --task-id <task_id> --json
 fugit --repo-root . task reopen --task-id <task_id>
 ```
 

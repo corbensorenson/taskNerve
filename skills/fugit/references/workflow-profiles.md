@@ -20,6 +20,7 @@ Use when multiple agents should coordinate by pulling from a shared queue.
 - `fugit --repo-root . task import --file /path/to/tasks.tsv`
 - `fugit --repo-root . task list --ready-only`
 - `fugit --repo-root . task request --agent <agent_id> --focus compiler --claim-ttl-minutes 30 --steal-after-minutes 90`
+- `fugit --repo-root . task request --agent <agent_id> --task-id <task_id> --json`
 - `fugit --repo-root . task edit --task-id <task_id> --title "Updated X"`
 - `fugit --repo-root . task show --task-id <task_id>`
 - `fugit --repo-root . task list --jsonl --fields task_id,title,status`

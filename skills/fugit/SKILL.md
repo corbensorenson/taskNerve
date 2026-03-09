@@ -51,6 +51,8 @@ Use this skill when any of the following are true:
 - `fugit --repo-root . task approve --all-pending-auto-replenish --agent <agent_id>`
 - To bypass your currently claimed work and fetch the next ready task:
 - `fugit --repo-root . task request --agent <agent_id> --skip-owned --json`
+- To request a specific task after scanning the queue:
+- `fugit --repo-root . task request --agent <agent_id> --task-id <task_id> --json`
 - optional dry assignment: `fugit --repo-root . task request --agent <agent_id> --no-claim`
 
 6. Capture progress as checkpoints:

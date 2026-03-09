@@ -971,6 +971,8 @@ enum TaskAction {
     Request {
         #[arg(long)]
         agent: Option<String>,
+        #[arg(long)]
+        task_id: Option<String>,
         #[arg(long = "tag")]
         tags: Vec<String>,
         #[arg(long)]
@@ -4480,6 +4482,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
         }
         TaskAction::Request {
             agent,
+            task_id,
             tags,
             focus,
             prefix,
@@ -4493,6 +4496,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             json,
         } => {
             let agent_id = agent.unwrap_or_else(default_agent_id);
+            let requested_task_id = normalize_optional_text(task_id, "task id")?;
             let filters = normalize_task_query_filter(tags, focus, prefix, contains)?;
             let max = max.max(1);
             if max > 1 && !no_claim {
@@ -4500,18 +4504,35 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             }
             let now = Utc::now();
             let config = load_timeline_config_or_default(repo_root)?;
-            let mut candidates = select_task_candidates_for_agent(
-                &state,
-                &agent_id,
-                &filters,
-                !no_steal,
-                !skip_owned,
-                steal_after_minutes,
-                now,
-                max,
-            );
+            let requested_task_index = requested_task_id
+                .as_deref()
+                .and_then(|task_id| state.tasks.iter().position(|task| task.task_id == task_id));
+            let mut candidates = if let Some(task_id) = requested_task_id.as_deref() {
+                select_specific_task_candidate(
+                    &state,
+                    task_id,
+                    &agent_id,
+                    !no_steal,
+                    steal_after_minutes,
+                    now,
+                )
+                .into_iter()
+                .collect::<Vec<_>>()
+            } else {
+                select_task_candidates_for_agent(
+                    &state,
+                    &agent_id,
+                    &filters,
+                    !no_steal,
+                    !skip_owned,
+                    steal_after_minutes,
+                    now,
+                    max,
+                )
+            };
             let mut auto_replenish = AutoReplenishEnsureResult::default();
-            let should_seed_auto_replenish = candidates.is_empty()
+            let should_seed_auto_replenish = requested_task_id.is_none()
+                && candidates.is_empty()
                 && config.auto_replenish_enabled
                 && !agent_has_available_standard_work(
                     &state,
@@ -4580,7 +4601,21 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     "assigned_count": 0,
                     "claimed": false,
                     "max": max,
+                    "requested_task_id": requested_task_id,
                     "skip_owned": skip_owned,
+                    "request_reason": requested_task_id.as_deref().map(|_| {
+                        match requested_task_index {
+                            None => "task_not_found",
+                            Some(task_index) => specific_task_unavailable_reason(
+                                &state,
+                                task_index,
+                                &agent_id,
+                                !no_steal,
+                                steal_after_minutes,
+                                now,
+                            ),
+                        }
+                    }),
                     "filters": {
                         "tags": filters.required_tags,
                         "focus": filters.focus,
@@ -4597,12 +4632,20 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                         "pending_confirmation_task_ids": auto_replenish.pending_confirmation_task_ids
                     },
                     "tasks": [],
-                    "task": null
+                    "task": requested_task_index.map(|task_index| {
+                        task_to_json_payload(&state.tasks[task_index], &task_status_map(&state))
+                    })
                 });
                 if json {
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else {
-                    if payload["auto_replenish"]["triggered"]
+                    if let Some(requested_task_id) = payload["requested_task_id"].as_str() {
+                        println!(
+                            "[fugit-task] requested task is not dispatchable task_id={} reason={}",
+                            requested_task_id,
+                            payload["request_reason"].as_str().unwrap_or("unavailable")
+                        );
+                    } else if payload["auto_replenish"]["triggered"]
                         .as_bool()
                         .unwrap_or(false)
                         && payload["auto_replenish"]["pending_confirmation_task_ids"]
@@ -4680,6 +4723,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 "assigned_count": task_rows.len(),
                 "claimed": claimed,
                 "max": max,
+                "requested_task_id": requested_task_id,
                 "skip_owned": skip_owned,
                 "dispatch_kind": dispatch_kind.as_str(),
                 "filters": {
@@ -7276,6 +7320,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                 "type": "object",
                 "properties": {
                     "agent": { "type": "string" },
+                    "task_id": { "type": "string" },
                     "tags": { "type": "array", "items": { "type": "string" } },
                     "focus": { "type": "string" },
                     "prefix": { "type": "string" },
@@ -8102,6 +8147,10 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             if let Some(agent) = args.get("agent").and_then(serde_json::Value::as_str) {
                 cli_args.push("--agent".to_string());
                 cli_args.push(agent.to_string());
+            }
+            if let Some(task_id) = args.get("task_id").and_then(serde_json::Value::as_str) {
+                cli_args.push("--task-id".to_string());
+                cli_args.push(task_id.to_string());
             }
             if let Some(tags) = args.get("tags").and_then(serde_json::Value::as_array) {
                 for tag in tags {
@@ -12317,6 +12366,75 @@ fn select_task_candidates_for_agent(
     out
 }
 
+fn select_specific_task_candidate(
+    state: &TaskState,
+    task_id: &str,
+    agent_id: &str,
+    allow_steal: bool,
+    steal_after_minutes: i64,
+    now: DateTime<Utc>,
+) -> Option<(usize, TaskDispatchKind)> {
+    let status_map = task_status_map(state);
+    let (idx, task) = state
+        .tasks
+        .iter()
+        .enumerate()
+        .find(|(_, task)| task.task_id == task_id)?;
+    if task.status == TaskStatus::Done {
+        return None;
+    }
+    if task_is_auto_replenish(task) && !task_is_auto_replenish_for_agent(task, agent_id) {
+        return None;
+    }
+    if !task_is_ready_for_dispatch(task, &status_map) {
+        return None;
+    }
+    match task.status {
+        TaskStatus::Open => Some((idx, TaskDispatchKind::Open)),
+        TaskStatus::Claimed => {
+            if task.claimed_by_agent_id.as_deref() == Some(agent_id) {
+                Some((idx, TaskDispatchKind::OwnedClaim))
+            } else if allow_steal && task_claim_is_stale(task, now, steal_after_minutes) {
+                Some((idx, TaskDispatchKind::Steal))
+            } else {
+                None
+            }
+        }
+        TaskStatus::Done => None,
+    }
+}
+
+fn specific_task_unavailable_reason(
+    state: &TaskState,
+    task_index: usize,
+    agent_id: &str,
+    allow_steal: bool,
+    steal_after_minutes: i64,
+    now: DateTime<Utc>,
+) -> &'static str {
+    let task = &state.tasks[task_index];
+    let status_map = task_status_map(state);
+    if task.status == TaskStatus::Done {
+        return "done";
+    }
+    if task_is_auto_replenish(task) && !task_is_auto_replenish_for_agent(task, agent_id) {
+        return "reserved_for_other_agent";
+    }
+    if task.awaiting_confirmation {
+        return "awaiting_confirmation";
+    }
+    if !task_blocked_by(task, &status_map).is_empty() {
+        return "blocked_by_dependencies";
+    }
+    if task.status == TaskStatus::Claimed && task.claimed_by_agent_id.as_deref() != Some(agent_id) {
+        if allow_steal && task_claim_is_stale(task, now, steal_after_minutes) {
+            return "stealable";
+        }
+        return "claimed_by_other_agent";
+    }
+    "not_dispatchable"
+}
+
 fn select_auto_replenish_candidates_for_agent(
     state: &TaskState,
     agent_id: &str,
@@ -13410,6 +13528,66 @@ mod tests {
         .expect("expected open task when skipping owned");
         assert_eq!(skipped.1, TaskDispatchKind::Open);
         assert_eq!(state.tasks[skipped.0].task_id, "task_open");
+    }
+
+    #[test]
+    fn specific_task_request_targets_requested_open_task() {
+        let now = Utc::now();
+        let state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![
+                sample_task("task_high", "high", 100, TaskStatus::Open),
+                sample_task("task_target", "target", 1, TaskStatus::Open),
+            ],
+        };
+
+        let selected =
+            select_specific_task_candidate(&state, "task_target", "agent.worker", true, 90, now)
+                .expect("expected targeted task");
+        assert_eq!(selected.1, TaskDispatchKind::Open);
+        assert_eq!(state.tasks[selected.0].task_id, "task_target");
+    }
+
+    #[test]
+    fn specific_task_request_can_return_owned_claim() {
+        let now = Utc::now();
+        let state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![FugitTask {
+                task_id: "task_owned".to_string(),
+                title: "owned".to_string(),
+                detail: None,
+                priority: 5,
+                tags: vec![],
+                depends_on: vec![],
+                status: TaskStatus::Claimed,
+                created_at_utc: "2026-03-01T00:00:00Z".to_string(),
+                updated_at_utc: now_utc(),
+                created_by_agent_id: "agent.a".to_string(),
+                claimed_by_agent_id: Some("agent.worker".to_string()),
+                claim_started_at_utc: Some(format_utc(now - Duration::minutes(10))),
+                claim_expires_at_utc: Some(format_utc(now + Duration::minutes(20))),
+                completed_at_utc: None,
+                completed_by_agent_id: None,
+                completed_summary: None,
+                completion_notes: Vec::new(),
+                completion_artifacts: Vec::new(),
+                completion_commands: Vec::new(),
+                source_key: None,
+                source_plan: None,
+                awaiting_confirmation: false,
+                approved_at_utc: None,
+                approved_by_agent_id: None,
+            }],
+        };
+
+        let selected =
+            select_specific_task_candidate(&state, "task_owned", "agent.worker", true, 90, now)
+                .expect("expected owned targeted task");
+        assert_eq!(selected.1, TaskDispatchKind::OwnedClaim);
+        assert_eq!(state.tasks[selected.0].task_id, "task_owned");
     }
 
     #[test]

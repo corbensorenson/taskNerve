@@ -21,6 +21,7 @@
 - Added default-on task auto-replenish fallback: when no real work is dispatchable, `task request` seeds per-agent scout tasks, with `task policy show|set`, `task approve`, GUI approval controls, and MCP tools for operating the flow.
 - Added default-on background bridge auto-sync after `task done`, with task-note commit subjects, `bridge auto-sync show|set`, and manual detached `bridge sync-github --background`.
 - Added default-on quality gates: `task done` now registers regression/benchmark checks, `check add|list|run|deprecate|policy` manages them, and bridge sync runs active checks before commit/push.
+- Added targeted task pickup with `task request --task-id <task_id>`, including MCP support, so agents can request a specific queue item after inspecting the backlog.
 - Added project discovery with recent-activity ordering, `task gui --background --port 0`, and an installed `fugit-gui` desktop launcher (`~/Applications/Fugit GUI.app` on macOS, `.desktop` entry on Linux).
 - Improved the Unix installer to print the installed version and warn when `PATH` still resolves to a different `fugit` binary.
 - Added multi-project registry (`project add|list|use|remove`) and GUI project switching to keep task streams isolated across repos.
