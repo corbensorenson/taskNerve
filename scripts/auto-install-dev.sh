@@ -16,7 +16,10 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
 fi
 trap 'rmdir "$LOCK_DIR" >/dev/null 2>&1 || true' EXIT
 
-mapfile -d '' RELEVANT_FILES < <(
+RELEVANT_FILES=()
+while IFS= read -r -d '' file; do
+  RELEVANT_FILES+=("$file")
+done < <(
   git -C "$REPO_ROOT" ls-files -z -- \
     Cargo.toml \
     Cargo.lock \
