@@ -5,7 +5,7 @@
 Make TaskNerve feel first-class inside Codex:
 - no browser-tab dependency
 - no iframe as the primary product surface
-- no second sign-in for advisor/controller turns
+- no second sign-in for controller/worker turns
 - no dependence on visible chat titles for worker routing
 
 TaskNerve should own project/task orchestration while Codex continues to own authenticated inference and conversation UX.
@@ -35,7 +35,6 @@ TaskNerve remains the system of record for:
 - task queue and claims
 - timeline/checkpoints
 - bridge/CI flows
-- advisor workflow state
 - Codex thread bindings and queued heartbeats
 
 ### 2. Codex becomes the native execution surface
@@ -63,7 +62,7 @@ That bridge currently supports:
 - `updateThreadTitle`
 - opening a specific thread in the Codex UI
 
-This keeps controller/advisor-style prompting on the user's Codex/ChatGPT subscription path instead of requiring a separate Claude/OpenRouter-style login.
+This keeps controller and worker prompting on the user's Codex/ChatGPT subscription path instead of requiring a separate Claude/OpenRouter-style login.
 
 ### 4. Local panel service remains useful, but only as TaskNerve data transport
 
@@ -113,7 +112,7 @@ If Codex eventually ships a supported desktop extension API, TaskNerve should mo
 
 Until then, the right model is:
 - native overlay inside Codex
-- Codex-authenticated inference for controller/advisor turns
+- Codex-authenticated inference for controller and worker turns
 - TaskNerve-owned orchestration and project memory
 - syncable patch layer that can keep up with Codex desktop updates
 

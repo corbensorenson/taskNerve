@@ -255,11 +255,13 @@ When a repo still uses local registered checks, `task done --dry-run-checks --js
 
 By default, low-task requests also run a deterministic GitHub issue monitor on GitHub-backed repos. It fetches open issues, filters out obvious spam/non-actionable/harmful requests, syncs safe issues into the backlog under `.tasknerve:github_issues`, and queues a reviewer pass when a reviewer provider is configured.
 
-By default, low-task requests can also queue advisor runs in the background. The advisor can use different providers/models for the reviewer and smart task-manager roles, then sync generated backlog through managed plan files instead of mutating the queue ad hoc.
+In the native Codex path, low-queue replenishment should run through the project controller using Codex-authenticated inference. Legacy `advisor` CLI commands still exist for compatibility, but the native panel no longer uses the `/api/advisor` surface.
 
 For agent install hygiene, check `tasknerve update check --json` before spending time debugging CLI drift, and only run `tasknerve update apply` after user approval unless the machine policy already enables auto-apply.
 
 ## Advisor Automation
+
+This section documents the legacy compatibility CLI. The native Codex TaskNerve panel uses controller prompting through Codex's built-in inference instead of the advisor API layer.
 
 Provider setup:
 
@@ -292,9 +294,9 @@ tasknerve --repo-root . advisor run rerun --run-id <run_id> --background --json
 Notes:
 - `advisor research` imports generated tasks through managed TSV plans under `.tasknerve/advisor/` so dedupe and promotion stay deterministic.
 - `bridge sync-github-issues` imports screened GitHub issues through the managed source `.tasknerve:github_issues`, keeping dedupe deterministic and leaving obvious harmful/non-actionable issues out of the queue.
-- `task request` will queue background advisor review/research automatically when standard work falls below the configured threshold.
-- `task request` will also try the GitHub issue monitor before advisor low-task automation, so real upstream issues can replenish the queue without waiting on model output.
-- The task GUI now includes advisor controls for provider selection, policy, manual review/research triggers, workflow visibility, run detail inspection, and rerun controls.
+- `task request` may still use legacy advisor automation in compatibility mode, but the native Codex surface is controller-driven and does not call `/api/advisor`.
+- `task request` will also try the GitHub issue monitor before any legacy advisor low-task automation, so real upstream issues can replenish the queue without waiting on model output.
+- The native Codex TaskNerve panel is task-first and controller-driven; advisor provider/policy/run controls are no longer part of that surface.
 - Custom provider wrappers are supported through `advisor provider add-command`; command args can use placeholders such as `{role}`, `{model}`, `{goal}`, `{repo_root}`, and `{prompt}`.
 
 ## Repo-Owned Advisor Workflow

@@ -93,7 +93,7 @@ Use this skill when any of the following are true:
 - Optional routing hints: `--focus <token>`, `--prefix <token>`, `--contains <token>`, `--title-contains <token>`, plus `--tag <tag>`
 - Saved views can be reused at dispatch time with `--view <name>`; only the saved query portion is applied to `task request|start`.
 - When the queue is genuinely exhausted, `task request` will auto-seed per-agent scout tasks by default so agents can replenish backlog instead of stalling.
-- When standard work gets low, `task request` can also queue advisor review/task-manager runs in the background so backlog generation does not stall.
+- On the native Codex path, when standard work gets low, prefer project-controller prompt injection and worker heartbeats over the legacy advisor API surface.
 - Date gates are respected by default when tasks carry `not_before:` tags or date windows in title/detail text. Use `--ignore-date-gates` only when you intentionally want to bypass that schedule gate.
 - To require human approval before those scout tasks run:
 - `tasknerve --repo-root . task policy set --auto-replenish-confirmation true --agent <agent_id>`
@@ -208,16 +208,12 @@ Use this skill when any of the following are true:
 - `tasknerve --repo-root . check run --json`
 - Override the local check timeout for a one-off manual run:
 - `tasknerve --repo-root . check run --timeout-seconds 120 --json`
-- Inspect or run advisor automation:
-- `tasknerve --repo-root . advisor show --json`
-- `tasknerve --repo-root . advisor workflow show --json`
-- `tasknerve --repo-root . advisor workflow sync-policy --json`
-- `tasknerve --repo-root . advisor policy show --json`
-- `tasknerve --repo-root . advisor review --background`
-- `tasknerve --repo-root . advisor research --background`
-- `tasknerve --repo-root . advisor run show --run-id <run_id> --json`
-- `tasknerve --repo-root . advisor run rerun --run-id <run_id> --background --json`
-- Low-task GitHub repos will also try the deterministic issue monitor before advisor low-task automation. If a reviewer provider is configured, successful issue syncs queue a reviewer pass automatically.
+- For the native Codex flow, prefer controller automation over advisor commands:
+- `tasknerve --repo-root . codex thread list --json`
+- `tasknerve --repo-root . codex thread bind --agent agent.controller --thread-id <codex_session_id> --label "<project>-controller"`
+- `tasknerve --repo-root . codex inject --agent agent.controller --continue-task --background --json`
+- `tasknerve --repo-root . codex inject --agent <worker_agent_id> --continue-task --background --json`
+- Low-task GitHub repos should still try the deterministic issue monitor before any legacy advisor low-task automation.
 - Assign distinct models/providers per role:
 - `tasknerve --repo-root . advisor provider assign --role reviewer --provider <provider_id> --model <model>`
 - `tasknerve --repo-root . advisor provider assign --role task-manager --provider <provider_id> --model <model>`

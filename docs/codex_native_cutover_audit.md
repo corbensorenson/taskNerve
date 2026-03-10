@@ -60,11 +60,10 @@ Rust still runs the local panel server and all panel APIs:
 - `serve_task_gui`
 - `handle_task_gui_connection`
 - `/api/tasks`
-- `/api/advisor`
 - `/api/codex/*`
 - `/api/project/codex-settings`
 
-That means the current native overlay is not yet a self-contained Codex-side implementation.
+The native panel no longer depends on `/api/advisor`, but it still is not a self-contained Codex-side implementation because the rest of the panel transport remains Rust-hosted.
 
 ### 3. Durable orchestration engine
 
@@ -89,7 +88,7 @@ Rust still owns:
 
 Rust can move into `/deprecated` only after all of the following are true:
 
-1. Codex-side native runtime owns project/task/advisor/codex APIs directly.
+1. Codex-side native runtime owns project/task/codex/controller-automation APIs directly.
 2. The task queue engine exists in the native runtime, not behind localhost Rust APIs.
 3. The patch/sync logic is implemented in the native runtime patch layer or a tiny installer-only tool.
 4. The panel no longer depends on `http://127.0.0.1:7788` for normal operation.
