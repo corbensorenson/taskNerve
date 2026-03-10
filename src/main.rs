@@ -4762,6 +4762,7 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
         baseline_reseeded_old_objects =
             baseline_reseed_missing_old_change_hashes(&mut changes, &missing_old_objects);
         if baseline_reseeded_old_objects > 0 {
+            store_reseeded_old_change_objects(repo_root, &changes)?;
             missing_old_objects = render_checkpoint_missing_blob_rows(&changes, repo_root);
         }
     }
@@ -19525,6 +19526,33 @@ fn baseline_reseed_missing_old_change_hashes(
     }
 
     reseeded
+}
+
+fn store_reseeded_old_change_objects(repo_root: &Path, changes: &[ChangeRecord]) -> Result<usize> {
+    let mut stored = 0_usize;
+    for change in changes {
+        if !matches!(change.kind, ChangeKind::Modified) {
+            continue;
+        }
+        let (Some(old_hash), Some(new_hash)) = (change.old_hash.as_deref(), change.new_hash.as_deref())
+        else {
+            continue;
+        };
+        if old_hash != new_hash {
+            continue;
+        }
+        let object_path = timeline_objects_dir(repo_root).join(old_hash);
+        if object_path.exists() {
+            continue;
+        }
+        let source_path = repo_root.join(&change.path);
+        if !source_path.is_file() {
+            continue;
+        }
+        store_object(repo_root, old_hash, &source_path)?;
+        stored += 1;
+    }
+    Ok(stored)
 }
 
 fn git_history_revisions_for_path(repo_root: &Path, rel_path: &str) -> Result<Vec<String>> {
