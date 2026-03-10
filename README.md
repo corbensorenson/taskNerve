@@ -185,6 +185,7 @@ tasknerve task start --repo-root . --agent agent.worker --focus compiler --peek-
 tasknerve --repo-root . task start --agent agent.worker --task-id <task_id>
 tasknerve --repo-root . task progress --task-id <task_id> --agent agent.worker --note "landed parser wiring"
 tasknerve --repo-root . task note --task-id <task_id> --agent agent.worker --message "captured benchmark delta" --artifact artifacts/report.json
+tasknerve --repo-root . task block --task-id <task_id> --agent agent.worker --reason "waiting on schema decision" --claim-next
 tasknerve --repo-root . checkpoint --summary "implemented feature X" --agent agent.worker --tag feature
 tasknerve --repo-root . task done --task-id <task_id> --agent agent.worker --summary "validated feature X" --command "cargo test" --claim-next
 tasknerve --repo-root . task advance --task-id <task_id> --agent agent.worker --summary "validated feature X" --command "cargo test"
@@ -201,6 +202,8 @@ tasknerve --repo-root . task add --title "Implement feature X" --priority 10 --t
 
 `task advance` is the tight completion loop: it is equivalent to `task done --claim-next`, but easier for agents to discover from `--help` and easier to standardize in shared skills.
 
+`task block` is the direct blocked-state transition for runtime or dependency blockers. It preserves task context, records the blocker reason, and can optionally `--claim-next` in one round trip.
+
 `task list --format table|compact|json|jsonl` gives an explicit render mode so agents do not need to infer output shape from a mix of flags.
 
 For backlog shaping, prefer `task list` / `task search` filters such as `--tag`, `--focus`, `--contains`, and `--title-contains` over reading `.tasknerve/tasks.json` directly.
@@ -211,9 +214,9 @@ When you want more deterministic backlog without spending model tokens, use `tas
 
 When an agent already owns a claim, `task request` now returns that owned claim without silently shrinking its lease. If the agent explicitly wants an additional claim, use `--max-new-claims 1` (or higher) and branch on `selection_reason` / `claim_ttl_remaining_seconds` from the JSON payload.
 
-For tighter agent loops, `task request --peek-open N` and `task start --peek-open N` return the next ready open candidates alongside the selected task. JSON `task request`, `task start`, `task current`, and `task show` payloads can also include deterministic plan-derived `context` with source refs, acceptance criteria, and a next recommended substep.
+For tighter agent loops, `task request --peek-open N` and `task start --peek-open N` return the next ready open candidates alongside the selected task. JSON `task request`, `task start`, `task current`, and `task show` payloads can also include deterministic plan-derived `context` with source refs, acceptance criteria, and a next recommended substep. When multiple claims exist, `task current --json` now prefers a non-stale primary claim and exposes any stale carryover claims under `stale_claims`.
 
-Task lifecycle operations (`add`, `edit`, `claim`, `done`, `reopen`, `release`, `remove`) are mirrored into timeline events.
+Task lifecycle operations (`add`, `edit`, `claim`, `done`, `block`, `reopen`, `release`, `remove`) are mirrored into timeline events.
 
 `task sync` now preserves claimed tasks by default even when a living plan file no longer mentions them. Use `--allow-drop-claimed` only when you intentionally want plan reconciliation to retire already claimed work.
 
@@ -272,6 +275,7 @@ Notes:
 ## Repo-Owned Advisor Workflow
 
 TaskNerve now supports a repo-owned advisor contract at `TASKNERVE_WORKFLOW.md`.
+If the repo also has a root `project_goals.md`, advisor prompts and run reports automatically include it so reviewer and task-manager output stays aligned with the project's stated goals.
 
 Bootstrap it:
 
@@ -285,6 +289,7 @@ Use it to version:
 - role-specific guidance
 - result-size caps (`max_findings`, `max_tasks`)
 - advisor policy defaults that can be synced into runtime state
+- while keeping durable user-authored project intent in `project_goals.md`
 
 Sync the policy defaults from the file into the live advisor state:
 

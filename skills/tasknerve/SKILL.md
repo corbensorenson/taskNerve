@@ -116,6 +116,8 @@ Use this skill when any of the following are true:
 - `tasknerve --repo-root . task heartbeat <task_id> --agent <agent_id> --claim-ttl-minutes 60 --note "<what changed>"`
 - To close work and pull the next ready item in one round trip:
 - `tasknerve --repo-root . task done --task-id <task_id> --agent <agent_id> --claim-next`
+- Direct blocked-state command when the work is real but currently stuck:
+- `tasknerve --repo-root . task block --task-id <task_id> --agent <agent_id> --reason "<why blocked>" --claim-next`
 - To block work and move on without faking completion:
 - `tasknerve --repo-root . task done --task-id <task_id> --agent <agent_id> --state blocked --reason "<why blocked>" --claim-next`
 - To release a task back to the queue with explicit blocker context:
@@ -153,10 +155,13 @@ Use this skill when any of the following are true:
 - `tasknerve --repo-root . log --limit 20`
 - Inspect one task directly:
 - `tasknerve --repo-root . task show <task_id>`
+- Include deterministic plan/task context in that lookup when needed:
+- `tasknerve --repo-root . task show <task_id> --include-context --json`
 - Resume or claim work in one step:
 - `tasknerve --repo-root . task start --agent <agent_id> --json`
 - Inspect your active claim directly:
 - `tasknerve --repo-root . task current --agent <agent_id> --include-context --json`
+- When multiple claims exist, `task current --json` prefers a non-stale primary claim and exposes any stale carryover claims under `stale_claims`.
 - Inspect your queue/ownership summary directly:
 - `tasknerve --repo-root . task status --agent <agent_id> --json`
 - For compact queue scans:
@@ -192,6 +197,7 @@ Use this skill when any of the following are true:
 - `tasknerve --repo-root . advisor provider add-command --name <name> --executable <cmd> --arg "{role}" --arg "{model}"`
 - Version repo-specific advisor instructions in `TASKNERVE_WORKFLOW.md` and validate them with:
 - `tasknerve --repo-root . advisor workflow validate --json`
+- If the repo has a root `project_goals.md`, advisor prompts and run reports automatically include it so reviewer/task-manager output stays aligned with explicit project goals.
 
 9. Coordinate ownership when multiple agents touch overlapping files:
 - `tasknerve --repo-root . lock add --pattern "src/**" --agent <agent_id> --ttl-minutes 30`
