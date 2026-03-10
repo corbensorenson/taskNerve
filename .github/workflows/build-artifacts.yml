@@ -1,0 +1,49 @@
+name: Build Artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  package-unix:
+    name: Package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Release Binary
+        run: cargo build --release
+
+      - name: Assemble Dist Bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_root="dist/tasknerve"
+          mkdir -p "$bundle_root"
+          cp "target/release/tasknerve" "$bundle_root/tasknerve"
+          cp "scripts/tasknerve-gui" "$bundle_root/tasknerve-gui"
+          cp "scripts/install_codex_skill.sh" "$bundle_root/install_codex_skill.sh"
+          cp -R "skills/tasknerve" "$bundle_root/skills-tasknerve"
+          chmod +x "$bundle_root/tasknerve" "$bundle_root/tasknerve-gui" "$bundle_root/install_codex_skill.sh"
+          tar -C dist -czf "tasknerve-${{ runner.os }}-${{ runner.arch }}.tar.gz" tasknerve
+
+      - name: Upload Dist Bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: tasknerve-${{ runner.os }}-${{ runner.arch }}
+          path: tasknerve-${{ runner.os }}-${{ runner.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
