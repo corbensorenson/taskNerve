@@ -70,15 +70,19 @@ const SKILL_REF_WORKFLOW_PROFILES: &str =
 const SKILL_REF_RECOVERY_PLAYBOOKS: &str =
     include_str!("../skills/tasknerve/references/recovery-playbooks.md");
 const DEFAULT_ADVISOR_WORKFLOW_TEMPLATE: &str = include_str!("../templates/TASKNERVE_WORKFLOW.md");
+#[cfg(any(test, target_os = "macos"))]
 const DEFAULT_CODEX_PANEL_SCRIPT: &str = include_str!("../templates/TASKNERVE_CODEX_PANEL.js");
 const DEFAULT_UPDATE_REPO_URL: &str = "https://github.com/corbensorenson/taskNerve.git";
 const DEFAULT_UPDATE_BRANCH: &str = "main";
 const PRODUCT_NAME: &str = "tasknerve";
+#[cfg(target_os = "macos")]
 const DEFAULT_CODEX_APP_PATH_MACOS: &str = "/Applications/Codex.app";
 const DEFAULT_CODEX_PANEL_HOST: &str = "127.0.0.1";
 const DEFAULT_CODEX_PANEL_PORT: u16 = 7788;
 const CODEX_PANEL_ASSET_NAME: &str = "tasknerve-codex-panel.js";
+#[cfg(any(test, target_os = "macos"))]
 const CODEX_PANEL_MARKER: &str = "tasknerve-codex-panel.js";
+#[cfg(target_os = "macos")]
 const CODEX_PANEL_LAUNCH_AGENT_LABEL: &str = "io.tasknerve.codex.panel";
 const TASK_TAG_HANDOFF_READY: &str = "handoff_ready";
 const TASK_TAG_WAITING_ON_USER: &str = "waiting_on_user";
@@ -11540,6 +11544,7 @@ fn tasknerve_codex_state_path() -> Result<PathBuf> {
         .join("integration.json"))
 }
 
+#[cfg(target_os = "macos")]
 fn tasknerve_codex_backup_dir() -> Result<PathBuf> {
     Ok(resolve_tasknerve_home()?.join("codex").join("backup"))
 }
@@ -11563,6 +11568,7 @@ fn load_codex_integration_state() -> Result<Option<CodexIntegrationState>> {
     load_json_optional(&tasknerve_codex_state_path()?)
 }
 
+#[cfg(target_os = "macos")]
 fn write_codex_integration_state(state: &CodexIntegrationState) -> Result<()> {
     write_pretty_json(&tasknerve_codex_state_path()?, state)
 }
@@ -11571,6 +11577,7 @@ fn tasknerve_codex_panel_url(host: &str, port: u16) -> String {
     task_gui_url(host, port, None)
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn codex_panel_origins(host: &str, port: u16) -> Vec<String> {
     let normalized = match host.trim() {
         "" | "0.0.0.0" => "127.0.0.1".to_string(),
@@ -11591,6 +11598,7 @@ fn codex_panel_origins(host: &str, port: u16) -> Vec<String> {
     origins.into_iter().collect()
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn ensure_csp_directive_origins(csp: &str, directive: &str, origins: &[String]) -> String {
     let mut parts = csp
         .split(';')
@@ -11622,6 +11630,7 @@ fn ensure_csp_directive_origins(csp: &str, directive: &str, origins: &[String]) 
     format!("{};", parts.join("; "))
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn patch_codex_index_html(input: &str, host: &str, port: u16) -> Result<String> {
     let marker = "<meta http-equiv=\"Content-Security-Policy\" content=\"";
     let csp_start = input
@@ -11657,6 +11666,7 @@ fn patch_codex_index_html(input: &str, host: &str, port: u16) -> Result<String> 
     Ok(html)
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn render_codex_panel_script(host: &str, port: u16) -> String {
     DEFAULT_CODEX_PANEL_SCRIPT.replace(
         "__TASKNERVE_BASE_URL__",
@@ -11679,6 +11689,7 @@ fn command_output_checked(cmd: &mut ProcessCommand, context: &str) -> Result<Str
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+#[cfg(target_os = "macos")]
 fn command_status_checked(cmd: &mut ProcessCommand, context: &str) -> Result<()> {
     let status = cmd
         .status()
@@ -11728,6 +11739,7 @@ fn codex_panel_health(host: &str, port: u16) -> serde_json::Value {
     })
 }
 
+#[cfg(target_os = "macos")]
 fn wait_for_codex_panel_health(host: &str, port: u16, attempts: usize) -> serde_json::Value {
     for _ in 0..attempts {
         let payload = codex_panel_health(host, port);
@@ -11756,6 +11768,7 @@ fn codex_panel_asset_installed(app_asar_path: &Path) -> Result<bool> {
         .any(|line| line.trim() == format!("/webview/assets/{}", CODEX_PANEL_ASSET_NAME)))
 }
 
+#[cfg(target_os = "macos")]
 fn codex_backup_asar_path(app_path: &Path) -> Result<PathBuf> {
     let app_name = app_path
         .file_name()
@@ -11827,11 +11840,6 @@ fn maybe_quit_codex_app() -> Result<bool> {
     bail!("Codex.app did not exit after a polite quit request")
 }
 
-#[cfg(not(target_os = "macos"))]
-fn maybe_quit_codex_app() -> Result<bool> {
-    Ok(false)
-}
-
 #[cfg(target_os = "macos")]
 fn maybe_reopen_codex_app(app_path: &Path, reopen: bool) -> Result<bool> {
     if !reopen {
@@ -11844,11 +11852,7 @@ fn maybe_reopen_codex_app(app_path: &Path, reopen: bool) -> Result<bool> {
     Ok(true)
 }
 
-#[cfg(not(target_os = "macos"))]
-fn maybe_reopen_codex_app(_app_path: &Path, _reopen: bool) -> Result<bool> {
-    Ok(false)
-}
-
+#[cfg(target_os = "macos")]
 fn xml_escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -11858,6 +11862,7 @@ fn xml_escape(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+#[cfg(target_os = "macos")]
 fn render_codex_launch_agent_plist(
     tasknerve_executable: &Path,
     panel_repo_root: &Path,
@@ -11909,11 +11914,6 @@ fn load_codex_launch_agent(agent_path: &Path) -> Result<()> {
     )
 }
 
-#[cfg(not(target_os = "macos"))]
-fn load_codex_launch_agent(_agent_path: &Path) -> Result<()> {
-    bail!("TaskNerve Codex desktop integration is currently supported on macOS only")
-}
-
 #[cfg(target_os = "macos")]
 fn unload_codex_launch_agent(agent_path: &Path) -> Result<bool> {
     if !agent_path.exists() {
@@ -11924,11 +11924,6 @@ fn unload_codex_launch_agent(agent_path: &Path) -> Result<bool> {
         .arg(agent_path)
         .status();
     Ok(true)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn unload_codex_launch_agent(_agent_path: &Path) -> Result<bool> {
-    Ok(false)
 }
 
 #[cfg(target_os = "macos")]
