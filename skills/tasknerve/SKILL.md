@@ -30,6 +30,10 @@ Use this skill when any of the following are true:
 - If `update_available` is `true`, tell the user and wait for approval before running:
 - `tasknerve update apply`
 - Exception: if `tasknerve update policy show --json` reports `auto_apply_enabled=true`, it is acceptable to let tasknerve update itself automatically.
+- If the user wants TaskNerve embedded directly into the Codex desktop app instead of a browser tab, use:
+- `tasknerve codex doctor --json`
+- `tasknerve codex install --json`
+- This native panel path is currently macOS-only and intentionally patches the local `Codex.app` bundle plus installs a TaskNerve LaunchAgent-backed panel service.
 
 1. Ensure timeline exists:
 - `tasknerve --repo-root . init --branch trunk`

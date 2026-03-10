@@ -2,7 +2,7 @@
 
 TaskNerve is the project name. The installed CLI is `tasknerve`.
 
-TaskNerve is an agent-first, timeline-first versioning system. It tracks progress continuously, coordinates multi-agent work with a persistent task queue, includes a live Task + Timeline GUI, and uses Git/GitHub as a bridge for publishing.
+TaskNerve is an agent-first, timeline-first versioning system. It tracks progress continuously, coordinates multi-agent work with a persistent task queue, includes a live Task + Timeline GUI, can embed that GUI into the Codex desktop sidebar on macOS, and uses Git/GitHub as a bridge for publishing.
 
 This started as an internal tool and was made public after Git became a production bottleneck in multi-agent workflows.
 
@@ -425,6 +425,30 @@ GUI features:
 Launcher notes:
 - `tasknerve-gui` runs project discovery, starts the board in the background, auto-picks a free port, and opens the most recently worked-on project.
 - The Unix installer also creates a desktop launcher: `~/Applications/TaskNerve GUI.app` on macOS or `~/.local/share/applications/tasknerve-gui.desktop` on Linux.
+
+## Codex Native Panel
+
+TaskNerve now ships an experimental native Codex desktop integration for macOS. It keeps TaskNerve logic in the TaskNerve repo, runs the panel from a local TaskNerve background service, and patches the installed `Codex.app` webview to add a `TaskNerve` sidebar item below `Skills`.
+
+Install it:
+
+```bash
+tasknerve codex doctor --json
+tasknerve codex install --json
+```
+
+Useful options:
+
+```bash
+tasknerve codex install --panel-repo-root /abs/path/to/project --host 127.0.0.1 --port 7788 --json
+tasknerve codex uninstall --json
+```
+
+Notes:
+- This path is currently macOS-only because it relies on a user LaunchAgent plus a local `Codex.app` bundle patch.
+- `tasknerve codex install` also refreshes the installed Codex skill, starts a stable local TaskNerve panel service, backs up the original `app.asar`, and re-signs the patched app bundle.
+- The embedded panel uses the same TaskNerve GUI/backend as `tasknerve-gui`; it does not duplicate task logic inside Codex.
+- The design/maintenance notes for this path live in [docs/codex_native_integration_plan.md](/Users/adimus/Documents/taskNerve/docs/codex_native_integration_plan.md).
 
 Task maintenance from CLI:
 

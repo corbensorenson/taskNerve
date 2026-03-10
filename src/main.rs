@@ -45,6 +45,7 @@ const SCHEMA_ADVISOR_WORKER_STATE: &str = "tasknerve.advisor_worker_state.v1";
 const SCHEMA_ADVISOR_WORKER_LOCK: &str = "tasknerve.advisor_worker_lock.v1";
 const SCHEMA_GITHUB_ISSUE_MONITOR: &str = "tasknerve.github_issue_monitor.v1";
 const SCHEMA_UPDATE_STATE: &str = "tasknerve.update_state.v1";
+const SCHEMA_CODEX_INTEGRATION: &str = "tasknerve.codex.integration.v1";
 const BACKEND_MODE_GIT_BRIDGE: &str = "git_bridge";
 const BACKEND_MODE_TASKNERVE_CLOUD: &str = "tasknerve_cloud";
 const QUALITY_CHECK_BACKEND_LOCAL: &str = "local";
@@ -69,9 +70,16 @@ const SKILL_REF_WORKFLOW_PROFILES: &str =
 const SKILL_REF_RECOVERY_PLAYBOOKS: &str =
     include_str!("../skills/tasknerve/references/recovery-playbooks.md");
 const DEFAULT_ADVISOR_WORKFLOW_TEMPLATE: &str = include_str!("../templates/TASKNERVE_WORKFLOW.md");
+const DEFAULT_CODEX_PANEL_SCRIPT: &str = include_str!("../templates/TASKNERVE_CODEX_PANEL.js");
 const DEFAULT_UPDATE_REPO_URL: &str = "https://github.com/corbensorenson/taskNerve.git";
 const DEFAULT_UPDATE_BRANCH: &str = "main";
 const PRODUCT_NAME: &str = "tasknerve";
+const DEFAULT_CODEX_APP_PATH_MACOS: &str = "/Applications/Codex.app";
+const DEFAULT_CODEX_PANEL_HOST: &str = "127.0.0.1";
+const DEFAULT_CODEX_PANEL_PORT: u16 = 7788;
+const CODEX_PANEL_ASSET_NAME: &str = "tasknerve-codex-panel.js";
+const CODEX_PANEL_MARKER: &str = "tasknerve-codex-panel.js";
+const CODEX_PANEL_LAUNCH_AGENT_LABEL: &str = "io.tasknerve.codex.panel";
 const TASK_TAG_HANDOFF_READY: &str = "handoff_ready";
 const TASK_TAG_WAITING_ON_USER: &str = "waiting_on_user";
 
@@ -113,6 +121,7 @@ enum Command {
     Quickstart(QuickstartArgs),
     Doctor(DoctorArgs),
     Skill(SkillArgs),
+    Codex(CodexArgs),
     Update(UpdateArgs),
     Version(VersionArgs),
     Status(StatusArgs),
@@ -137,6 +146,12 @@ struct SkillArgs {
     action: SkillAction,
 }
 
+#[derive(Debug, Parser)]
+struct CodexArgs {
+    #[command(subcommand)]
+    action: CodexAction,
+}
+
 #[derive(Debug, Subcommand)]
 enum SkillAction {
     Show {
@@ -150,6 +165,36 @@ enum SkillAction {
         overwrite: bool,
     },
     Doctor {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CodexAction {
+    Doctor {
+        #[arg(long)]
+        app: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Install {
+        #[arg(long)]
+        app: Option<PathBuf>,
+        #[arg(long)]
+        panel_repo_root: Option<PathBuf>,
+        #[arg(long, default_value = DEFAULT_CODEX_PANEL_HOST)]
+        host: String,
+        #[arg(long, default_value_t = DEFAULT_CODEX_PANEL_PORT)]
+        port: u16,
+        #[arg(long, default_value_t = false)]
+        force: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Uninstall {
+        #[arg(long)]
+        app: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -2820,6 +2865,7 @@ fn try_main() -> Result<()> {
         Command::Quickstart(args) => cmd_quickstart(&repo_root, args),
         Command::Doctor(args) => cmd_doctor(&repo_root, args),
         Command::Skill(args) => cmd_skill(args),
+        Command::Codex(args) => cmd_codex(&repo_root, args),
         Command::Update(args) => cmd_update(args),
         Command::Version(args) => cmd_version(args),
         Command::Status(args) => cmd_status(&repo_root, args),
@@ -3192,6 +3238,75 @@ fn cmd_skill(args: SkillArgs) -> Result<()> {
     Ok(())
 }
 
+fn cmd_codex(repo_root: &Path, args: CodexArgs) -> Result<()> {
+    match args.action {
+        CodexAction::Doctor { app, json } => {
+            let payload = codex_integration_doctor_report(app.as_deref())?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!(
+                    "[tasknerve-codex] app_detected={} patched={} launch_agent={} panel_healthy={} skill_ok={}",
+                    payload["app_detected"].as_bool().unwrap_or(false),
+                    payload["panel_asset_installed"].as_bool().unwrap_or(false),
+                    payload["launch_agent"]["loaded"].as_bool().unwrap_or(false),
+                    payload["panel_health"]["ok"].as_bool().unwrap_or(false),
+                    payload["skill"]["ok"].as_bool().unwrap_or(false)
+                );
+                if let Some(hint) = payload
+                    .get("summary")
+                    .and_then(|value| value.get("hint"))
+                    .and_then(serde_json::Value::as_str)
+                {
+                    println!("- hint: {}", hint);
+                }
+            }
+        }
+        CodexAction::Install {
+            app,
+            panel_repo_root,
+            host,
+            port,
+            force,
+            json,
+        } => {
+            let payload = install_codex_integration(
+                repo_root,
+                app.as_deref(),
+                panel_repo_root.as_deref(),
+                &host,
+                port,
+                force,
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!(
+                    "[tasknerve-codex] installed app={} panel_url={} launch_agent={} relaunched_codex={}",
+                    payload["app_path"].as_str().unwrap_or("unknown"),
+                    payload["panel_url"].as_str().unwrap_or("unknown"),
+                    payload["launch_agent_path"].as_str().unwrap_or("unknown"),
+                    payload["reopened_codex"].as_bool().unwrap_or(false)
+                );
+            }
+        }
+        CodexAction::Uninstall { app, json } => {
+            let payload = uninstall_codex_integration(app.as_deref())?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!(
+                    "[tasknerve-codex] restored_app={} removed_launch_agent={} reopened_codex={}",
+                    payload["app_path"].as_str().unwrap_or("unknown"),
+                    payload["launch_agent_removed"].as_bool().unwrap_or(false),
+                    payload["reopened_codex"].as_bool().unwrap_or(false)
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn cmd_version(args: VersionArgs) -> Result<()> {
     let mut payload = tasknerve_version_report();
     if let Some(object) = payload.as_object_mut() {
@@ -3383,7 +3498,9 @@ fn tasknerve_skill_bundle(
             "cli": {
                 "show": "tasknerve skill show",
                 "show_json": "tasknerve skill show --json",
-                "install_codex": "tasknerve skill install-codex"
+                "install_codex": "tasknerve skill install-codex",
+                "codex_install": "tasknerve codex install",
+                "codex_doctor": "tasknerve codex doctor --json"
             },
             "mcp_tools": [
                 "tasknerve_status",
@@ -3489,25 +3606,33 @@ fn tasknerve_skill_bundle(
 fn supported_task_command_names() -> &'static [&'static str] {
     &[
         "list",
+        "search",
         "status",
         "show",
         "start",
         "current",
         "add",
         "edit",
+        "update",
         "remove",
         "approve",
         "policy",
+        "doctor",
         "sync",
+        "sync-comments",
+        "migrate-store",
         "import",
+        "view",
         "request",
         "claim",
         "done",
         "advance",
+        "block",
         "progress",
         "note",
         "reopen",
         "release",
+        "yield",
         "cancel",
         "heartbeat",
         "gui",
@@ -3526,6 +3651,10 @@ fn supported_nested_command_names() -> BTreeMap<&'static str, BTreeSet<&'static 
             .iter()
             .copied()
             .collect(),
+    );
+    map.insert(
+        "codex",
+        ["doctor", "install", "uninstall"].iter().copied().collect(),
     );
     map.insert(
         "update",
@@ -3587,6 +3716,7 @@ fn supported_cli_command_paths() -> BTreeSet<String> {
         "quickstart",
         "doctor",
         "skill",
+        "codex",
         "update",
         "version",
         "status",
@@ -3617,7 +3747,12 @@ fn supported_cli_command_paths() -> BTreeSet<String> {
 
 fn normalize_skill_token(token: &str) -> Option<String> {
     let trimmed = token
-        .trim_matches(|ch: char| matches!(ch, '`' | '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']'))
+        .trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '`' | '"' | '\'' | ',' | ';' | ':' | '.' | '(' | ')' | '[' | ']'
+            )
+        })
         .trim();
     if trimmed.is_empty() {
         None
@@ -3626,12 +3761,36 @@ fn normalize_skill_token(token: &str) -> Option<String> {
     }
 }
 
+fn extract_skill_command_snippets(line: &str) -> Vec<String> {
+    let trimmed_line = line.trim_start();
+    let mut snippets = Vec::new();
+    if trimmed_line.starts_with(PRODUCT_NAME) {
+        snippets.push(trimmed_line.to_string());
+    }
+
+    let mut remainder = line;
+    while let Some(start) = remainder.find('`') {
+        let after_start = &remainder[start + 1..];
+        let Some(end) = after_start.find('`') else {
+            break;
+        };
+        let snippet = after_start[..end].trim();
+        if snippet.contains(PRODUCT_NAME) {
+            snippets.push(snippet.to_string());
+        }
+        remainder = &after_start[end + 1..];
+    }
+
+    snippets
+}
+
 fn extract_skill_command_paths(skill_body: &str) -> BTreeSet<String> {
     let top_level = [
         "init",
         "quickstart",
         "doctor",
         "skill",
+        "codex",
         "update",
         "version",
         "status",
@@ -3656,31 +3815,30 @@ fn extract_skill_command_paths(skill_body: &str) -> BTreeSet<String> {
     let mut paths = BTreeSet::<String>::new();
 
     for line in skill_body.lines() {
-        if !line.contains(PRODUCT_NAME) {
-            continue;
-        }
-        let tokens = line
-            .split_whitespace()
-            .filter_map(normalize_skill_token)
-            .collect::<Vec<_>>();
-        let Some(command_index) = tokens.iter().position(|token| token == PRODUCT_NAME) else {
-            continue;
-        };
-        let after_command = &tokens[command_index + 1..];
-        let Some((top_index, top_command)) = after_command
-            .iter()
-            .enumerate()
-            .find_map(|(idx, token)| top_level.contains(token.as_str()).then_some((idx, token)))
-        else {
-            continue;
-        };
-        paths.insert(top_command.clone());
-        if nested.contains_key(top_command.as_str())
-            && let Some(subcommand) = after_command[top_index + 1..]
-                .iter()
-                .find(|token| !token.starts_with('-'))
-        {
-            paths.insert(format!("{}/{}", top_command, subcommand));
+        for snippet in extract_skill_command_snippets(line) {
+            let tokens = snippet
+                .split_whitespace()
+                .filter_map(normalize_skill_token)
+                .collect::<Vec<_>>();
+            let Some(command_index) = tokens.iter().position(|token| token == PRODUCT_NAME) else {
+                continue;
+            };
+            let after_command = &tokens[command_index + 1..];
+            let Some((top_index, top_command)) =
+                after_command.iter().enumerate().find_map(|(idx, token)| {
+                    top_level.contains(token.as_str()).then_some((idx, token))
+                })
+            else {
+                continue;
+            };
+            paths.insert(top_command.clone());
+            if nested.contains_key(top_command.as_str())
+                && let Some(subcommand) = after_command[top_index + 1..]
+                    .iter()
+                    .find(|token| !token.starts_with('-'))
+            {
+                paths.insert(format!("{}/{}", top_command, subcommand));
+            }
         }
     }
 
@@ -10821,6 +10979,10 @@ fn handle_task_gui_connection(
     let path = request.target.path.as_str();
     let query = &request.target.query;
 
+    if method == "OPTIONS" {
+        return write_http_response(stream, "204 No Content", "text/plain; charset=utf-8", &[]);
+    }
+
     if method == "GET" && path == "/health" {
         return write_http_json(stream, "200 OK", &json!({ "ok": true }));
     }
@@ -11313,7 +11475,7 @@ fn write_http_response(
     body: &[u8],
 ) -> Result<()> {
     let headers = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream
@@ -11347,6 +11509,704 @@ fn write_http_json_error(stream: &mut TcpStream, status: &str, message: &str) ->
             "error": message
         }),
     )
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexIntegrationState {
+    schema_version: String,
+    installed_at_utc: String,
+    updated_at_utc: String,
+    app_path: String,
+    backup_app_asar_path: String,
+    launch_agent_path: String,
+    tasknerve_executable: String,
+    panel_repo_root: String,
+    panel_host: String,
+    panel_port: u16,
+}
+
+fn tasknerve_codex_state_path() -> Result<PathBuf> {
+    Ok(resolve_tasknerve_home()?
+        .join("codex")
+        .join("integration.json"))
+}
+
+fn tasknerve_codex_backup_dir() -> Result<PathBuf> {
+    Ok(resolve_tasknerve_home()?.join("codex").join("backup"))
+}
+
+#[cfg(target_os = "macos")]
+fn tasknerve_codex_launch_agent_path() -> Result<PathBuf> {
+    let home = std::env::var("HOME")
+        .with_context(|| "unable to resolve HOME for TaskNerve Codex launch agent")?;
+    Ok(PathBuf::from(home)
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("{CODEX_PANEL_LAUNCH_AGENT_LABEL}.plist")))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn tasknerve_codex_launch_agent_path() -> Result<PathBuf> {
+    bail!("TaskNerve Codex desktop integration is currently supported on macOS only")
+}
+
+fn load_codex_integration_state() -> Result<Option<CodexIntegrationState>> {
+    load_json_optional(&tasknerve_codex_state_path()?)
+}
+
+fn write_codex_integration_state(state: &CodexIntegrationState) -> Result<()> {
+    write_pretty_json(&tasknerve_codex_state_path()?, state)
+}
+
+fn tasknerve_codex_panel_url(host: &str, port: u16) -> String {
+    task_gui_url(host, port, None)
+}
+
+fn codex_panel_origins(host: &str, port: u16) -> Vec<String> {
+    let normalized = match host.trim() {
+        "" | "0.0.0.0" => "127.0.0.1".to_string(),
+        "::" => "localhost".to_string(),
+        value => value.to_string(),
+    };
+    let mut origins = BTreeSet::<String>::new();
+    if normalized.contains(':') && !normalized.starts_with('[') {
+        origins.insert(format!("http://[{}]:{}", normalized, port));
+    } else {
+        origins.insert(format!("http://{}:{}", normalized, port));
+    }
+    if normalized == "127.0.0.1" {
+        origins.insert(format!("http://localhost:{}", port));
+    } else if normalized == "localhost" {
+        origins.insert(format!("http://127.0.0.1:{}", port));
+    }
+    origins.into_iter().collect()
+}
+
+fn ensure_csp_directive_origins(csp: &str, directive: &str, origins: &[String]) -> String {
+    let mut parts = csp
+        .split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let mut found = false;
+    for part in &mut parts {
+        if part.starts_with(directive) {
+            for origin in origins {
+                if !part.contains(origin) {
+                    part.push(' ');
+                    part.push_str(origin);
+                }
+            }
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        let mut part = directive.to_string();
+        for origin in origins {
+            part.push(' ');
+            part.push_str(origin);
+        }
+        parts.push(part);
+    }
+    format!("{};", parts.join("; "))
+}
+
+fn patch_codex_index_html(input: &str, host: &str, port: u16) -> Result<String> {
+    let marker = "<meta http-equiv=\"Content-Security-Policy\" content=\"";
+    let csp_start = input
+        .find(marker)
+        .ok_or_else(|| anyhow!("Codex webview index is missing CSP meta tag"))?;
+    let content_start = csp_start + marker.len();
+    let csp_end = input[content_start..]
+        .find("\">")
+        .map(|offset| content_start + offset)
+        .ok_or_else(|| anyhow!("Codex webview index has malformed CSP meta tag"))?;
+    let origins = codex_panel_origins(host, port);
+    let updated_csp = ensure_csp_directive_origins(
+        &ensure_csp_directive_origins(&input[content_start..csp_end], "frame-src", &origins),
+        "connect-src",
+        &origins,
+    );
+    let mut html = format!(
+        "{}{}{}",
+        &input[..content_start],
+        updated_csp,
+        &input[csp_end..]
+    );
+    if !html.contains(CODEX_PANEL_MARKER) {
+        let injection = format!(
+            "    <script type=\"module\" crossorigin src=\"./assets/{}\"></script>\n</head>",
+            CODEX_PANEL_ASSET_NAME
+        );
+        html = html.replacen("</head>", &injection, 1);
+        if !html.contains(CODEX_PANEL_MARKER) {
+            bail!("failed injecting TaskNerve Codex panel asset into index.html");
+        }
+    }
+    Ok(html)
+}
+
+fn render_codex_panel_script(host: &str, port: u16) -> String {
+    DEFAULT_CODEX_PANEL_SCRIPT.replace(
+        "__TASKNERVE_BASE_URL__",
+        &tasknerve_codex_panel_url(host, port),
+    )
+}
+
+fn command_output_checked(cmd: &mut ProcessCommand, context: &str) -> Result<String> {
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed running {}", context))?;
+    if !output.status.success() {
+        bail!(
+            "{} failed with status {}: {}",
+            context,
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn command_status_checked(cmd: &mut ProcessCommand, context: &str) -> Result<()> {
+    let status = cmd
+        .status()
+        .with_context(|| format!("failed running {}", context))?;
+    if !status.success() {
+        bail!("{} failed with status {}", context, status);
+    }
+    Ok(())
+}
+
+fn codex_panel_health(host: &str, port: u16) -> serde_json::Value {
+    let address = format!("{}:{}", host.trim(), port);
+    let mut stream = match TcpStream::connect(&address) {
+        Ok(stream) => stream,
+        Err(err) => {
+            return json!({
+                "ok": false,
+                "address": address,
+                "error": err.to_string()
+            });
+        }
+    };
+    let _ = stream.set_read_timeout(Some(StdDuration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(StdDuration::from_secs(2)));
+    let request = format!(
+        "GET /health HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        address
+    );
+    if let Err(err) = stream.write_all(request.as_bytes()) {
+        return json!({
+            "ok": false,
+            "address": address,
+            "error": err.to_string()
+        });
+    }
+    let mut response = String::new();
+    if let Err(err) = stream.read_to_string(&mut response) {
+        return json!({
+            "ok": false,
+            "address": address,
+            "error": err.to_string()
+        });
+    }
+    json!({
+        "ok": response.contains("200 OK") && response.contains("\"ok\": true"),
+        "address": address
+    })
+}
+
+fn wait_for_codex_panel_health(host: &str, port: u16, attempts: usize) -> serde_json::Value {
+    for _ in 0..attempts {
+        let payload = codex_panel_health(host, port);
+        if payload["ok"].as_bool().unwrap_or(false) {
+            return payload;
+        }
+        thread::sleep(StdDuration::from_millis(350));
+    }
+    codex_panel_health(host, port)
+}
+
+fn codex_panel_asset_installed(app_asar_path: &Path) -> Result<bool> {
+    if !app_asar_path.exists() {
+        return Ok(false);
+    }
+    let listing = command_output_checked(
+        ProcessCommand::new("npx")
+            .arg("--yes")
+            .arg("@electron/asar")
+            .arg("list")
+            .arg(app_asar_path),
+        "npx @electron/asar list",
+    )?;
+    Ok(listing
+        .lines()
+        .any(|line| line.trim() == format!("/webview/assets/{}", CODEX_PANEL_ASSET_NAME)))
+}
+
+fn codex_backup_asar_path(app_path: &Path) -> Result<PathBuf> {
+    let app_name = app_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Codex.app");
+    Ok(tasknerve_codex_backup_dir()?.join(format!("{}.app.asar.backup", app_name)))
+}
+
+fn resolve_codex_app_path(app_override: Option<&Path>) -> Result<PathBuf> {
+    if let Some(path) = app_override {
+        return Ok(path.to_path_buf());
+    }
+    if let Some(state) = load_codex_integration_state()?
+        && !state.app_path.trim().is_empty()
+    {
+        let path = PathBuf::from(state.app_path);
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let default_path = PathBuf::from(DEFAULT_CODEX_APP_PATH_MACOS);
+        if default_path.exists() {
+            return Ok(default_path);
+        }
+        bail!(
+            "Codex.app not found at {}; pass --app <path> to point at a different bundle",
+            DEFAULT_CODEX_APP_PATH_MACOS
+        );
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        bail!("pass --app <path> to point TaskNerve at a local Codex desktop app bundle");
+    }
+}
+
+fn codex_app_asar_path(app_path: &Path) -> PathBuf {
+    app_path.join("Contents").join("Resources").join("app.asar")
+}
+
+#[cfg(target_os = "macos")]
+fn codex_app_is_running() -> bool {
+    ProcessCommand::new("pgrep")
+        .arg("-x")
+        .arg("Codex")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn maybe_quit_codex_app() -> Result<bool> {
+    if !codex_app_is_running() {
+        return Ok(false);
+    }
+    let _ = ProcessCommand::new("osascript")
+        .arg("-e")
+        .arg("tell application \"Codex\" to quit")
+        .status();
+    for _ in 0..40 {
+        if !codex_app_is_running() {
+            return Ok(true);
+        }
+        thread::sleep(StdDuration::from_millis(250));
+    }
+    bail!("Codex.app did not exit after a polite quit request")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn maybe_quit_codex_app() -> Result<bool> {
+    Ok(false)
+}
+
+#[cfg(target_os = "macos")]
+fn maybe_reopen_codex_app(app_path: &Path, reopen: bool) -> Result<bool> {
+    if !reopen {
+        return Ok(false);
+    }
+    command_status_checked(
+        ProcessCommand::new("open").arg("-a").arg(app_path),
+        "open -a Codex.app",
+    )?;
+    Ok(true)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn maybe_reopen_codex_app(_app_path: &Path, _reopen: bool) -> Result<bool> {
+    Ok(false)
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn render_codex_launch_agent_plist(
+    tasknerve_executable: &Path,
+    panel_repo_root: &Path,
+    host: &str,
+    port: u16,
+) -> String {
+    let args = vec![
+        tasknerve_executable.display().to_string(),
+        "--repo-root".to_string(),
+        panel_repo_root.display().to_string(),
+        "task".to_string(),
+        "gui".to_string(),
+        "--host".to_string(),
+        host.to_string(),
+        "--port".to_string(),
+        port.to_string(),
+        "--no-open".to_string(),
+    ];
+    let args_xml = args
+        .iter()
+        .map(|arg| format!("    <string>{}</string>", xml_escape(arg)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let tasknerve_home = resolve_tasknerve_home().unwrap_or_else(|_| PathBuf::from(".tasknerve"));
+    let log_path = tasknerve_home.join("codex").join("launch-agent.log");
+    let err_path = tasknerve_home.join("codex").join("launch-agent.err.log");
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key>\n  <string>{}</string>\n  <key>ProgramArguments</key>\n  <array>\n{}\n  </array>\n  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <true/>\n  <key>WorkingDirectory</key>\n  <string>{}</string>\n  <key>StandardOutPath</key>\n  <string>{}</string>\n  <key>StandardErrorPath</key>\n  <string>{}</string>\n</dict>\n</plist>\n",
+        CODEX_PANEL_LAUNCH_AGENT_LABEL,
+        args_xml,
+        xml_escape(&panel_repo_root.display().to_string()),
+        xml_escape(&log_path.display().to_string()),
+        xml_escape(&err_path.display().to_string())
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn load_codex_launch_agent(agent_path: &Path) -> Result<()> {
+    let _ = ProcessCommand::new("launchctl")
+        .arg("unload")
+        .arg(agent_path)
+        .status();
+    command_status_checked(
+        ProcessCommand::new("launchctl")
+            .arg("load")
+            .arg("-w")
+            .arg(agent_path),
+        "launchctl load",
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn load_codex_launch_agent(_agent_path: &Path) -> Result<()> {
+    bail!("TaskNerve Codex desktop integration is currently supported on macOS only")
+}
+
+#[cfg(target_os = "macos")]
+fn unload_codex_launch_agent(agent_path: &Path) -> Result<bool> {
+    if !agent_path.exists() {
+        return Ok(false);
+    }
+    let _ = ProcessCommand::new("launchctl")
+        .arg("unload")
+        .arg(agent_path)
+        .status();
+    Ok(true)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn unload_codex_launch_agent(_agent_path: &Path) -> Result<bool> {
+    Ok(false)
+}
+
+#[cfg(target_os = "macos")]
+fn codex_launch_agent_loaded() -> bool {
+    command_output_checked(
+        ProcessCommand::new("launchctl").arg("list"),
+        "launchctl list",
+    )
+    .map(|output| output.contains(CODEX_PANEL_LAUNCH_AGENT_LABEL))
+    .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn codex_launch_agent_loaded() -> bool {
+    false
+}
+
+fn codex_integration_doctor_report(app_override: Option<&Path>) -> Result<serde_json::Value> {
+    let state = load_codex_integration_state()?;
+    let app_path = match app_override {
+        Some(path) => Some(path.to_path_buf()),
+        None => resolve_codex_app_path(None).ok(),
+    };
+    let app_detected = app_path.as_ref().is_some_and(|path| path.exists());
+    let app_asar_path = app_path.as_ref().map(|path| codex_app_asar_path(path));
+    let panel_asset_installed = match app_asar_path.as_ref() {
+        Some(path) if path.exists() && command_exists("npx") => {
+            codex_panel_asset_installed(path).unwrap_or(false)
+        }
+        _ => false,
+    };
+    let launch_agent_path = tasknerve_codex_launch_agent_path().ok();
+    let host = state
+        .as_ref()
+        .map(|value| value.panel_host.as_str())
+        .unwrap_or(DEFAULT_CODEX_PANEL_HOST);
+    let port = state
+        .as_ref()
+        .map(|value| value.panel_port)
+        .unwrap_or(DEFAULT_CODEX_PANEL_PORT);
+    let panel_health = codex_panel_health(host, port);
+    let skill = tasknerve_skill_doctor_report();
+    let hint = if !app_detected {
+        "install Codex.app or rerun `tasknerve codex install --app <path>`".to_string()
+    } else if !panel_asset_installed {
+        "run `tasknerve codex install` to patch the local Codex desktop bundle".to_string()
+    } else if !panel_health["ok"].as_bool().unwrap_or(false) {
+        "TaskNerve panel service is not healthy; rerun `tasknerve codex install --force`"
+            .to_string()
+    } else {
+        "TaskNerve Codex integration looks healthy".to_string()
+    };
+    Ok(json!({
+        "schema_version": SCHEMA_CODEX_INTEGRATION,
+        "generated_at_utc": now_utc(),
+        "app_detected": app_detected,
+        "app_path": app_path.as_ref().map(|path| path.display().to_string()),
+        "app_asar_path": app_asar_path.as_ref().map(|path| path.display().to_string()),
+        "panel_asset_installed": panel_asset_installed,
+        "launch_agent": {
+            "path": launch_agent_path.as_ref().map(|path| path.display().to_string()),
+            "loaded": launch_agent_path.as_ref().is_some_and(|path| path.exists()) && codex_launch_agent_loaded(),
+        },
+        "panel_health": panel_health,
+        "panel_url": tasknerve_codex_panel_url(host, port),
+        "state": state,
+        "skill": {
+            "ok": skill["ok"].as_bool().unwrap_or(false),
+            "summary": skill["summary"].clone()
+        },
+        "summary": {
+            "hint": hint
+        }
+    }))
+}
+
+#[cfg(target_os = "macos")]
+fn install_codex_integration(
+    repo_root: &Path,
+    app_override: Option<&Path>,
+    panel_repo_root: Option<&Path>,
+    host: &str,
+    port: u16,
+    force: bool,
+) -> Result<serde_json::Value> {
+    if !command_exists("npx") {
+        bail!("npx is required to patch Codex.app locally");
+    }
+    if !command_exists("codesign") {
+        bail!("codesign is required to re-sign the patched Codex.app bundle");
+    }
+    let app_path = resolve_codex_app_path(app_override)?;
+    let app_asar_path = codex_app_asar_path(&app_path);
+    if !app_asar_path.exists() {
+        bail!("Codex app bundle is missing {}", app_asar_path.display());
+    }
+    let panel_repo_root = panel_repo_root.unwrap_or(repo_root);
+    let tasknerve_executable =
+        std::env::current_exe().with_context(|| "failed resolving current tasknerve executable")?;
+    let backup_path = codex_backup_asar_path(&app_path)?;
+    if !backup_path.exists() {
+        if let Some(parent) = backup_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed creating {}", parent.display()))?;
+        }
+        fs::copy(&app_asar_path, &backup_path).with_context(|| {
+            format!(
+                "failed backing up {} to {}",
+                app_asar_path.display(),
+                backup_path.display()
+            )
+        })?;
+    }
+    let was_running = maybe_quit_codex_app()?;
+    let work_dir = std::env::temp_dir().join(format!("tasknerve-codex-patch-{}", Uuid::new_v4()));
+    let extract_dir = work_dir.join("extract");
+    fs::create_dir_all(&extract_dir)
+        .with_context(|| format!("failed creating {}", extract_dir.display()))?;
+    command_status_checked(
+        ProcessCommand::new("npx")
+            .arg("--yes")
+            .arg("@electron/asar")
+            .arg("extract")
+            .arg(&app_asar_path)
+            .arg(&extract_dir),
+        "npx @electron/asar extract",
+    )?;
+    let index_path = extract_dir.join("webview").join("index.html");
+    let patched_index = patch_codex_index_html(
+        &fs::read_to_string(&index_path)
+            .with_context(|| format!("failed reading {}", index_path.display()))?,
+        host,
+        port,
+    )?;
+    fs::write(&index_path, patched_index)
+        .with_context(|| format!("failed writing {}", index_path.display()))?;
+    let asset_path = extract_dir
+        .join("webview")
+        .join("assets")
+        .join(CODEX_PANEL_ASSET_NAME);
+    fs::write(&asset_path, render_codex_panel_script(host, port))
+        .with_context(|| format!("failed writing {}", asset_path.display()))?;
+    let packed_asar = work_dir.join("app.patched.asar");
+    command_status_checked(
+        ProcessCommand::new("npx")
+            .arg("--yes")
+            .arg("@electron/asar")
+            .arg("pack")
+            .arg(&extract_dir)
+            .arg(&packed_asar),
+        "npx @electron/asar pack",
+    )?;
+    fs::copy(&packed_asar, &app_asar_path).with_context(|| {
+        format!(
+            "failed replacing {} with patched archive {}",
+            app_asar_path.display(),
+            packed_asar.display()
+        )
+    })?;
+    command_status_checked(
+        ProcessCommand::new("codesign")
+            .arg("--force")
+            .arg("--deep")
+            .arg("--sign")
+            .arg("-")
+            .arg(&app_path),
+        "codesign TaskNerve-patched Codex.app",
+    )?;
+    let launch_agent_path = tasknerve_codex_launch_agent_path()?;
+    if let Some(parent) = launch_agent_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed creating {}", parent.display()))?;
+    }
+    let launch_agent_contents =
+        render_codex_launch_agent_plist(&tasknerve_executable, panel_repo_root, host, port);
+    fs::write(&launch_agent_path, launch_agent_contents).with_context(|| {
+        format!(
+            "failed writing launch agent {}",
+            launch_agent_path.display()
+        )
+    })?;
+    load_codex_launch_agent(&launch_agent_path)?;
+    let skill_path = install_tasknerve_skill_to_codex(true)?;
+    let panel_health = wait_for_codex_panel_health(host, port, 16);
+    let reopened_codex = maybe_reopen_codex_app(&app_path, was_running)?;
+    let now = now_utc();
+    let state = CodexIntegrationState {
+        schema_version: SCHEMA_CODEX_INTEGRATION.to_string(),
+        installed_at_utc: now.clone(),
+        updated_at_utc: now.clone(),
+        app_path: app_path.display().to_string(),
+        backup_app_asar_path: backup_path.display().to_string(),
+        launch_agent_path: launch_agent_path.display().to_string(),
+        tasknerve_executable: tasknerve_executable.display().to_string(),
+        panel_repo_root: panel_repo_root.display().to_string(),
+        panel_host: host.to_string(),
+        panel_port: port,
+    };
+    write_codex_integration_state(&state)?;
+    let _ = fs::remove_dir_all(&work_dir);
+    Ok(json!({
+        "schema_version": SCHEMA_CODEX_INTEGRATION,
+        "generated_at_utc": now_utc(),
+        "app_path": app_path.display().to_string(),
+        "app_asar_path": app_asar_path.display().to_string(),
+        "backup_app_asar_path": backup_path.display().to_string(),
+        "launch_agent_path": launch_agent_path.display().to_string(),
+        "skill_path": skill_path.display().to_string(),
+        "panel_repo_root": panel_repo_root.display().to_string(),
+        "panel_url": tasknerve_codex_panel_url(host, port),
+        "panel_health": panel_health,
+        "reopened_codex": reopened_codex,
+        "forced": force
+    }))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_codex_integration(
+    _repo_root: &Path,
+    _app_override: Option<&Path>,
+    _panel_repo_root: Option<&Path>,
+    _host: &str,
+    _port: u16,
+    _force: bool,
+) -> Result<serde_json::Value> {
+    bail!("TaskNerve Codex desktop integration is currently supported on macOS only")
+}
+
+#[cfg(target_os = "macos")]
+fn uninstall_codex_integration(app_override: Option<&Path>) -> Result<serde_json::Value> {
+    let state = load_codex_integration_state()?;
+    let app_path = match app_override {
+        Some(path) => path.to_path_buf(),
+        None => resolve_codex_app_path(None)?,
+    };
+    let app_asar_path = codex_app_asar_path(&app_path);
+    let backup_path = state
+        .as_ref()
+        .map(|value| PathBuf::from(&value.backup_app_asar_path))
+        .filter(|path| path.exists())
+        .unwrap_or(codex_backup_asar_path(&app_path)?);
+    let was_running = maybe_quit_codex_app()?;
+    let launch_agent_path = tasknerve_codex_launch_agent_path()?;
+    let launch_agent_removed = unload_codex_launch_agent(&launch_agent_path)?;
+    if launch_agent_path.exists() {
+        let _ = fs::remove_file(&launch_agent_path);
+    }
+    let restored_backup = if backup_path.exists() {
+        fs::copy(&backup_path, &app_asar_path).with_context(|| {
+            format!(
+                "failed restoring backup {} to {}",
+                backup_path.display(),
+                app_asar_path.display()
+            )
+        })?;
+        command_status_checked(
+            ProcessCommand::new("codesign")
+                .arg("--force")
+                .arg("--deep")
+                .arg("--sign")
+                .arg("-")
+                .arg(&app_path),
+            "codesign restored Codex.app",
+        )?;
+        true
+    } else {
+        false
+    };
+    let reopened_codex = maybe_reopen_codex_app(&app_path, was_running)?;
+    let state_path = tasknerve_codex_state_path()?;
+    if state_path.exists() {
+        let _ = fs::remove_file(state_path);
+    }
+    Ok(json!({
+        "schema_version": SCHEMA_CODEX_INTEGRATION,
+        "generated_at_utc": now_utc(),
+        "app_path": app_path.display().to_string(),
+        "backup_app_asar_path": backup_path.display().to_string(),
+        "restored_backup": restored_backup,
+        "launch_agent_removed": launch_agent_removed,
+        "reopened_codex": reopened_codex
+    }))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn uninstall_codex_integration(_app_override: Option<&Path>) -> Result<serde_json::Value> {
+    bail!("TaskNerve Codex desktop integration is currently supported on macOS only")
 }
 
 fn resolve_task_gui_project_selection(
@@ -26883,6 +27743,19 @@ mod tests {
     }
 
     #[test]
+    fn extract_skill_command_paths_ignores_prose_mentions_of_tasknerve() {
+        let skill = r#"
+- If `current_executable_shadowed` is `true` or `unsupported_command_paths` is non-empty, reinstall tasknerve from the canonical repo and align the local skill with:
+- `tasknerve skill install-codex --overwrite`
+"#;
+        let paths = extract_skill_command_paths(skill);
+        assert_eq!(
+            paths,
+            BTreeSet::from(["skill".to_string(), "skill/install-codex".to_string(),])
+        );
+    }
+
+    #[test]
     fn unsupported_skill_command_paths_flags_unknown_nested_commands() {
         let skill = r#"
 - `tasknerve --repo-root . task teleport --agent agent.runner`
@@ -28953,6 +29826,30 @@ Prefer evidence-backed tasks.
             Some("application/json")
         );
         assert_eq!(parsed.body, br#"{"task_id":"x"}"#);
+    }
+
+    #[test]
+    fn patch_codex_index_html_adds_panel_asset_and_localhost_origins() {
+        let input = r#"<!doctype html>
+<html lang="en">
+  <head>
+    <title>Codex</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src &#39;none&#39;; frame-src &#39;self&#39; blob:; connect-src &#39;self&#39; https://ab.chatgpt.com https://cdn.openai.com;">
+</head>
+  <body><div id="root"></div></body>
+</html>
+"#;
+        let output = patch_codex_index_html(input, "127.0.0.1", 7788).expect("patch index");
+        assert!(output.contains(CODEX_PANEL_MARKER));
+        assert!(output.contains("http://127.0.0.1:7788"));
+        assert!(output.contains("http://localhost:7788"));
+    }
+
+    #[test]
+    fn render_codex_panel_script_embeds_expected_panel_url() {
+        let rendered = render_codex_panel_script("127.0.0.1", 7788);
+        assert!(rendered.contains("http://127.0.0.1:7788"));
+        assert!(!rendered.contains("__TASKNERVE_BASE_URL__"));
     }
 
     #[test]
