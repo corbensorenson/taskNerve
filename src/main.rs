@@ -9216,13 +9216,29 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     println!(
                         "[tasknerve-task] dry_run_checks task_id={} backend={} active_checks={} new_checks={} requirement_would_block={} local_timeout_seconds={} auto_bridge_sync={}",
                         payload["task_id"].as_str().unwrap_or("unknown"),
-                        payload["quality_checks"]["backend"].as_str().unwrap_or("unknown"),
-                        payload["quality_checks"]["existing_active_count"].as_u64().unwrap_or(0),
-                        payload["quality_checks"]["new_regressions"].as_array().map(|rows| rows.len()).unwrap_or(0)
-                            + payload["quality_checks"]["new_benchmarks"].as_array().map(|rows| rows.len()).unwrap_or(0),
-                        payload["quality_checks"]["requirement_would_block"].as_bool().unwrap_or(false),
-                        payload["quality_checks"]["local_timeout_seconds"].as_u64().unwrap_or(0),
-                        payload["auto_bridge_sync"]["would_queue"].as_bool().unwrap_or(false)
+                        payload["quality_checks"]["backend"]
+                            .as_str()
+                            .unwrap_or("unknown"),
+                        payload["quality_checks"]["existing_active_count"]
+                            .as_u64()
+                            .unwrap_or(0),
+                        payload["quality_checks"]["new_regressions"]
+                            .as_array()
+                            .map(|rows| rows.len())
+                            .unwrap_or(0)
+                            + payload["quality_checks"]["new_benchmarks"]
+                                .as_array()
+                                .map(|rows| rows.len())
+                                .unwrap_or(0),
+                        payload["quality_checks"]["requirement_would_block"]
+                            .as_bool()
+                            .unwrap_or(false),
+                        payload["quality_checks"]["local_timeout_seconds"]
+                            .as_u64()
+                            .unwrap_or(0),
+                        payload["auto_bridge_sync"]["would_queue"]
+                            .as_bool()
+                            .unwrap_or(false)
                     );
                 }
                 return Ok(());
@@ -16733,7 +16749,10 @@ fn queue_bridge_auto_sync_background(
         cmd.arg("--verification-poll-seconds")
             .arg(poll_seconds.to_string());
     }
-    if let Some(timeout_seconds) = options.local_check_timeout_seconds.map(|value| value.max(1)) {
+    if let Some(timeout_seconds) = options
+        .local_check_timeout_seconds
+        .map(|value| value.max(1))
+    {
         cmd.env(
             "TASKNERVE_LOCAL_CHECK_TIMEOUT_SECONDS",
             timeout_seconds.to_string(),
@@ -20479,7 +20498,9 @@ fn normalize_task_exclusion_list(
     }
     let normalized = dedupe_keep_order(normalized);
     if let Some(requested_task_id) = requested_task_id
-        && normalized.iter().any(|task_id| task_id == requested_task_id)
+        && normalized
+            .iter()
+            .any(|task_id| task_id == requested_task_id)
     {
         bail!(
             "cannot exclude explicitly requested task {} from task dispatch",
@@ -22500,13 +22521,11 @@ fn task_current_payload(
     let status_map = task_status_map(state);
     let now = Utc::now();
     let indices = agent_owned_claim_indices(state, agent_id);
-    let (fresh_indices, stale_indices): (Vec<_>, Vec<_>) = indices.into_iter().partition(|idx| {
-        !task_claim_is_stale(
-            &state.tasks[*idx],
-            now,
-            DEFAULT_TASK_CLAIM_STALE_MINUTES,
-        )
-    });
+    let (fresh_indices, stale_indices): (Vec<_>, Vec<_>) = indices
+        .into_iter()
+        .partition(|idx| {
+            !task_claim_is_stale(&state.tasks[*idx], now, DEFAULT_TASK_CLAIM_STALE_MINUTES)
+        });
     let ordered_indices = fresh_indices
         .iter()
         .chain(stale_indices.iter())
@@ -26644,7 +26663,10 @@ mod tests {
             payload["primary_task_id"],
             serde_json::Value::from("task_fresh")
         );
-        assert_eq!(payload["task"]["task_id"], serde_json::Value::from("task_fresh"));
+        assert_eq!(
+            payload["task"]["task_id"],
+            serde_json::Value::from("task_fresh")
+        );
         assert_eq!(
             payload["stale_claims"][0]["task_id"],
             serde_json::Value::from("task_stale")
