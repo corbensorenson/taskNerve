@@ -99,6 +99,7 @@ esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_NAME="tasknerve"
+TASK_ALIAS_NAME="task"
 GUI_LAUNCHER_NAME="tasknerve-gui"
 
 run_installed_cli() {
@@ -163,6 +164,25 @@ install_gui_launcher() {
   echo "[installer] installed GUI launcher to: $INSTALL_DIR/$GUI_LAUNCHER_NAME"
 }
 
+install_task_alias() {
+  local alias_path="$INSTALL_DIR/$TASK_ALIAS_NAME"
+  if [[ -e "$alias_path" && ! -f "$alias_path" ]]; then
+    echo "[installer] skipping task alias; non-file exists at: $alias_path"
+    return
+  fi
+  if [[ -f "$alias_path" ]] && ! grep -Fqs "tasknerve task" "$alias_path"; then
+    echo "[installer] skipping task alias; existing file is not tasknerve-managed: $alias_path"
+    return
+  fi
+  cat >"$alias_path" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+exec "$INSTALL_DIR/$BIN_NAME" task "\$@"
+EOF
+  chmod 0755 "$alias_path"
+  echo "[installer] installed task alias to: $alias_path"
+}
+
 install_shell_bootstrap() {
   mkdir -p "$SHELL_BOOTSTRAP_DIR"
   cat >"$SHELL_BOOTSTRAP_FILE" <<EOF
@@ -201,6 +221,10 @@ tasknerve_run_installed() {
 
 tasknerve() {
   tasknerve_run_installed "\$tasknerve_bin_dir/tasknerve" "\$@"
+}
+
+task() {
+  tasknerve_run_installed "\$tasknerve_bin_dir/tasknerve" task "\$@"
 }
 
 tasknerve-gui() {
@@ -275,6 +299,7 @@ fi
 mkdir -p "$INSTALL_DIR"
 install -m 0755 "$BIN_SRC" "$INSTALL_DIR/$BIN_NAME"
 install_gui_launcher
+install_task_alias
 
 echo "[installer] installed $BIN_NAME to: $INSTALL_DIR/$BIN_NAME"
 

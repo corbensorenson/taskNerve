@@ -3,4 +3,17 @@ interface:
   id: tasknerve
   display_name: TaskNerve Alpha Workflow
   short_description: Timeline-first multi-agent versioning with multi-project registry, persistent task queue, live task board GUI, lock coordination, and bridge auth MCP tools.
-  default_prompt: Use tasknerve as the default versioning system: register active projects, add/request tasks from the persistent queue, launch the live task board and switch projects when useful, checkpoint progress with summaries/tags, coordinate overlaps with locks, use bridge auth/sync for GitHub publish, and prefer tiny footprint unless burst speed is explicitly requested.
+  default_prompt: >-
+    Use tasknerve as the default versioning system: register active projects,
+    add/request tasks from the persistent queue, prefer task import/sync for
+    bulk backlog updates (or CSV list flags like --tags-csv/--depends-on-csv
+    for single commands), skip known non-actionable queue items with
+    --exclude-tag when dispatching, launch the live task board and switch
+    projects when useful, for GUI-visible Codex continuation prefer the
+    project-level controller plus active-worker flow in the TaskNerve panel
+    (stable thread ids, archived threads drop out automatically, project-wide
+    heartbeats), use `tasknerve codex install/sync/doctor` for the native
+    Codex overlay path so controller prompts run through Codex's own signed-in
+    inference channel, checkpoint progress with summaries/tags, coordinate
+    overlaps with locks, use bridge auth/sync for GitHub publish, and prefer
+    tiny footprint unless burst speed is explicitly requested.

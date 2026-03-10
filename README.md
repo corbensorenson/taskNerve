@@ -97,6 +97,12 @@ tasknerve skill doctor --json
 
 If your machine has trouble executing script-based launchers directly, opening a new zsh/bash shell after install is enough to pick up the bootstrap and keep `tasknerve` usable through the shell command name.
 
+On Unix installs, TaskNerve also installs a short `task` shim for queue commands (equivalent to `tasknerve task ...`), for example:
+
+```bash
+task --repo-root . start --agent agent.worker --json
+```
+
 ## Update Workflow
 
 TaskNerve now has a built-in updater with a managed checkout under `TASKNERVE_HOME`.
@@ -184,6 +190,7 @@ tasknerve --repo-root . task start --agent agent.worker
 tasknerve task start --repo-root . --agent agent.worker --focus compiler --peek-open 3 --json
 tasknerve --repo-root . task start --agent agent.worker --task-id <task_id>
 tasknerve --repo-root . task request --agent agent.worker --exclude-task-id <task_id> --json
+tasknerve --repo-root . task request --agent agent.worker --exclude-tag blocked-external --json
 tasknerve --repo-root . task progress --task-id <task_id> --agent agent.worker --note "landed parser wiring"
 tasknerve --repo-root . task note --task-id <task_id> --agent agent.worker --message "captured benchmark delta" --artifact artifacts/report.json
 tasknerve --repo-root . task block --task-id <task_id> --agent agent.worker --reason "waiting on schema decision" --claim-next
@@ -199,9 +206,12 @@ When you are only adding one task, use:
 
 ```bash
 tasknerve --repo-root . task add --title "Implement feature X" --priority 10 --tag feature
+tasknerve --repo-root . task add --title "Implement feature X" --priority 10 --tags-csv feature,compiler --depends-on-csv task_a,task_b
 ```
 
 `task start` is the normal agent entrypoint: it resumes the agent's current claim if one exists, otherwise it claims the next best task. Use `task request` when you want preview mode (`--no-claim`, `--max`), explicit scheduling diagnostics, or to bypass your current claim with `--skip-owned`.
+
+`task request|start` support `--exclude-tag <tag>` so agents can skip known non-actionable classes like `blocked-external` without manual release/retry loops.
 
 `task advance` is the tight completion loop: it is equivalent to `task done --claim-next`, but easier for agents to discover from `--help` and easier to standardize in shared skills.
 
@@ -222,6 +232,8 @@ When an agent already owns a claim, `task request` now returns that owned claim 
 For tighter agent loops, `task request --peek-open N` and `task start --peek-open N` return the next ready open candidates alongside the selected task. Use `task request|start --exclude-task-id <task_id>` when you just released or blocked one task and want the next dispatch to skip that exact item. JSON `task request`, `task start`, `task current`, and `task show` payloads can also include deterministic plan-derived `context` with source refs, acceptance criteria, and a next recommended substep. When multiple claims exist, `task current --json` now prefers a non-stale primary claim and exposes any stale carryover claims under `stale_claims`.
 
 Task lifecycle operations (`add`, `edit`, `claim`, `done`, `block`, `reopen`, `release`, `remove`) are mirrored into timeline events.
+
+`task edit --clear-depends-on --depends-on ...` is supported as an atomic dependency replacement, and no-op `task edit` calls are idempotent success (safe for retries).
 
 `task sync` now preserves claimed tasks by default even when a living plan file no longer mentions them. Use `--allow-drop-claimed` only when you intentionally want plan reconciliation to retire already claimed work.
 
@@ -339,6 +351,8 @@ export TASKNERVE_DEV_AUTO_INSTALL_TIMEOUT_SECONDS=300
 
 Use this when migrating large plan backlogs into tasknerve without fragile shell glue.
 
+For one-off CLI calls, `task add/edit` also support CSV list flags (`--tags-csv`, `--depends-on-csv`) to avoid shell array quoting pitfalls.
+
 ```bash
 tasknerve --repo-root . task import --file /path/to/tasks.tsv
 ```
@@ -428,27 +442,50 @@ Launcher notes:
 
 ## Codex Native Panel
 
-TaskNerve now ships an experimental native Codex desktop integration for macOS. It keeps TaskNerve logic in the TaskNerve repo, runs the panel from a local TaskNerve background service, and patches the installed `Codex.app` webview to add a `TaskNerve` sidebar item below `Skills`.
+TaskNerve now ships a native Codex desktop integration for macOS. It patches the local `Codex.app` bundle to add a TaskNerve overlay in the Codex shell, starts a TaskNerve panel service on localhost, and injects a main-process bridge so controller/worker prompting uses the already signed-in Codex app inference path instead of a separate provider login or an iframe-only embed.
 
 Install it:
 
 ```bash
 tasknerve codex doctor --json
 tasknerve codex install --json
+tasknerve codex sync --json
 ```
 
 Useful options:
 
 ```bash
 tasknerve codex install --panel-repo-root /abs/path/to/project --host 127.0.0.1 --port 7788 --json
+tasknerve codex sync --force --json
 tasknerve codex uninstall --json
 ```
 
 Notes:
 - This path is currently macOS-only because it relies on a user LaunchAgent plus a local `Codex.app` bundle patch.
-- `tasknerve codex install` also refreshes the installed Codex skill, starts a stable local TaskNerve panel service, backs up the original `app.asar`, and re-signs the patched app bundle.
-- The embedded panel uses the same TaskNerve GUI/backend as `tasknerve-gui`; it does not duplicate task logic inside Codex.
+- `tasknerve codex install` refreshes the installed TaskNerve skill, starts a stable local TaskNerve panel service, patches `Codex.app` in place, injects a native bridge for `startThread`/`startTurn`, backs up the original `app.asar`, and re-signs the patched app bundle.
+- `tasknerve codex sync` is the reapply/repair path. It compares the current `app.asar` hash against the recorded patched hash, repairs drift after Codex updates, and keeps both the panel LaunchAgent and the sync LaunchAgent aligned.
+- The native overlay is project-first: pick the project, bind one active Codex conversation as the controller, let TaskNerve adopt the non-archived project threads as workers, and send project-wide heartbeats from the control panel.
+- The embedded panel now treats active non-archived Codex conversations under the selected project as the worker pool. Set one conversation as the controller, let TaskNerve adopt the active worker threads, and queue project-wide heartbeats without depending on the visible conversation title.
+- The controller path is intentionally Codex-native. TaskNerve now prefers the app’s own authenticated inference channel through the injected bridge and only falls back to the Codex CLI resume flow if that native bridge is unavailable.
 - The design/maintenance notes for this path live in [docs/codex_native_integration_plan.md](/Users/adimus/Documents/taskNerve/docs/codex_native_integration_plan.md).
+
+Codex conversation binding and prompt queue from CLI:
+
+```bash
+tasknerve --repo-root . codex thread list --json
+tasknerve --repo-root . codex thread bind --agent agent.worker --thread-id <codex_session_id> --label "Agent Worker"
+tasknerve --repo-root . codex inject --agent agent.worker --continue-task --cycles 5 --background --json
+tasknerve --repo-root . codex inject --agent agent.worker --prompt "Please continue on the current compiler task." --background --json
+```
+
+`codex inject --continue-task` queues a task-aware heartbeat prompt that resumes or claims the agent's current TaskNerve task, injects task context into the bound Codex conversation, and reminds the conversation to use `task current`, `task heartbeat`, `task advance`, and `task release` as the operating contract.
+
+In the GUI/embedded panel, the intended flow is simpler:
+- choose the project
+- open or resume as many Codex conversations as you want in that project
+- mark one conversation as the controller
+- use `adopt active workers` or `heartbeat active workers`
+- archive a Codex conversation when you want it removed from the active worker pool
 
 Task maintenance from CLI:
 

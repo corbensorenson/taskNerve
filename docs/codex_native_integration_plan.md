@@ -2,67 +2,99 @@
 
 ## Goal
 
-Make TaskNerve feel native inside Codex without reimplementing TaskNerve's queue, timeline, advisor, or bridge logic inside the Codex codebase.
+Make TaskNerve feel first-class inside Codex:
+- no browser-tab dependency
+- no iframe as the primary product surface
+- no second sign-in for advisor/controller turns
+- no dependence on visible chat titles for worker routing
 
-## What We Found
+TaskNerve should own project/task orchestration while Codex continues to own authenticated inference and conversation UX.
 
-- The public `openai/codex` repository exposes the launcher and app-server surfaces, but not the exact desktop sidebar shell that ships in the installed Electron app.
-- The installed `/Applications/Codex.app` bundle contains the real packaged webview frontend in `app.asar`.
-- That packaged frontend can be patched locally, but it is not a stable upstream extension API.
+## Adopted Architecture
 
-## Adopted Approach
+### 1. TaskNerve stays authoritative for project state
 
-### 1. Keep TaskNerve core authoritative
-
-TaskNerve remains the source of truth for:
-- task queue
+TaskNerve remains the system of record for:
+- project registry
+- task queue and claims
 - timeline/checkpoints
-- bridge and CI integration
-- advisor/reviewer automation
-- multi-project discovery
+- bridge/CI flows
+- advisor workflow state
+- Codex thread bindings and queued heartbeats
 
-### 2. Add a TaskNerve-managed Codex integration layer
+### 2. Codex becomes the native execution surface
 
-TaskNerve now owns a `tasknerve codex` command surface for:
-- install
-- doctor
-- uninstall
+The installed `Codex.app` bundle is patched locally by `tasknerve codex install` so TaskNerve can:
+- add a `TaskNerve` entry to the Codex shell
+- open a native TaskNerve overlay instead of an iframe
+- route controller and worker prompt injection through Codex desktop itself
 
-This keeps setup reproducible and lets the repo version the integration instead of relying on ad hoc local patch steps.
+The overlay is intentionally designed around the user flow:
+- select project
+- bind one active Codex thread as controller
+- let TaskNerve adopt active non-archived project threads as workers
+- talk to the controller from the TaskNerve panel
+- queue project-wide heartbeats to active workers
 
-### 3. Reuse the existing TaskNerve GUI as the embedded surface
+### 3. Native inference bridge, not a separate provider path
 
-Instead of duplicating the GUI in Codex, the integration embeds TaskNerve's existing task/timeline GUI inside the Codex desktop shell.
+TaskNerve now patches Codex main-process code to expose a localhost bridge backed by Codex's own authenticated app-server connection.
 
-Benefits:
-- one UI/backend source of truth
-- no task semantics drift
-- minimal duplicated product logic
+That bridge currently supports:
+- `startThread`
+- `startTurn`
+- `setThreadName`
+- `updateThreadTitle`
+- opening a specific thread in the Codex UI
 
-### 4. Use a local background panel service
+This keeps controller/advisor-style prompting on the user's Codex/ChatGPT subscription path instead of requiring a separate Claude/OpenRouter-style login.
 
-For Codex embedding to feel native, the TaskNerve GUI must already be reachable at a stable local URL.
+### 4. Local panel service remains useful, but only as TaskNerve data transport
 
-On macOS the integration installs a LaunchAgent that keeps the panel endpoint alive at a fixed host/port, so the Codex panel does not depend on a browser tab being open first.
+TaskNerve still runs a localhost panel/backend service under a LaunchAgent because the native overlay needs stable access to project/task APIs.
 
-### 5. Patch the local Codex desktop bundle only as an explicit opt-in
+That service is no longer the product surface by itself. Its job is:
+- serve project/task/codex snapshot APIs
+- accept queue mutations
+- accept controller/heartbeat requests
+- keep the native overlay lightweight
 
-The local patch:
-- widens the packaged webview CSP for the TaskNerve localhost panel
-- injects a TaskNerve renderer module into the Codex webview
-- adds a TaskNerve sidebar row below Skills
-- opens an in-app TaskNerve panel with an embedded iframe
+### 5. Patch-and-sync update model
 
-This is intentionally documented and shipped as an experimental local integration path, not represented as an official Codex plugin API.
+Codex does not currently expose a stable plugin/sidebar extension API for this integration, so TaskNerve treats the desktop integration as a managed patch layer.
 
-## Design Constraints
+`tasknerve codex sync` is the important operational command:
+- detect when `Codex.app` updated
+- compare current `app.asar` hash against the last patched hash
+- reapply the TaskNerve renderer patch
+- reapply the TaskNerve native bridge patch
+- refresh LaunchAgents and local skill state
 
-- No secrets are written into Codex bundle assets.
-- The panel talks only to localhost TaskNerve endpoints.
-- TaskNerve install state and backups live under TaskNerve-controlled user paths.
-- The local patch must be reversible with `tasknerve codex uninstall`.
-- The user should not have to manually edit `app.asar`.
+On macOS, install also writes a sync LaunchAgent that watches the patched app/tasknerve executable and periodically reruns `tasknerve codex sync --quiet`.
 
-## Future Upgrade Path
+## Update Resilience Strategy
 
-If OpenAI later exposes a real desktop plugin/sidebar extension API, TaskNerve should move to that supported surface and retire the local bundle patcher. The daemonized panel service and embed-friendly GUI remain useful either way.
+The main integration risk is Codex desktop internals changing between app updates. To reduce that risk:
+- patch application is marker-based and idempotent
+- TaskNerve keeps a clean backup of the original `app.asar`
+- the bridge injector now derives the current main-process symbol names from the shipped `main.js` during patch time instead of hardcoding one build's obfuscated names
+- `doctor` reports hash drift, patch health, panel health, native bridge health, and LaunchAgent state
+
+This is still an unsupported local patch path. Automatic reapply is realistic across normal Codex updates, but a major upstream desktop refactor can still require TaskNerve patch updates.
+
+## Constraints
+
+- macOS-only for now
+- no secrets are embedded into patched assets
+- TaskNerve writes only to TaskNerve-controlled state plus the user-approved local Codex bundle patch
+- uninstall must be reversible through `tasknerve codex uninstall`
+
+## Future Direction
+
+If Codex eventually ships a supported desktop extension API, TaskNerve should move to it and retire the bundle patcher.
+
+Until then, the right model is:
+- native overlay inside Codex
+- Codex-authenticated inference for controller/advisor turns
+- TaskNerve-owned orchestration and project memory
+- syncable patch layer that can keep up with Codex desktop updates

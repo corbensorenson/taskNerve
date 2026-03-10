@@ -33,7 +33,13 @@ Use this skill when any of the following are true:
 - If the user wants TaskNerve embedded directly into the Codex desktop app instead of a browser tab, use:
 - `tasknerve codex doctor --json`
 - `tasknerve codex install --json`
-- This native panel path is currently macOS-only and intentionally patches the local `Codex.app` bundle plus installs a TaskNerve LaunchAgent-backed panel service.
+- `tasknerve codex sync --json`
+- For GUI-visible Codex continuation queues, use stable Codex thread ids instead of visible chat titles:
+- `tasknerve --repo-root . codex thread list --json`
+- `tasknerve --repo-root . codex thread bind --agent <agent_id> --thread-id <codex_session_id> --label "<label>"`
+- `tasknerve --repo-root . codex inject --agent <agent_id> --continue-task --cycles 5 --background --json`
+- In the TaskNerve panel, prefer the project-level flow: choose the project, mark one active Codex thread as the controller, let TaskNerve adopt the active worker threads, and use project-wide heartbeats. Archiving a Codex conversation removes it from the active worker pool.
+- This native Codex path is currently macOS-only and intentionally patches the local `Codex.app` bundle, installs TaskNerve LaunchAgents for the panel and patch sync loop, and routes controller/worker prompting through Codex's own authenticated desktop inference path instead of a separate provider login.
 
 1. Ensure timeline exists:
 - `tasknerve --repo-root . init --branch trunk`
@@ -49,7 +55,9 @@ Use this skill when any of the following are true:
 
 4. Add shared tasks to the persistent queue:
 - `tasknerve --repo-root . task add --title "Implement X" --priority 10 --tag compiler`
+- `tasknerve --repo-root . task add --title "Implement X" --priority 10 --tags-csv compiler,semantic --depends-on-csv task_a,task_b`
 - `tasknerve --repo-root . task list --ready-only`
+- For multi-row backlog loads, prefer `task import`/`task sync` over shell array loops.
 - For backlog scans, use native queue search/filtering instead of reading `.tasknerve/tasks.json` directly:
 - `tasknerve --repo-root . task search --status open --contains compiler --jsonl --fields task_id,title,priority,tags`
 - `tasknerve --repo-root . task list --tag semantic --title-contains "compiler" --json`
@@ -92,6 +100,8 @@ Use this skill when any of the following are true:
 - `tasknerve --repo-root . task approve --all-pending-auto-replenish --agent <agent_id>`
 - To bypass your currently claimed work and fetch the next ready task:
 - `tasknerve --repo-root . task request --agent <agent_id> --skip-owned --json`
+- To skip known non-actionable tags directly at dispatch time:
+- `tasknerve --repo-root . task request --agent <agent_id> --exclude-tag blocked-external --exclude-tag waiting-on-policy --json`
 - To inspect the next ready open candidates without extra list/filter loops:
 - `tasknerve --repo-root . task request --agent <agent_id> --peek-open 3 --json`
 - To explicitly allow one extra concurrent claim when you already own work:
@@ -256,6 +266,7 @@ Recoverability repair:
 - Built-in board supports create/edit/remove directly from the browser.
 - Confirmation-gated scout tasks can also be approved directly from the browser.
 - The board also exposes advisor provider/model selection, low-task policy toggles, workflow visibility, manual review/research triggers, run-detail inspection, and rerun controls.
+- The embedded Codex panel also exposes project-level controller and worker controls: discover active non-archived project conversations, bind one controller thread, adopt the active worker threads, then queue manual controller prompts or project-wide task-continuation heartbeats directly into those visible Codex conversations.
 - Timeline explorer: use the branch selector and `load older` in the GUI to scroll project history.
 - MCP launch tool: `tasknerve_task_gui_launch`
 
@@ -310,6 +321,10 @@ Use this contract to keep task execution deterministic across agents.
 
 3. Use dependencies for ordering rather than comments:
 - `tasknerve --repo-root . task add --title "<child>" --depends-on <task_id>`
+- For command ergonomics, CSV list flags are supported:
+- `tasknerve --repo-root . task add --title "<child>" --tags-csv compiler,queue --depends-on-csv <task_id_a>,<task_id_b>`
+- `tasknerve --repo-root . task edit --task-id <task_id> --clear-depends-on --depends-on-csv <replacement_dep_id>`
+- `task edit` is idempotent for no-op edits, so automation can safely retry clear/update calls.
 - For large imports, define key-based dependencies in TSV and let tasknerve resolve task IDs:
 - `tasknerve --repo-root . task import --file /path/to/tasks.tsv`
 - TSV columns: `key<TAB>priority<TAB>tags_csv<TAB>depends_on_keys_csv<TAB>title<TAB>detail<TAB>agent`

@@ -5,7 +5,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     io::{BufRead, BufReader, Read, Write},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, ExitCode, Stdio},
     thread,
@@ -13,7 +13,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use globset::Glob;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -45,7 +45,10 @@ const SCHEMA_ADVISOR_WORKER_STATE: &str = "tasknerve.advisor_worker_state.v1";
 const SCHEMA_ADVISOR_WORKER_LOCK: &str = "tasknerve.advisor_worker_lock.v1";
 const SCHEMA_GITHUB_ISSUE_MONITOR: &str = "tasknerve.github_issue_monitor.v1";
 const SCHEMA_UPDATE_STATE: &str = "tasknerve.update_state.v1";
-const SCHEMA_CODEX_INTEGRATION: &str = "tasknerve.codex.integration.v1";
+const SCHEMA_CODEX_INTEGRATION: &str = "tasknerve.codex.integration.v2";
+const SCHEMA_CODEX_THREAD_STATE: &str = "tasknerve.codex.thread_state.v1";
+const SCHEMA_CODEX_PROMPT_WORKER_STATE: &str = "tasknerve.codex.prompt_worker_state.v1";
+const SCHEMA_CODEX_PROMPT_WORKER_LOCK: &str = "tasknerve.codex.prompt_worker_lock.v1";
 const BACKEND_MODE_GIT_BRIDGE: &str = "git_bridge";
 const BACKEND_MODE_TASKNERVE_CLOUD: &str = "tasknerve_cloud";
 const QUALITY_CHECK_BACKEND_LOCAL: &str = "local";
@@ -59,6 +62,7 @@ const ADVISOR_WORKFLOW_FILE: &str = "TASKNERVE_WORKFLOW.md";
 const SYSTEM_AGENT_ID: &str = "tasknerve.system";
 const AUTO_BRIDGE_SYNC_STALE_MINUTES: i64 = 30;
 const ADVISOR_WORKER_STALE_MINUTES: i64 = 45;
+const CODEX_PROMPT_WORKER_STALE_MINUTES: i64 = 240;
 const DEFAULT_TASK_CLAIM_STALE_MINUTES: i64 = 90;
 const TASK_GUI_MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const COMMENT_SYNC_MAX_FILE_BYTES: u64 = 512 * 1024;
@@ -70,16 +74,43 @@ const SKILL_REF_WORKFLOW_PROFILES: &str =
 const SKILL_REF_RECOVERY_PLAYBOOKS: &str =
     include_str!("../skills/tasknerve/references/recovery-playbooks.md");
 const DEFAULT_ADVISOR_WORKFLOW_TEMPLATE: &str = include_str!("../templates/TASKNERVE_WORKFLOW.md");
+#[cfg(any(test, target_os = "macos"))]
 const DEFAULT_CODEX_PANEL_SCRIPT: &str = include_str!("../templates/TASKNERVE_CODEX_PANEL.js");
+#[cfg(any(test, target_os = "macos"))]
+const DEFAULT_CODEX_MAIN_BRIDGE_SCRIPT: &str =
+    include_str!("../templates/TASKNERVE_CODEX_MAIN_BRIDGE.js");
 const DEFAULT_UPDATE_REPO_URL: &str = "https://github.com/corbensorenson/taskNerve.git";
 const DEFAULT_UPDATE_BRANCH: &str = "main";
 const PRODUCT_NAME: &str = "tasknerve";
+#[cfg(target_os = "macos")]
 const DEFAULT_CODEX_APP_PATH_MACOS: &str = "/Applications/Codex.app";
+#[cfg(target_os = "macos")]
+const DEFAULT_CODEX_TASKNERVE_APP_PATH_MACOS: &str = "/Applications/Codex TaskNerve.app";
+#[cfg(target_os = "macos")]
+const DEFAULT_CODEX_TASKNERVE_APP_NAME: &str = "Codex TaskNerve";
+#[cfg(target_os = "macos")]
+const DEFAULT_CODEX_TASKNERVE_BUNDLE_ID: &str = "com.openai.codex.tasknerve";
+#[cfg(target_os = "macos")]
+const DEFAULT_CODEX_TASKNERVE_URL_SCHEME: &str = "codex-tasknerve";
 const DEFAULT_CODEX_PANEL_HOST: &str = "127.0.0.1";
 const DEFAULT_CODEX_PANEL_PORT: u16 = 7788;
+const DEFAULT_CODEX_NATIVE_BRIDGE_HOST: &str = "127.0.0.1";
+const DEFAULT_CODEX_NATIVE_BRIDGE_PORT: u16 = 7791;
+const DEFAULT_CODEX_THREAD_DISCOVERY_LIMIT: usize = 24;
+const DEFAULT_CODEX_ACTIVE_THREAD_BATCH_LIMIT: usize = 200;
+const DEFAULT_CODEX_CONTINUE_PROMPT_TEMPLATE: &str = "Please continue working on {project_name} project utilizing the taskNerve system. I believe in you, do your absolute best!";
+const CODEX_CONTROLLER_AGENT_ID: &str = "agent.controller";
 const CODEX_PANEL_ASSET_NAME: &str = "tasknerve-codex-panel.js";
+#[cfg(any(test, target_os = "macos"))]
 const CODEX_PANEL_MARKER: &str = "tasknerve-codex-panel.js";
+#[cfg(target_os = "macos")]
 const CODEX_PANEL_LAUNCH_AGENT_LABEL: &str = "io.tasknerve.codex.panel";
+#[cfg(target_os = "macos")]
+const CODEX_SYNC_LAUNCH_AGENT_LABEL: &str = "io.tasknerve.codex.sync";
+#[cfg(any(test, target_os = "macos"))]
+const CODEX_MAIN_BRIDGE_START_MARKER: &str = "/* tasknerve-codex-main-bridge:start */";
+#[cfg(any(test, target_os = "macos"))]
+const CODEX_MAIN_BRIDGE_END_MARKER: &str = "/* tasknerve-codex-main-bridge:end */";
 const TASK_TAG_HANDOFF_READY: &str = "handoff_ready";
 const TASK_TAG_WAITING_ON_USER: &str = "waiting_on_user";
 
@@ -152,6 +183,12 @@ struct CodexArgs {
     action: CodexAction,
 }
 
+#[derive(Debug, Parser)]
+struct CodexThreadArgs {
+    #[command(subcommand)]
+    action: CodexThreadAction,
+}
+
 #[derive(Debug, Subcommand)]
 enum SkillAction {
     Show {
@@ -187,6 +224,52 @@ enum CodexAction {
         host: String,
         #[arg(long, default_value_t = DEFAULT_CODEX_PANEL_PORT)]
         port: u16,
+        #[arg(long, default_value = DEFAULT_CODEX_NATIVE_BRIDGE_HOST)]
+        bridge_host: String,
+        #[arg(long, default_value_t = DEFAULT_CODEX_NATIVE_BRIDGE_PORT)]
+        bridge_port: u16,
+        #[arg(long, default_value_t = false)]
+        force: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Sync {
+        #[arg(long)]
+        app: Option<PathBuf>,
+        #[arg(long)]
+        panel_repo_root: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        force: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        #[arg(long, hide = true, default_value_t = false)]
+        quiet: bool,
+    },
+    #[cfg(target_os = "macos")]
+    #[command(alias = "build-app")]
+    CloneApp {
+        #[arg(long)]
+        source: Option<PathBuf>,
+        #[arg(long, default_value = DEFAULT_CODEX_TASKNERVE_APP_PATH_MACOS)]
+        dest: PathBuf,
+        #[arg(long, default_value = DEFAULT_CODEX_TASKNERVE_APP_NAME)]
+        app_name: String,
+        #[arg(long, default_value = DEFAULT_CODEX_TASKNERVE_BUNDLE_ID)]
+        bundle_id: String,
+        #[arg(long, default_value = DEFAULT_CODEX_TASKNERVE_URL_SCHEME)]
+        url_scheme: String,
+        #[arg(long)]
+        panel_repo_root: Option<PathBuf>,
+        #[arg(long, default_value = DEFAULT_CODEX_PANEL_HOST)]
+        host: String,
+        #[arg(long, default_value_t = DEFAULT_CODEX_PANEL_PORT)]
+        port: u16,
+        #[arg(long, default_value = DEFAULT_CODEX_NATIVE_BRIDGE_HOST)]
+        bridge_host: String,
+        #[arg(long, default_value_t = DEFAULT_CODEX_NATIVE_BRIDGE_PORT)]
+        bridge_port: u16,
+        #[arg(long, default_value_t = false)]
+        skip_install: bool,
         #[arg(long, default_value_t = false)]
         force: bool,
         #[arg(long, default_value_t = false)]
@@ -198,6 +281,87 @@ enum CodexAction {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    Thread(CodexThreadArgs),
+    Inject {
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        prompt: Option<String>,
+        #[arg(long)]
+        prompt_file: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        continue_task: bool,
+        #[arg(long, default_value_t = 1)]
+        cycles: usize,
+        #[arg(long, default_value_t = 30)]
+        claim_ttl_minutes: i64,
+        #[arg(long, default_value_t = 90)]
+        steal_after_minutes: i64,
+        #[arg(long = "exclude-tag")]
+        exclude_tags: Vec<String>,
+        #[arg(long = "exclude-tags-csv")]
+        exclude_tags_csv: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, default_value_t = false)]
+        oss: bool,
+        #[arg(long)]
+        local_provider: Option<String>,
+        #[arg(long, default_value_t = false)]
+        background: bool,
+        #[arg(long, hide = true, default_value_t = false)]
+        background_worker: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CodexThreadAction {
+    List {
+        #[arg(long, default_value_t = DEFAULT_CODEX_THREAD_DISCOVERY_LIMIT)]
+        limit: usize,
+        #[arg(long, default_value_t = false)]
+        all: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Bind {
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        thread_id: String,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        heartbeat_message: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Unbind {
+        #[arg(long)]
+        agent: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Bindings {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct CodexInjectOptions {
+    agent_id: String,
+    prompt: Option<String>,
+    continue_task: bool,
+    cycles: usize,
+    claim_ttl_minutes: i64,
+    steal_after_minutes: i64,
+    exclude_tags: Vec<String>,
+    model: Option<String>,
+    oss: bool,
+    local_provider: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -1240,6 +1404,174 @@ struct AdvisorState {
     task_manager: AdvisorRoleSelection,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexThreadBinding {
+    agent_id: String,
+    thread_id: String,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    heartbeat_message: Option<String>,
+    created_at_utc: String,
+    updated_at_utc: String,
+    #[serde(default)]
+    last_injected_at_utc: Option<String>,
+    #[serde(default)]
+    last_task_id: Option<String>,
+    #[serde(default)]
+    last_result_excerpt: Option<String>,
+    #[serde(default)]
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CodexPromptRequestKind {
+    Manual,
+    ContinueTask,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CodexPromptRequestStatus {
+    Pending,
+    Running,
+    Sent,
+    Skipped,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexPromptRequest {
+    prompt_id: String,
+    agent_id: String,
+    thread_id: String,
+    kind: CodexPromptRequestKind,
+    #[serde(default)]
+    prompt: Option<String>,
+    claim_ttl_minutes: i64,
+    steal_after_minutes: i64,
+    #[serde(default)]
+    exclude_tags: Vec<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    oss: bool,
+    #[serde(default)]
+    local_provider: Option<String>,
+    status: CodexPromptRequestStatus,
+    created_at_utc: String,
+    #[serde(default)]
+    started_at_utc: Option<String>,
+    #[serde(default)]
+    finished_at_utc: Option<String>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    result_excerpt: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexThreadState {
+    schema_version: String,
+    updated_at_utc: String,
+    #[serde(default)]
+    bindings: Vec<CodexThreadBinding>,
+    #[serde(default)]
+    queued_prompts: Vec<CodexPromptRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexPromptWorkerState {
+    schema_version: String,
+    agent_id: String,
+    updated_at_utc: String,
+    status: String,
+    #[serde(default)]
+    last_requested_at_utc: Option<String>,
+    #[serde(default)]
+    last_started_at_utc: Option<String>,
+    #[serde(default)]
+    last_finished_at_utc: Option<String>,
+    #[serde(default)]
+    last_prompt_id: Option<String>,
+    #[serde(default)]
+    last_task_id: Option<String>,
+    #[serde(default)]
+    last_thread_id: Option<String>,
+    #[serde(default)]
+    last_result: Option<String>,
+    #[serde(default)]
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexPromptWorkerLock {
+    schema_version: String,
+    agent_id: String,
+    lock_id: String,
+    created_at_utc: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CodexSessionLogEntry {
+    #[serde(rename = "type")]
+    entry_type: String,
+    payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CodexSessionMetaPayload {
+    id: String,
+    cwd: String,
+    #[serde(default)]
+    originator: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    cli_version: Option<String>,
+    #[serde(default)]
+    timestamp: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CodexSessionIndexEntry {
+    id: String,
+    #[serde(default)]
+    thread_name: Option<String>,
+    #[serde(default)]
+    updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CodexStateThreadEntry {
+    id: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    cli_version: Option<String>,
+    #[serde(default)]
+    updated_at: Option<i64>,
+    #[serde(default)]
+    archived: Option<i64>,
+    #[serde(default)]
+    agent_nickname: Option<String>,
+    #[serde(default)]
+    agent_role: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CodexSessionMetaEntry {
+    meta: CodexSessionMetaPayload,
+    modified_unix_seconds: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct AdvisorWorkflowFrontMatter {
     #[serde(default)]
@@ -1450,6 +1782,12 @@ struct TaskEditPatch {
     blocked: TaskTextPatch,
 }
 
+#[derive(Debug, Clone)]
+struct TaskEditOutcome {
+    task: TaskNerveTask,
+    changed: bool,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct TaskQueryFilter {
     required_tags: Vec<String>,
@@ -1529,6 +1867,7 @@ struct TaskRequestExecutionOptions {
     agent_id: String,
     requested_task_id: Option<String>,
     exclude_task_ids: Vec<String>,
+    exclude_tags: Vec<String>,
     filters: TaskQueryFilter,
     max: usize,
     max_new_claims: usize,
@@ -1809,6 +2148,59 @@ struct TaskGuiAdvisorRerunRequest {
     background: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TaskGuiCodexThreadBindRequest {
+    #[serde(default)]
+    agent_id: Option<String>,
+    thread_id: String,
+    label: Option<String>,
+    heartbeat_message: Option<String>,
+    #[serde(default)]
+    controller: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskGuiCodexThreadUnbindRequest {
+    agent_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskGuiCodexAdoptActiveRequest {
+    #[serde(default)]
+    heartbeat_message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskGuiCodexInjectRequest {
+    agent_id: String,
+    prompt: Option<String>,
+    continue_task: Option<bool>,
+    cycles: Option<usize>,
+    claim_ttl_minutes: Option<i64>,
+    steal_after_minutes: Option<i64>,
+    exclude_tags: Option<Vec<String>>,
+    model: Option<String>,
+    oss: Option<bool>,
+    local_provider: Option<String>,
+    background: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskGuiCodexHeartbeatActiveRequest {
+    #[serde(default)]
+    cycles: Option<usize>,
+    #[serde(default)]
+    claim_ttl_minutes: Option<i64>,
+    #[serde(default)]
+    steal_after_minutes: Option<i64>,
+    #[serde(default)]
+    exclude_tags: Option<Vec<String>>,
+    #[serde(default)]
+    heartbeat_message: Option<String>,
+    #[serde(default)]
+    background: Option<bool>,
+}
+
 #[derive(Debug, Parser)]
 struct LockArgs {
     #[command(subcommand)]
@@ -1908,6 +2300,10 @@ enum TaskAction {
         task_id_arg: Option<String>,
         #[arg(long = "exclude-task-id")]
         exclude_task_ids: Vec<String>,
+        #[arg(long = "exclude-tag")]
+        exclude_tags: Vec<String>,
+        #[arg(long = "exclude-tags-csv")]
+        exclude_tags_csv: Option<String>,
         #[arg(long)]
         view: Option<String>,
         #[arg(long = "tag")]
@@ -1955,8 +2351,12 @@ enum TaskAction {
         priority: i32,
         #[arg(long = "tag")]
         tags: Vec<String>,
+        #[arg(long = "tags-csv")]
+        tags_csv: Option<String>,
         #[arg(long = "depends-on")]
         depends_on: Vec<String>,
+        #[arg(long = "depends-on-csv")]
+        depends_on_csv: Option<String>,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -1978,10 +2378,14 @@ enum TaskAction {
         priority: Option<i32>,
         #[arg(long = "tag")]
         tags: Vec<String>,
+        #[arg(long = "tags-csv")]
+        tags_csv: Option<String>,
         #[arg(long, default_value_t = false)]
         clear_tags: bool,
         #[arg(long = "depends-on")]
         depends_on: Vec<String>,
+        #[arg(long = "depends-on-csv")]
+        depends_on_csv: Option<String>,
         #[arg(long, default_value_t = false)]
         clear_depends_on: bool,
         #[arg(long)]
@@ -2068,6 +2472,10 @@ enum TaskAction {
         task_id: Option<String>,
         #[arg(long = "exclude-task-id")]
         exclude_task_ids: Vec<String>,
+        #[arg(long = "exclude-tag")]
+        exclude_tags: Vec<String>,
+        #[arg(long = "exclude-tags-csv")]
+        exclude_tags_csv: Option<String>,
         #[arg(long)]
         view: Option<String>,
         #[arg(long = "tag")]
@@ -3246,10 +3654,18 @@ fn cmd_codex(repo_root: &Path, args: CodexArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!(
-                    "[tasknerve-codex] app_detected={} patched={} launch_agent={} panel_healthy={} skill_ok={}",
+                    "[tasknerve-codex] app_detected={} patched={} launch_agent={} sync_agent={} native_bridge={} panel_healthy={} skill_ok={}",
                     payload["app_detected"].as_bool().unwrap_or(false),
-                    payload["panel_asset_installed"].as_bool().unwrap_or(false),
+                    payload["current_app_matches_state"]
+                        .as_bool()
+                        .unwrap_or(payload["panel_asset_installed"].as_bool().unwrap_or(false)),
                     payload["launch_agent"]["loaded"].as_bool().unwrap_or(false),
+                    payload["sync_launch_agent"]["loaded"]
+                        .as_bool()
+                        .unwrap_or(false),
+                    payload["native_bridge"]["health"]["ok"]
+                        .as_bool()
+                        .unwrap_or(false),
                     payload["panel_health"]["ok"].as_bool().unwrap_or(false),
                     payload["skill"]["ok"].as_bool().unwrap_or(false)
                 );
@@ -3267,6 +3683,8 @@ fn cmd_codex(repo_root: &Path, args: CodexArgs) -> Result<()> {
             panel_repo_root,
             host,
             port,
+            bridge_host,
+            bridge_port,
             force,
             json,
         } => {
@@ -3276,17 +3694,86 @@ fn cmd_codex(repo_root: &Path, args: CodexArgs) -> Result<()> {
                 panel_repo_root.as_deref(),
                 &host,
                 port,
+                &bridge_host,
+                bridge_port,
                 force,
             )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!(
-                    "[tasknerve-codex] installed app={} panel_url={} launch_agent={} relaunched_codex={}",
+                    "[tasknerve-codex] installed app={} panel_url={} native_bridge={} launch_agent={} relaunched_codex={}",
                     payload["app_path"].as_str().unwrap_or("unknown"),
                     payload["panel_url"].as_str().unwrap_or("unknown"),
+                    payload["native_bridge_url"].as_str().unwrap_or("unknown"),
                     payload["launch_agent_path"].as_str().unwrap_or("unknown"),
                     payload["reopened_codex"].as_bool().unwrap_or(false)
+                );
+            }
+        }
+        CodexAction::Sync {
+            app,
+            panel_repo_root,
+            force,
+            json,
+            quiet,
+        } => {
+            let payload = sync_codex_integration(
+                repo_root,
+                app.as_deref(),
+                panel_repo_root.as_deref(),
+                force,
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else if !quiet {
+                println!(
+                    "[tasknerve-codex] sync changed={} reason={}",
+                    payload["changed"].as_bool().unwrap_or(false),
+                    payload["reason"].as_str().unwrap_or("unknown"),
+                );
+            }
+        }
+        #[cfg(target_os = "macos")]
+        CodexAction::CloneApp {
+            source,
+            dest,
+            app_name,
+            bundle_id,
+            url_scheme,
+            panel_repo_root,
+            host,
+            port,
+            bridge_host,
+            bridge_port,
+            skip_install,
+            force,
+            json,
+        } => {
+            let payload = clone_codex_side_by_side_app(
+                repo_root,
+                source.as_deref(),
+                &dest,
+                &app_name,
+                &bundle_id,
+                &url_scheme,
+                panel_repo_root.as_deref(),
+                &host,
+                port,
+                &bridge_host,
+                bridge_port,
+                skip_install,
+                force,
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!(
+                    "[tasknerve-codex] cloned source={} dest={} installed={} panel_url={}",
+                    payload["source_app_path"].as_str().unwrap_or("unknown"),
+                    payload["app_path"].as_str().unwrap_or("unknown"),
+                    payload["install_result"].is_object(),
+                    payload["panel_url"].as_str().unwrap_or("unknown"),
                 );
             }
         }
@@ -3296,15 +3783,1392 @@ fn cmd_codex(repo_root: &Path, args: CodexArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!(
-                    "[tasknerve-codex] restored_app={} removed_launch_agent={} reopened_codex={}",
+                    "[tasknerve-codex] restored_app={} removed_launch_agent={} removed_sync_launch_agent={} reopened_codex={}",
                     payload["app_path"].as_str().unwrap_or("unknown"),
                     payload["launch_agent_removed"].as_bool().unwrap_or(false),
+                    payload["sync_launch_agent_removed"]
+                        .as_bool()
+                        .unwrap_or(false),
                     payload["reopened_codex"].as_bool().unwrap_or(false)
+                );
+            }
+        }
+        CodexAction::Thread(args) => match args.action {
+            CodexThreadAction::List { limit, all, json } => {
+                let payload = json!({
+                    "schema_version": "tasknerve.codex.thread_list.v1",
+                    "generated_at_utc": now_utc(),
+                    "threads": discover_codex_threads(repo_root, all, limit)?
+                });
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    let rows = payload["threads"].as_array().cloned().unwrap_or_default();
+                    println!("[tasknerve-codex] discovered_threads={}", rows.len());
+                    for row in rows {
+                        println!(
+                            "- {} [{}] cwd={} updated={}",
+                            row["display_label"].as_str().unwrap_or("unknown"),
+                            row["thread_id_short"].as_str().unwrap_or("unknown"),
+                            row["cwd"].as_str().unwrap_or("unknown"),
+                            row["updated_at_utc"].as_str().unwrap_or("unknown")
+                        );
+                    }
+                }
+            }
+            CodexThreadAction::Bind {
+                agent,
+                thread_id,
+                label,
+                heartbeat_message,
+                json,
+            } => {
+                let binding = bind_codex_thread_to_agent(
+                    repo_root,
+                    &normalize_agent_id(Some(agent)),
+                    thread_id,
+                    label,
+                    heartbeat_message,
+                )?;
+                let payload = json!({
+                    "ok": true,
+                    "action": "bind",
+                    "binding": binding
+                });
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    println!(
+                        "[tasknerve-codex] bound agent={} thread_id={}",
+                        payload["binding"]["agent_id"].as_str().unwrap_or("unknown"),
+                        payload["binding"]["thread_id"]
+                            .as_str()
+                            .unwrap_or("unknown")
+                    );
+                }
+            }
+            CodexThreadAction::Unbind { agent, json } => {
+                let binding =
+                    unbind_codex_thread_for_agent(repo_root, &normalize_agent_id(Some(agent)))?;
+                let payload = json!({
+                    "ok": true,
+                    "action": "unbind",
+                    "binding": binding
+                });
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    println!(
+                        "[tasknerve-codex] unbound agent={} thread_id={}",
+                        payload["binding"]["agent_id"].as_str().unwrap_or("unknown"),
+                        payload["binding"]["thread_id"]
+                            .as_str()
+                            .unwrap_or("unknown")
+                    );
+                }
+            }
+            CodexThreadAction::Bindings { json } => {
+                let payload = codex_thread_snapshot_payload(repo_root)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    let rows = payload["bindings"].as_array().cloned().unwrap_or_default();
+                    println!("[tasknerve-codex] bindings={}", rows.len());
+                    for row in rows {
+                        println!(
+                            "- agent={} label={} thread_id={} queued_pending={} worker={}",
+                            row["agent_id"].as_str().unwrap_or("unknown"),
+                            row["display_label"].as_str().unwrap_or("unknown"),
+                            row["thread_id_short"].as_str().unwrap_or("unknown"),
+                            row["queued_pending_count"].as_u64().unwrap_or(0),
+                            row["worker"]["status"].as_str().unwrap_or("idle")
+                        );
+                    }
+                }
+            }
+        },
+        CodexAction::Inject {
+            agent,
+            prompt,
+            prompt_file,
+            continue_task,
+            cycles,
+            claim_ttl_minutes,
+            steal_after_minutes,
+            exclude_tags,
+            exclude_tags_csv,
+            model,
+            oss,
+            local_provider,
+            background,
+            background_worker,
+            json,
+        } => {
+            let agent_id = normalize_agent_id(Some(agent));
+            if background_worker {
+                run_codex_prompt_worker(repo_root, &agent_id)?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "ok": true,
+                            "action": "background_worker",
+                            "agent_id": agent_id
+                        }))?
+                    );
+                } else {
+                    println!("[tasknerve-codex] worker completed agent={}", agent_id);
+                }
+                return Ok(());
+            }
+            let prompt_from_file = if let Some(path) = prompt_file.as_ref() {
+                Some(
+                    fs::read_to_string(path)
+                        .with_context(|| format!("failed reading {}", path.display()))?,
+                )
+            } else {
+                None
+            };
+            let options = CodexInjectOptions {
+                agent_id,
+                prompt: prompt.or(prompt_from_file),
+                continue_task,
+                cycles,
+                claim_ttl_minutes,
+                steal_after_minutes,
+                exclude_tags: normalize_task_excluded_tags(exclude_tags, exclude_tags_csv)?,
+                model: normalize_optional_text(model, "codex model")?,
+                oss,
+                local_provider: normalize_optional_text(local_provider, "codex local provider")?,
+            };
+            let payload = enqueue_codex_prompt_requests(repo_root, &options, background)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!(
+                    "[tasknerve-codex] queued agent={} prompts={} background={} worker={}",
+                    payload["agent_id"].as_str().unwrap_or("unknown"),
+                    payload["queued_count"].as_u64().unwrap_or(0),
+                    payload["background"].as_bool().unwrap_or(false),
+                    payload["worker"]["status"].as_str().unwrap_or("unknown")
                 );
             }
         }
     }
     Ok(())
+}
+
+fn default_codex_thread_state() -> CodexThreadState {
+    CodexThreadState {
+        schema_version: SCHEMA_CODEX_THREAD_STATE.to_string(),
+        updated_at_utc: now_utc(),
+        bindings: Vec::new(),
+        queued_prompts: Vec::new(),
+    }
+}
+
+fn timeline_codex_thread_state_path(repo_root: &Path) -> PathBuf {
+    timeline_root(repo_root).join("codex").join("threads.json")
+}
+
+fn timeline_codex_prompt_temp_dir(repo_root: &Path) -> PathBuf {
+    timeline_root(repo_root).join("codex").join("tmp")
+}
+
+fn timeline_codex_prompt_worker_state_path(repo_root: &Path, agent_id: &str) -> PathBuf {
+    timeline_root(repo_root).join("codex").join(format!(
+        "{}.worker.json",
+        normalize_markdown_import_key(agent_id)
+    ))
+}
+
+fn timeline_codex_prompt_worker_lock_path(repo_root: &Path, agent_id: &str) -> PathBuf {
+    timeline_root(repo_root).join("codex").join(format!(
+        "{}.worker.lock.json",
+        normalize_markdown_import_key(agent_id)
+    ))
+}
+
+fn load_codex_thread_state(repo_root: &Path) -> Result<CodexThreadState> {
+    let path = timeline_codex_thread_state_path(repo_root);
+    let mut state =
+        load_json_optional::<CodexThreadState>(&path)?.unwrap_or_else(default_codex_thread_state);
+    if state.schema_version.trim().is_empty() {
+        state.schema_version = SCHEMA_CODEX_THREAD_STATE.to_string();
+    }
+    if state.updated_at_utc.trim().is_empty() {
+        state.updated_at_utc = now_utc();
+    }
+    Ok(state)
+}
+
+fn write_codex_thread_state(repo_root: &Path, state: &CodexThreadState) -> Result<()> {
+    write_pretty_json(&timeline_codex_thread_state_path(repo_root), state)
+}
+
+fn default_codex_prompt_worker_state(agent_id: &str) -> CodexPromptWorkerState {
+    CodexPromptWorkerState {
+        schema_version: SCHEMA_CODEX_PROMPT_WORKER_STATE.to_string(),
+        agent_id: agent_id.to_string(),
+        updated_at_utc: now_utc(),
+        status: "idle".to_string(),
+        last_requested_at_utc: None,
+        last_started_at_utc: None,
+        last_finished_at_utc: None,
+        last_prompt_id: None,
+        last_task_id: None,
+        last_thread_id: None,
+        last_result: None,
+        last_error: None,
+    }
+}
+
+fn load_codex_prompt_worker_state(
+    repo_root: &Path,
+    agent_id: &str,
+) -> Result<CodexPromptWorkerState> {
+    let path = timeline_codex_prompt_worker_state_path(repo_root, agent_id);
+    let mut state = load_json_optional::<CodexPromptWorkerState>(&path)?
+        .unwrap_or_else(|| default_codex_prompt_worker_state(agent_id));
+    if state.schema_version.trim().is_empty() {
+        state.schema_version = SCHEMA_CODEX_PROMPT_WORKER_STATE.to_string();
+    }
+    if state.agent_id.trim().is_empty() {
+        state.agent_id = agent_id.to_string();
+    }
+    if state.updated_at_utc.trim().is_empty() {
+        state.updated_at_utc = now_utc();
+    }
+    Ok(state)
+}
+
+fn write_codex_prompt_worker_state(repo_root: &Path, state: &CodexPromptWorkerState) -> Result<()> {
+    write_pretty_json(
+        &timeline_codex_prompt_worker_state_path(repo_root, &state.agent_id),
+        state,
+    )
+}
+
+fn load_codex_prompt_worker_lock(
+    repo_root: &Path,
+    agent_id: &str,
+) -> Result<Option<CodexPromptWorkerLock>> {
+    load_json_optional::<CodexPromptWorkerLock>(&timeline_codex_prompt_worker_lock_path(
+        repo_root, agent_id,
+    ))
+}
+
+fn write_codex_prompt_worker_lock(repo_root: &Path, lock: &CodexPromptWorkerLock) -> Result<()> {
+    write_pretty_json(
+        &timeline_codex_prompt_worker_lock_path(repo_root, &lock.agent_id),
+        lock,
+    )
+}
+
+fn remove_codex_prompt_worker_lock(repo_root: &Path, agent_id: &str) {
+    let _ = fs::remove_file(timeline_codex_prompt_worker_lock_path(repo_root, agent_id));
+}
+
+fn codex_prompt_worker_lock_is_stale(lock: &CodexPromptWorkerLock) -> bool {
+    match parse_rfc3339_utc(&lock.created_at_utc) {
+        Some(created_at) => {
+            created_at + Duration::minutes(CODEX_PROMPT_WORKER_STALE_MINUTES) <= Utc::now()
+        }
+        None => true,
+    }
+}
+
+fn bind_codex_thread_to_agent(
+    repo_root: &Path,
+    agent_id: &str,
+    thread_id: String,
+    label: Option<String>,
+    heartbeat_message: Option<String>,
+) -> Result<CodexThreadBinding> {
+    let thread_id = normalize_required_text(thread_id, "codex thread id")?;
+    let label = normalize_optional_text(label, "codex binding label")?;
+    let heartbeat_message = normalize_optional_text(heartbeat_message, "codex heartbeat message")?;
+    let mut state = load_codex_thread_state(repo_root)?;
+    if let Some(existing) = state
+        .bindings
+        .iter()
+        .find(|binding| binding.thread_id == thread_id && binding.agent_id != agent_id)
+    {
+        bail!(
+            "codex thread {} is already bound to agent {}; unbind it first",
+            codex_thread_id_short(&thread_id),
+            existing.agent_id
+        );
+    }
+    let now = now_utc();
+    if let Some(index) = state
+        .bindings
+        .iter()
+        .position(|binding| binding.agent_id == agent_id)
+    {
+        state.bindings[index].thread_id = thread_id;
+        state.bindings[index].label = label;
+        state.bindings[index].heartbeat_message = heartbeat_message;
+        state.bindings[index].updated_at_utc = now.clone();
+        state.updated_at_utc = now;
+        let binding = state.bindings[index].clone();
+        write_codex_thread_state(repo_root, &state)?;
+        return Ok(binding);
+    }
+    let binding = CodexThreadBinding {
+        agent_id: agent_id.to_string(),
+        thread_id,
+        label,
+        heartbeat_message,
+        created_at_utc: now.clone(),
+        updated_at_utc: now.clone(),
+        last_injected_at_utc: None,
+        last_task_id: None,
+        last_result_excerpt: None,
+        last_error: None,
+    };
+    state.bindings.push(binding.clone());
+    state
+        .bindings
+        .sort_by(|left, right| left.agent_id.cmp(&right.agent_id));
+    state.updated_at_utc = now;
+    write_codex_thread_state(repo_root, &state)?;
+    Ok(binding)
+}
+
+fn unbind_codex_thread_for_agent(repo_root: &Path, agent_id: &str) -> Result<CodexThreadBinding> {
+    let mut state = load_codex_thread_state(repo_root)?;
+    let Some(index) = state
+        .bindings
+        .iter()
+        .position(|binding| binding.agent_id == agent_id)
+    else {
+        bail!("codex thread binding not found for agent {}", agent_id);
+    };
+    let removed = state.bindings.remove(index);
+    state
+        .queued_prompts
+        .retain(|prompt| prompt.agent_id != agent_id);
+    state.updated_at_utc = now_utc();
+    write_codex_thread_state(repo_root, &state)?;
+    Ok(removed)
+}
+
+fn codex_thread_display_label(
+    thread_id: &str,
+    discovered: Option<&serde_json::Value>,
+    binding: Option<&CodexThreadBinding>,
+) -> String {
+    if let Some(binding) = binding {
+        if let Some(label) = binding.label.as_deref() {
+            return label.to_string();
+        }
+    }
+    if let Some(discovered) = discovered {
+        if let Some(label) = discovered
+            .get("display_label")
+            .and_then(serde_json::Value::as_str)
+        {
+            return label.to_string();
+        }
+    }
+    format!("Thread {}", codex_thread_id_short(thread_id))
+}
+
+fn codex_thread_id_short(thread_id: &str) -> String {
+    thread_id.chars().take(8).collect::<String>()
+}
+
+fn codex_controller_agent_id() -> &'static str {
+    CODEX_CONTROLLER_AGENT_ID
+}
+
+fn codex_is_controller_agent(agent_id: &str) -> bool {
+    agent_id == CODEX_CONTROLLER_AGENT_ID
+}
+
+fn codex_auto_worker_agent_id(thread_id: &str) -> String {
+    format!(
+        "agent.codex.{}",
+        codex_thread_id_short(thread_id).to_ascii_lowercase()
+    )
+}
+
+fn codex_repo_scope_label(path: &Path, root: &Path) -> Option<&'static str> {
+    let normalized_path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let normalized_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    if normalized_path == normalized_root {
+        Some("root")
+    } else if normalized_path.starts_with(&normalized_root) {
+        Some("child")
+    } else {
+        None
+    }
+}
+
+fn unix_seconds_to_rfc3339(timestamp: i64) -> Option<String> {
+    Utc.timestamp_opt(timestamp, 0)
+        .single()
+        .map(|value| value.to_rfc3339())
+}
+
+fn parse_rfc3339_unix_seconds(value: Option<&str>) -> Option<i64> {
+    value
+        .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
+        .map(|value| value.timestamp())
+}
+
+fn load_codex_session_meta_map(
+    codex_home: &Path,
+) -> Result<BTreeMap<String, CodexSessionMetaEntry>> {
+    let sessions_root = codex_home.join("sessions");
+    if !sessions_root.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let mut files = WalkDir::new(&sessions_root)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("jsonl"))
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| {
+        let left_modified = left
+            .metadata()
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .unwrap_or(UNIX_EPOCH);
+        let right_modified = right
+            .metadata()
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .unwrap_or(UNIX_EPOCH);
+        right_modified.cmp(&left_modified)
+    });
+
+    let mut out = BTreeMap::<String, CodexSessionMetaEntry>::new();
+    for entry in files {
+        let Ok(file) = fs::File::open(entry.path()) else {
+            continue;
+        };
+        let mut reader = BufReader::new(file);
+        let mut first_line = String::new();
+        if reader.read_line(&mut first_line).ok().unwrap_or(0) == 0 {
+            continue;
+        }
+        let Ok(log_entry) = serde_json::from_str::<CodexSessionLogEntry>(first_line.trim()) else {
+            continue;
+        };
+        if log_entry.entry_type != "session_meta" {
+            continue;
+        }
+        let Ok(meta) = serde_json::from_value::<CodexSessionMetaPayload>(log_entry.payload) else {
+            continue;
+        };
+        out.entry(meta.id.clone())
+            .or_insert_with(|| CodexSessionMetaEntry {
+                meta,
+                modified_unix_seconds: entry
+                    .metadata()
+                    .ok()
+                    .and_then(|meta| meta.modified().ok())
+                    .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                    .map(|value| value.as_secs() as i64),
+            });
+    }
+    Ok(out)
+}
+
+fn load_codex_state_thread_map(
+    codex_home: &Path,
+) -> Result<BTreeMap<String, CodexStateThreadEntry>> {
+    let db_path = codex_home.join("state_5.sqlite");
+    if !db_path.exists() || !command_exists("sqlite3") {
+        return Ok(BTreeMap::new());
+    }
+    let sql = "SELECT json_object('id', id, 'title', title, 'cwd', cwd, 'source', source, 'cli_version', cli_version, 'updated_at', updated_at, 'archived', archived, 'agent_nickname', agent_nickname, 'agent_role', agent_role) FROM threads ORDER BY updated_at DESC;";
+    let output = ProcessCommand::new("sqlite3")
+        .arg(&db_path)
+        .arg(sql)
+        .output()
+        .with_context(|| format!("failed running sqlite3 against {}", db_path.display()))?;
+    if !output.status.success() {
+        bail!(
+            "sqlite3 returned non-zero while reading {}: {}",
+            db_path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8(output.stdout).with_context(|| {
+        format!(
+            "sqlite3 output for {} was not valid UTF-8",
+            db_path.display()
+        )
+    })?;
+    let mut out = BTreeMap::<String, CodexStateThreadEntry>::new();
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let Ok(entry) = serde_json::from_str::<CodexStateThreadEntry>(line) else {
+            continue;
+        };
+        out.insert(entry.id.clone(), entry);
+    }
+    Ok(out)
+}
+
+fn discover_codex_threads(
+    repo_root: &Path,
+    include_all: bool,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>> {
+    let codex_home = resolve_codex_home()?;
+    let session_meta = load_codex_session_meta_map(&codex_home).unwrap_or_default();
+    let state_threads = load_codex_state_thread_map(&codex_home).unwrap_or_default();
+    if session_meta.is_empty() && state_threads.is_empty() {
+        return Ok(Vec::new());
+    }
+    let index = load_codex_session_index_map(&codex_home).unwrap_or_default();
+    let mut thread_ids = state_threads
+        .keys()
+        .cloned()
+        .chain(session_meta.keys().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    thread_ids.sort();
+    let mut rows = Vec::<serde_json::Value>::new();
+    let requested_limit = if limit == 0 {
+        DEFAULT_CODEX_THREAD_DISCOVERY_LIMIT
+    } else {
+        limit
+    };
+    for thread_id in thread_ids {
+        let state_row = state_threads.get(&thread_id);
+        if state_row
+            .and_then(|row| row.archived)
+            .map(|value| value != 0)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let session_row = session_meta.get(&thread_id);
+        let cwd = state_row
+            .and_then(|row| row.cwd.clone())
+            .or_else(|| session_row.map(|row| row.meta.cwd.clone()))
+            .unwrap_or_default();
+        if cwd.trim().is_empty() {
+            continue;
+        }
+        let cwd_path = PathBuf::from(&cwd);
+        let cwd_scope = codex_repo_scope_label(&cwd_path, repo_root);
+        if !include_all && cwd_scope.is_none() {
+            continue;
+        }
+        let updated_unix_seconds = state_row
+            .and_then(|row| row.updated_at)
+            .or_else(|| session_row.and_then(|row| row.modified_unix_seconds))
+            .or_else(|| {
+                index
+                    .get(&thread_id)
+                    .and_then(|row| parse_rfc3339_unix_seconds(row.updated_at.as_deref()))
+            })
+            .or_else(|| {
+                session_row
+                    .and_then(|row| parse_rfc3339_unix_seconds(row.meta.timestamp.as_deref()))
+            })
+            .unwrap_or_else(|| Utc::now().timestamp());
+        let updated_at_utc = unix_seconds_to_rfc3339(updated_unix_seconds).unwrap_or_else(now_utc);
+        let thread_name = index
+            .get(&thread_id)
+            .and_then(|row| row.thread_name.clone())
+            .or_else(|| state_row.and_then(|row| row.title.clone()));
+        let display_label = thread_name
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| {
+                cwd_path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .filter(|value| !value.trim().is_empty())
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| format!("Thread {}", codex_thread_id_short(&thread_id)))
+            });
+        rows.push(json!({
+            "thread_id": thread_id,
+            "thread_id_short": codex_thread_id_short(&thread_id),
+            "display_label": display_label,
+            "thread_name": thread_name,
+            "cwd": cwd,
+            "cwd_scope": cwd_scope,
+            "source": state_row
+                .and_then(|row| row.source.clone())
+                .or_else(|| session_row.and_then(|row| row.meta.source.clone())),
+            "originator": session_row.and_then(|row| row.meta.originator.clone()),
+            "cli_version": state_row
+                .and_then(|row| row.cli_version.clone())
+                .or_else(|| session_row.and_then(|row| row.meta.cli_version.clone())),
+            "updated_at_utc": updated_at_utc,
+            "updated_at_unix_seconds": updated_unix_seconds,
+            "archived": false,
+            "is_active": true,
+            "agent_nickname": state_row.and_then(|row| row.agent_nickname.clone()),
+            "agent_role": state_row.and_then(|row| row.agent_role.clone())
+        }));
+    }
+    rows.sort_by(|left, right| {
+        let left_updated = left["updated_at_unix_seconds"].as_i64().unwrap_or(0);
+        let right_updated = right["updated_at_unix_seconds"].as_i64().unwrap_or(0);
+        right_updated.cmp(&left_updated)
+    });
+    rows.truncate(requested_limit);
+    Ok(rows)
+}
+
+fn load_codex_session_index_map(
+    codex_home: &Path,
+) -> Result<BTreeMap<String, CodexSessionIndexEntry>> {
+    let path = codex_home.join("session_index.jsonl");
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let file =
+        fs::File::open(&path).with_context(|| format!("failed opening {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut out = BTreeMap::<String, CodexSessionIndexEntry>::new();
+    for line in reader.lines() {
+        let line = line.with_context(|| format!("failed reading {}", path.display()))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<CodexSessionIndexEntry>(&line) else {
+            continue;
+        };
+        out.insert(entry.id.clone(), entry);
+    }
+    Ok(out)
+}
+
+fn codex_thread_snapshot_payload(repo_root: &Path) -> Result<serde_json::Value> {
+    let discovered =
+        discover_codex_threads(repo_root, false, DEFAULT_CODEX_THREAD_DISCOVERY_LIMIT)?;
+    let state = load_codex_thread_state(repo_root)?;
+    let active_thread_ids = discovered
+        .iter()
+        .filter_map(|row| row["thread_id"].as_str().map(ToString::to_string))
+        .collect::<BTreeSet<_>>();
+    let mut bindings = Vec::<serde_json::Value>::new();
+    for binding in &state.bindings {
+        let discovered_row = discovered
+            .iter()
+            .find(|row| row["thread_id"].as_str() == Some(binding.thread_id.as_str()));
+        let worker = load_codex_prompt_worker_state(repo_root, &binding.agent_id)
+            .unwrap_or_else(|_| default_codex_prompt_worker_state(&binding.agent_id));
+        let queued_pending_count = state
+            .queued_prompts
+            .iter()
+            .filter(|prompt| {
+                prompt.agent_id == binding.agent_id
+                    && matches!(prompt.status, CodexPromptRequestStatus::Pending)
+            })
+            .count();
+        let queued_running_count = state
+            .queued_prompts
+            .iter()
+            .filter(|prompt| {
+                prompt.agent_id == binding.agent_id
+                    && matches!(prompt.status, CodexPromptRequestStatus::Running)
+            })
+            .count();
+        bindings.push(json!({
+            "agent_id": binding.agent_id,
+            "role": if codex_is_controller_agent(&binding.agent_id) { "controller" } else { "worker" },
+            "thread_id": binding.thread_id,
+            "thread_id_short": codex_thread_id_short(&binding.thread_id),
+            "display_label": codex_thread_display_label(&binding.thread_id, discovered_row, Some(binding)),
+            "label": binding.label,
+            "heartbeat_message": binding.heartbeat_message,
+            "last_injected_at_utc": binding.last_injected_at_utc,
+            "last_task_id": binding.last_task_id,
+            "last_result_excerpt": binding.last_result_excerpt,
+            "last_error": binding.last_error,
+            "updated_at_utc": binding.updated_at_utc,
+            "active": active_thread_ids.contains(&binding.thread_id),
+            "discovered_thread": discovered_row.cloned().unwrap_or(serde_json::Value::Null),
+            "queued_pending_count": queued_pending_count,
+            "queued_running_count": queued_running_count,
+            "worker": serde_json::to_value(worker).unwrap_or(serde_json::Value::Null)
+        }));
+    }
+    let recent_prompts = state
+        .queued_prompts
+        .iter()
+        .rev()
+        .take(40)
+        .map(|prompt| {
+            json!({
+                "prompt_id": prompt.prompt_id,
+                "agent_id": prompt.agent_id,
+                "thread_id": prompt.thread_id,
+                "thread_id_short": codex_thread_id_short(&prompt.thread_id),
+                "kind": prompt.kind,
+                "status": prompt.status,
+                "created_at_utc": prompt.created_at_utc,
+                "started_at_utc": prompt.started_at_utc,
+                "finished_at_utc": prompt.finished_at_utc,
+                "task_id": prompt.task_id,
+                "result_excerpt": prompt.result_excerpt,
+                "error": prompt.error
+            })
+        })
+        .collect::<Vec<_>>();
+    let controller_binding = bindings
+        .iter()
+        .find(|row| row["agent_id"].as_str() == Some(codex_controller_agent_id()))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let active_worker_bindings = bindings
+        .iter()
+        .filter(|row| {
+            row["role"].as_str() == Some("worker") && row["active"].as_bool().unwrap_or(false)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let inactive_bindings = bindings
+        .iter()
+        .filter(|row| !row["active"].as_bool().unwrap_or(false))
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "schema_version": "tasknerve.codex.thread_snapshot.v1",
+        "generated_at_utc": now_utc(),
+        "controller_agent_id": codex_controller_agent_id(),
+        "controller_binding": controller_binding,
+        "active_thread_count": discovered.len(),
+        "active_worker_count": active_worker_bindings.len(),
+        "discovered_threads": discovered,
+        "bindings": bindings,
+        "active_worker_bindings": active_worker_bindings,
+        "inactive_bindings": inactive_bindings,
+        "queued_prompts": recent_prompts
+    }))
+}
+
+fn enqueue_codex_prompt_requests(
+    repo_root: &Path,
+    options: &CodexInjectOptions,
+    background: bool,
+) -> Result<serde_json::Value> {
+    if options.local_provider.is_some() && !options.oss {
+        bail!("--local-provider requires --oss for codex prompt injection");
+    }
+    let mut state = load_codex_thread_state(repo_root)?;
+    let binding = state
+        .bindings
+        .iter()
+        .find(|binding| binding.agent_id == options.agent_id)
+        .cloned()
+        .ok_or_else(|| {
+            anyhow!(
+                "codex thread binding not found for agent {}",
+                options.agent_id
+            )
+        })?;
+    let prompt = normalize_optional_text(options.prompt.clone(), "codex prompt")?;
+    let continue_task = options.continue_task || prompt.is_none();
+    if prompt.is_some() && options.continue_task {
+        bail!("manual prompt injection cannot be combined with --continue-task");
+    }
+    let cycles = options.cycles.clamp(1, 100);
+    let now = now_utc();
+    for _ in 0..cycles {
+        state.queued_prompts.push(CodexPromptRequest {
+            prompt_id: format!("codex_prompt_{}", Uuid::new_v4().simple()),
+            agent_id: options.agent_id.clone(),
+            thread_id: binding.thread_id.clone(),
+            kind: if continue_task {
+                CodexPromptRequestKind::ContinueTask
+            } else {
+                CodexPromptRequestKind::Manual
+            },
+            prompt: prompt.clone(),
+            claim_ttl_minutes: options.claim_ttl_minutes.max(1),
+            steal_after_minutes: options.steal_after_minutes.max(1),
+            exclude_tags: options.exclude_tags.clone(),
+            model: options.model.clone(),
+            oss: options.oss,
+            local_provider: options.local_provider.clone(),
+            status: CodexPromptRequestStatus::Pending,
+            created_at_utc: now.clone(),
+            started_at_utc: None,
+            finished_at_utc: None,
+            task_id: None,
+            result_excerpt: None,
+            error: None,
+        });
+    }
+    state.updated_at_utc = now;
+    write_codex_thread_state(repo_root, &state)?;
+    let worker = if background {
+        queue_codex_prompt_background(repo_root, &options.agent_id)?
+    } else {
+        run_codex_prompt_worker(repo_root, &options.agent_id)?;
+        serde_json::to_value(load_codex_prompt_worker_state(
+            repo_root,
+            &options.agent_id,
+        )?)
+        .unwrap_or(serde_json::Value::Null)
+    };
+    Ok(json!({
+        "ok": true,
+        "action": "inject",
+        "agent_id": options.agent_id,
+        "thread_id": binding.thread_id,
+        "queued_count": cycles,
+        "background": background,
+        "worker": worker,
+        "snapshot": codex_thread_snapshot_payload(repo_root)?
+    }))
+}
+
+fn queue_codex_prompt_background(repo_root: &Path, agent_id: &str) -> Result<serde_json::Value> {
+    let mut worker = load_codex_prompt_worker_state(repo_root, agent_id)?;
+    let now = now_utc();
+    if let Some(lock) = load_codex_prompt_worker_lock(repo_root, agent_id)? {
+        if codex_prompt_worker_lock_is_stale(&lock) {
+            remove_codex_prompt_worker_lock(repo_root, agent_id);
+        } else {
+            worker.updated_at_utc = now.clone();
+            worker.status = "running".to_string();
+            worker.last_requested_at_utc = Some(now);
+            write_codex_prompt_worker_state(repo_root, &worker)?;
+            return Ok(serde_json::to_value(worker).unwrap_or(serde_json::Value::Null));
+        }
+    }
+
+    let lock = CodexPromptWorkerLock {
+        schema_version: SCHEMA_CODEX_PROMPT_WORKER_LOCK.to_string(),
+        agent_id: agent_id.to_string(),
+        lock_id: format!(
+            "codex_prompt_{}_{}",
+            normalize_markdown_import_key(agent_id),
+            Uuid::new_v4().simple()
+        ),
+        created_at_utc: now.clone(),
+    };
+    write_codex_prompt_worker_lock(repo_root, &lock)?;
+    worker.updated_at_utc = now.clone();
+    worker.status = "queued".to_string();
+    worker.last_requested_at_utc = Some(now.clone());
+    worker.last_error = None;
+    write_codex_prompt_worker_state(repo_root, &worker)?;
+
+    let current_exe =
+        std::env::current_exe().with_context(|| "failed resolving current executable")?;
+    let mut cmd = ProcessCommand::new(current_exe);
+    cmd.arg("--repo-root")
+        .arg(repo_root)
+        .arg("codex")
+        .arg("inject")
+        .arg("--agent")
+        .arg(agent_id)
+        .arg("--background-worker")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Err(err) = cmd.spawn() {
+        remove_codex_prompt_worker_lock(repo_root, agent_id);
+        worker.updated_at_utc = now_utc();
+        worker.status = "error".to_string();
+        worker.last_error = Some(format!("failed spawning codex prompt worker: {}", err));
+        write_codex_prompt_worker_state(repo_root, &worker)?;
+        bail!("failed spawning codex prompt worker: {}", err);
+    }
+
+    Ok(serde_json::to_value(worker).unwrap_or(serde_json::Value::Null))
+}
+
+fn run_codex_prompt_worker(repo_root: &Path, agent_id: &str) -> Result<()> {
+    let mut worker = load_codex_prompt_worker_state(repo_root, agent_id)?;
+    worker.updated_at_utc = now_utc();
+    worker.status = "running".to_string();
+    worker.last_started_at_utc = Some(now_utc());
+    worker.last_error = None;
+    write_codex_prompt_worker_state(repo_root, &worker)?;
+
+    let result = (|| -> Result<()> {
+        loop {
+            let mut state = load_codex_thread_state(repo_root)?;
+            let Some(prompt_index) = state.queued_prompts.iter().position(|prompt| {
+                prompt.agent_id == agent_id
+                    && matches!(prompt.status, CodexPromptRequestStatus::Pending)
+            }) else {
+                break;
+            };
+            state.queued_prompts[prompt_index].status = CodexPromptRequestStatus::Running;
+            state.queued_prompts[prompt_index].started_at_utc = Some(now_utc());
+            state.queued_prompts[prompt_index].error = None;
+            let prompt = state.queued_prompts[prompt_index].clone();
+            let binding = state
+                .bindings
+                .iter()
+                .find(|binding| binding.agent_id == agent_id)
+                .cloned()
+                .ok_or_else(|| anyhow!("codex thread binding not found for agent {}", agent_id))?;
+            state.updated_at_utc = now_utc();
+            write_codex_thread_state(repo_root, &state)?;
+
+            worker.updated_at_utc = now_utc();
+            worker.status = "running".to_string();
+            worker.last_prompt_id = Some(prompt.prompt_id.clone());
+            worker.last_thread_id = Some(prompt.thread_id.clone());
+            worker.last_error = None;
+            write_codex_prompt_worker_state(repo_root, &worker)?;
+
+            let execution = execute_codex_prompt_request(repo_root, &binding, &prompt);
+
+            let mut state = load_codex_thread_state(repo_root)?;
+            let Some(index) = state
+                .queued_prompts
+                .iter()
+                .position(|candidate| candidate.prompt_id == prompt.prompt_id)
+            else {
+                continue;
+            };
+            let row = &mut state.queued_prompts[index];
+            row.finished_at_utc = Some(now_utc());
+            match execution {
+                Ok(result) => {
+                    row.status = result.status;
+                    row.task_id = result.task_id.clone();
+                    row.result_excerpt = result.result_excerpt.clone();
+                    row.error = None;
+                    if let Some(binding_index) = state
+                        .bindings
+                        .iter()
+                        .position(|candidate| candidate.agent_id == agent_id)
+                    {
+                        state.bindings[binding_index].last_injected_at_utc = Some(now_utc());
+                        state.bindings[binding_index].last_task_id = result.task_id.clone();
+                        state.bindings[binding_index].last_result_excerpt =
+                            result.result_excerpt.clone();
+                        state.bindings[binding_index].last_error = None;
+                        state.bindings[binding_index].updated_at_utc = now_utc();
+                    }
+                    worker.updated_at_utc = now_utc();
+                    worker.last_finished_at_utc = Some(now_utc());
+                    worker.last_task_id = result.task_id.clone();
+                    worker.last_result = result.result_excerpt.clone();
+                    worker.last_error = None;
+                }
+                Err(err) => {
+                    row.status = CodexPromptRequestStatus::Error;
+                    row.error = Some(err.to_string());
+                    if let Some(binding_index) = state
+                        .bindings
+                        .iter()
+                        .position(|candidate| candidate.agent_id == agent_id)
+                    {
+                        state.bindings[binding_index].last_error = Some(err.to_string());
+                        state.bindings[binding_index].updated_at_utc = now_utc();
+                    }
+                    worker.updated_at_utc = now_utc();
+                    worker.last_finished_at_utc = Some(now_utc());
+                    worker.last_error = Some(err.to_string());
+                    worker.last_result = None;
+                }
+            }
+            if state.queued_prompts.len() > 200 {
+                let keep_from = state.queued_prompts.len().saturating_sub(200);
+                state.queued_prompts = state.queued_prompts.split_off(keep_from);
+            }
+            state.updated_at_utc = now_utc();
+            write_codex_thread_state(repo_root, &state)?;
+            write_codex_prompt_worker_state(repo_root, &worker)?;
+        }
+        Ok(())
+    })();
+
+    worker.updated_at_utc = now_utc();
+    worker.last_finished_at_utc = Some(now_utc());
+    worker.status = if result.is_ok() {
+        "idle".to_string()
+    } else {
+        "error".to_string()
+    };
+    if let Err(err) = &result {
+        worker.last_error = Some(err.to_string());
+    }
+    write_codex_prompt_worker_state(repo_root, &worker)?;
+    remove_codex_prompt_worker_lock(repo_root, agent_id);
+    result
+}
+
+#[derive(Debug, Clone)]
+struct CodexPromptExecutionResult {
+    status: CodexPromptRequestStatus,
+    task_id: Option<String>,
+    result_excerpt: Option<String>,
+}
+
+fn execute_codex_prompt_request(
+    repo_root: &Path,
+    binding: &CodexThreadBinding,
+    prompt: &CodexPromptRequest,
+) -> Result<CodexPromptExecutionResult> {
+    let (task_id, rendered_prompt) = match prompt.kind {
+        CodexPromptRequestKind::Manual => {
+            let prompt_text = prompt
+                .prompt
+                .clone()
+                .ok_or_else(|| anyhow!("queued manual codex prompt is empty"))?;
+            (None, prompt_text)
+        }
+        CodexPromptRequestKind::ContinueTask => {
+            let task_payload = resolve_codex_continue_task_payload(
+                repo_root,
+                &prompt.agent_id,
+                prompt.claim_ttl_minutes,
+                prompt.steal_after_minutes,
+                &prompt.exclude_tags,
+            )?;
+            let Some(task_payload) = task_payload else {
+                return Ok(CodexPromptExecutionResult {
+                    status: CodexPromptRequestStatus::Skipped,
+                    task_id: None,
+                    result_excerpt: Some("no dispatchable task available".to_string()),
+                });
+            };
+            let task_id = task_payload
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string);
+            (
+                task_id,
+                build_codex_continue_task_prompt(
+                    repo_root,
+                    &prompt.agent_id,
+                    binding,
+                    &task_payload,
+                ),
+            )
+        }
+    };
+    let output = inject_prompt_into_codex_thread(
+        repo_root,
+        &binding.thread_id,
+        &rendered_prompt,
+        prompt.model.as_deref(),
+        prompt.oss,
+        prompt.local_provider.as_deref(),
+    )?;
+    Ok(CodexPromptExecutionResult {
+        status: CodexPromptRequestStatus::Sent,
+        task_id,
+        result_excerpt: Some(truncate_text_excerpt(&output, 240)),
+    })
+}
+
+fn resolve_codex_continue_task_payload(
+    repo_root: &Path,
+    agent_id: &str,
+    claim_ttl_minutes: i64,
+    steal_after_minutes: i64,
+    exclude_tags: &[String],
+) -> Result<Option<serde_json::Value>> {
+    let mut state = load_task_state(repo_root)?;
+    let state_changed = prune_expired_task_claims(&mut state)?;
+    let current = task_current_payload(repo_root, &state, agent_id, true);
+    if current["found"].as_bool().unwrap_or(false) {
+        if state_changed {
+            state.updated_at_utc = now_utc();
+            write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+        }
+        return Ok(Some(current["task"].clone()));
+    }
+    let payload = execute_task_request(
+        repo_root,
+        &mut state,
+        state_changed,
+        &TaskRequestExecutionOptions {
+            agent_id: agent_id.to_string(),
+            requested_task_id: None,
+            exclude_task_ids: Vec::new(),
+            exclude_tags: exclude_tags.to_vec(),
+            filters: normalize_task_query_filter(Vec::new(), None, None, None, None)?,
+            max: 1,
+            max_new_claims: 0,
+            peek_open: 0,
+            claim_ttl_minutes,
+            steal_after_minutes,
+            allow_steal: true,
+            skip_owned: false,
+            respect_date_gates: true,
+            no_claim: false,
+            include_context: true,
+        },
+    )?;
+    if payload["assigned"].as_bool().unwrap_or(false) {
+        Ok(Some(payload["task"].clone()))
+    } else {
+        Ok(None)
+    }
+}
+
+fn build_codex_continue_task_prompt(
+    repo_root: &Path,
+    agent_id: &str,
+    binding: &CodexThreadBinding,
+    task_payload: &serde_json::Value,
+) -> String {
+    let project_name = repo_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("this");
+    let heartbeat_template = binding
+        .heartbeat_message
+        .as_deref()
+        .unwrap_or(DEFAULT_CODEX_CONTINUE_PROMPT_TEMPLATE);
+    let task_id = task_payload["task_id"].as_str().unwrap_or("unknown");
+    let title = task_payload["title"].as_str().unwrap_or("untitled");
+    let detail = task_payload["detail"].as_str().unwrap_or("");
+    let priority = task_payload["priority"].as_i64().unwrap_or(0);
+    let tags = task_payload["tags"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let acceptance_criteria = task_payload["context"]["acceptance_criteria"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(|line| format!("- {}", line))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "- Deliver the requested task outcome.".to_string());
+    let plan_notes = task_payload["context"]["plan_notes"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(|line| format!("- {}", line))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "- No extra plan notes were attached.".to_string());
+    let blockers = task_payload["context"]["dependency_blockers"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .map(|row| {
+                    format!(
+                        "- {} :: {} :: {}",
+                        row["task_id"].as_str().unwrap_or("unknown"),
+                        row["title"].as_str().unwrap_or("unknown"),
+                        row["status"].as_str().unwrap_or("unknown")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "- None.".to_string());
+    let next_substep = task_payload["context"]["next_recommended_substep"]
+        .as_str()
+        .unwrap_or("Implement the task directly.");
+    let source_reference = task_payload["context"]["source"]["reference"]
+        .as_str()
+        .unwrap_or("none");
+    let heartbeat =
+        render_codex_heartbeat_message(heartbeat_template, project_name, agent_id, task_id, title);
+    format!(
+        r#"{heartbeat}
+
+TaskNerve dispatch:
+- project_name: {project_name}
+- repo_root: {repo_root}
+- agent_id: {agent_id}
+- task_id: {task_id}
+- title: {title}
+- priority: {priority}
+- tags: {tags}
+- source_reference: {source_reference}
+
+Task detail:
+{detail}
+
+Acceptance criteria:
+{acceptance_criteria}
+
+Plan notes:
+{plan_notes}
+
+Dependency blockers:
+{blockers}
+
+Next recommended substep:
+- {next_substep}
+
+Required operating contract:
+- Use TaskNerve as the source of truth for this task.
+- Start by confirming the claim with `tasknerve --repo-root . task current --agent {agent_id} --include-context --json`.
+- Stay in this repository and make concrete progress.
+- For long-running work, renew the lease with `tasknerve --repo-root . task heartbeat {task_id} --agent {agent_id} --note "<progress>"`.
+- When the task is complete, use `tasknerve --repo-root . task advance {task_id} --agent {agent_id} --summary "<done summary>"`.
+- If blocked, use `tasknerve --repo-root . task release {task_id} --agent {agent_id} --state blocked --reason "<blocker>"`.
+- Do not wait for another human nudge before continuing the assigned work.
+"#,
+        heartbeat = heartbeat,
+        project_name = project_name,
+        repo_root = repo_root.display(),
+        agent_id = agent_id,
+        task_id = task_id,
+        title = title,
+        priority = priority,
+        tags = if tags.trim().is_empty() {
+            "none"
+        } else {
+            tags.as_str()
+        },
+        source_reference = source_reference,
+        detail = if detail.trim().is_empty() {
+            "- No additional task detail was recorded."
+        } else {
+            detail
+        },
+        acceptance_criteria = acceptance_criteria,
+        plan_notes = plan_notes,
+        blockers = blockers,
+        next_substep = next_substep
+    )
+}
+
+fn render_codex_heartbeat_message(
+    template: &str,
+    project_name: &str,
+    agent_id: &str,
+    task_id: &str,
+    task_title: &str,
+) -> String {
+    template
+        .replace("{project_name}", project_name)
+        .replace("{agent_id}", agent_id)
+        .replace("{task_id}", task_id)
+        .replace("{task_title}", task_title)
+}
+
+fn ensure_codex_native_bridge_ready() -> Result<CodexIntegrationState> {
+    let state = load_codex_integration_state()?
+        .ok_or_else(|| anyhow!("TaskNerve Codex integration is not installed"))?;
+    let health = codex_native_bridge_health(&state.bridge_host, state.bridge_port);
+    if health["ok"].as_bool().unwrap_or(false) {
+        return Ok(state);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let app_path = PathBuf::from(&state.app_path);
+        if app_path.exists() {
+            let _ = command_status_checked(
+                ProcessCommand::new("open").arg("-a").arg(&app_path),
+                &format!("open -a {}", macos_app_label(&app_path)),
+            );
+            let waited =
+                wait_for_codex_native_bridge_health(&state.bridge_host, state.bridge_port, 24);
+            if waited["ok"].as_bool().unwrap_or(false) {
+                return Ok(state);
+            }
+        }
+    }
+    bail!(
+        "TaskNerve Codex native bridge is unavailable; open the configured Codex app or run `tasknerve codex sync --force`"
+    )
+}
+
+fn inject_prompt_into_codex_thread_via_native_bridge(
+    repo_root: &Path,
+    thread_id: &str,
+    prompt: &str,
+    model: Option<&str>,
+) -> Result<String> {
+    let state = ensure_codex_native_bridge_ready()?;
+    let response = http_json_request_local(
+        &state.bridge_host,
+        state.bridge_port,
+        "POST",
+        "/tasknerve/thread/start-turn",
+        Some(&json!({
+            "thread_id": thread_id,
+            "prompt": prompt,
+            "cwd": repo_root.display().to_string(),
+            "model": model,
+            "summary": "tasknerve"
+        })),
+    )?;
+    let turn_id = response["turn_id"].as_str().unwrap_or("unknown");
+    Ok(format!(
+        "queued native turn {} for {}",
+        turn_id,
+        codex_thread_id_short(thread_id)
+    ))
+}
+
+fn inject_prompt_into_codex_thread(
+    repo_root: &Path,
+    thread_id: &str,
+    prompt: &str,
+    model: Option<&str>,
+    oss: bool,
+    local_provider: Option<&str>,
+) -> Result<String> {
+    if let Ok(result) =
+        inject_prompt_into_codex_thread_via_native_bridge(repo_root, thread_id, prompt, model)
+    {
+        return Ok(result);
+    }
+    if !command_exists("codex") {
+        bail!(
+            "TaskNerve Codex native bridge is unavailable and codex command was not found in PATH"
+        );
+    }
+    let output_dir = timeline_codex_prompt_temp_dir(repo_root);
+    fs::create_dir_all(&output_dir)
+        .with_context(|| format!("failed creating {}", output_dir.display()))?;
+    let output_path = output_dir.join(format!("{}.last.txt", Uuid::new_v4().simple()));
+    let mut cmd = ProcessCommand::new("codex");
+    cmd.current_dir(repo_root)
+        .arg("exec")
+        .arg("resume")
+        .arg(thread_id)
+        .arg("--full-auto")
+        .arg("-o")
+        .arg(&output_path);
+    if let Some(model) = model {
+        cmd.arg("-m").arg(model);
+    }
+    if oss {
+        cmd.arg("--oss");
+        if let Some(local_provider) = local_provider {
+            cmd.arg("--local-provider").arg(local_provider);
+        }
+    }
+    let output = run_advisor_process(cmd, Some(prompt))?;
+    fs::read_to_string(&output_path)
+        .or_else(|_| -> std::io::Result<String> { Ok(output.clone()) })
+        .with_context(|| format!("failed reading {}", output_path.display()))
+}
+
+fn truncate_text_excerpt(raw: &str, max_chars: usize) -> String {
+    let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = normalized.chars().take(max_chars).collect::<String>();
+    if normalized.chars().count() > max_chars {
+        out.push_str("...");
+    }
+    out
 }
 
 fn cmd_version(args: VersionArgs) -> Result<()> {
@@ -3654,7 +5518,10 @@ fn supported_nested_command_names() -> BTreeMap<&'static str, BTreeSet<&'static 
     );
     map.insert(
         "codex",
-        ["doctor", "install", "uninstall"].iter().copied().collect(),
+        ["doctor", "install", "sync", "uninstall", "thread", "inject"]
+            .iter()
+            .copied()
+            .collect(),
     );
     map.insert(
         "update",
@@ -8262,6 +10129,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             task_id,
             task_id_arg,
             exclude_task_ids,
+            exclude_tags,
+            exclude_tags_csv,
             view,
             tags,
             focus,
@@ -8291,8 +10160,12 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 (None, Some(task_id)) => Some(task_id),
                 (None, None) => None,
             };
-            let exclude_task_ids =
-                normalize_task_exclusion_list(exclude_task_ids, requested_task_id.as_deref())?;
+            let exclude_task_ids = normalize_task_exclusion_list(
+                exclude_task_ids,
+                None,
+                requested_task_id.as_deref(),
+            )?;
+            let exclude_tags = normalize_task_excluded_tags(exclude_tags, exclude_tags_csv)?;
             let resolved_view = load_named_task_view(repo_root, view)?;
             let explicit_filter =
                 normalize_task_query_filter(tags, focus, prefix, contains, title_contains)?;
@@ -8319,6 +10192,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                         "claimed": false,
                         "dispatch_kind": "owned_claim",
                         "selection_reason": "resume_current",
+                        "excluded_task_ids": exclude_task_ids,
+                        "excluded_tags": exclude_tags,
                         "peek_open_requested": peek_open,
                         "peek_open": build_peek_open_payload(
                             repo_root,
@@ -8330,6 +10205,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                             Utc::now(),
                             json || include_context,
                             &exclude_task_ids,
+                            &exclude_tags,
                             current["task"]["task_id"].as_str()
                         ),
                         "task": current["task"].clone(),
@@ -8355,6 +10231,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     agent_id,
                     requested_task_id,
                     exclude_task_ids,
+                    exclude_tags,
                     filters,
                     max: 1,
                     max_new_claims: 0,
@@ -8418,9 +10295,14 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             agent,
             priority,
             tags,
+            tags_csv,
             depends_on,
+            depends_on_csv,
             json,
         } => {
+            let tags = normalize_cli_csv_or_repeat_list(tags, tags_csv, "tag")?;
+            let depends_on =
+                normalize_cli_csv_or_repeat_list(depends_on, depends_on_csv, "depends-on")?;
             let task = build_manual_task(
                 &state,
                 &title,
@@ -8454,8 +10336,10 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             agent,
             priority,
             tags,
+            tags_csv,
             clear_tags,
             depends_on,
+            depends_on_csv,
             clear_depends_on,
             blocked_reason,
             clear_blocked,
@@ -8463,6 +10347,9 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
         } => {
             let agent_id = normalize_agent_id(agent);
             let task_id = resolve_required_task_id(task_id, task_id_arg, "task edit")?;
+            let tags = normalize_cli_csv_or_repeat_list(tags, tags_csv, "tag")?;
+            let depends_on =
+                normalize_cli_csv_or_repeat_list(depends_on, depends_on_csv, "depends-on")?;
             let patch = TaskEditPatch {
                 title,
                 detail: resolve_task_text_patch(detail, clear_detail)?,
@@ -8471,13 +10358,25 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 depends_on: resolve_task_list_patch(depends_on, clear_depends_on, "depends-on")?,
                 blocked: resolve_task_text_patch(blocked_reason, clear_blocked)?,
             };
-            let task = edit_task_in_state(&mut state, &task_id, &agent_id, patch)?;
-            write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
-            append_task_timeline_event(repo_root, &task, &agent_id, "edit", None)?;
+            let outcome = edit_task_in_state(&mut state, &task_id, &agent_id, patch)?;
+            if outcome.changed {
+                write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+                append_task_timeline_event(repo_root, &outcome.task, &agent_id, "edit", None)?;
+            }
             if json {
-                println!("{}", serde_json::to_string_pretty(&task)?);
+                println!("{}", serde_json::to_string_pretty(&outcome.task)?);
             } else {
-                println!("[tasknerve-task] edited {} by {}", task.task_id, agent_id);
+                if outcome.changed {
+                    println!(
+                        "[tasknerve-task] edited {} by {}",
+                        outcome.task.task_id, agent_id
+                    );
+                } else {
+                    println!(
+                        "[tasknerve-task] no changes for {} by {}",
+                        outcome.task.task_id, agent_id
+                    );
+                }
             }
         }
         TaskAction::Remove {
@@ -9039,6 +10938,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             agent,
             task_id,
             exclude_task_ids,
+            exclude_tags,
+            exclude_tags_csv,
             view,
             tags,
             focus,
@@ -9059,8 +10960,12 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
         } => {
             let agent_id = agent.unwrap_or_else(default_agent_id);
             let requested_task_id = normalize_optional_text(task_id, "task id")?;
-            let exclude_task_ids =
-                normalize_task_exclusion_list(exclude_task_ids, requested_task_id.as_deref())?;
+            let exclude_task_ids = normalize_task_exclusion_list(
+                exclude_task_ids,
+                None,
+                requested_task_id.as_deref(),
+            )?;
+            let exclude_tags = normalize_task_excluded_tags(exclude_tags, exclude_tags_csv)?;
             let resolved_view = load_named_task_view(repo_root, view)?;
             let explicit_filter =
                 normalize_task_query_filter(tags, focus, prefix, contains, title_contains)?;
@@ -9077,6 +10982,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     agent_id,
                     requested_task_id,
                     exclude_task_ids,
+                    exclude_tags,
                     filters,
                     max,
                     max_new_claims,
@@ -10881,6 +12787,81 @@ fn task_gui_url(host: &str, port: u16, project: Option<&str>) -> String {
     base
 }
 
+fn task_gui_tasks_api_path(project: Option<&str>) -> String {
+    if let Some(project_key) = project {
+        let trimmed = project_key.trim();
+        if !trimmed.is_empty() {
+            return format!("/api/tasks?project={}", percent_encode(trimmed));
+        }
+    }
+    "/api/tasks".to_string()
+}
+
+fn wait_for_task_gui_ready(
+    host: &str,
+    port: u16,
+    project: Option<&str>,
+    timeout: StdDuration,
+) -> Result<()> {
+    let browser_host = match host {
+        "0.0.0.0" => "127.0.0.1",
+        "::" => "localhost",
+        _ => host,
+    };
+    let request_path = task_gui_tasks_api_path(project);
+    let deadline = Instant::now() + timeout;
+    let mut last_error = None::<String>;
+    while Instant::now() < deadline {
+        let addrs = (browser_host, port)
+            .to_socket_addrs()
+            .with_context(|| format!("failed resolving task gui host {}:{}", browser_host, port))?
+            .collect::<Vec<_>>();
+        for addr in addrs {
+            match TcpStream::connect_timeout(&addr, StdDuration::from_millis(250)) {
+                Ok(mut stream) => {
+                    let _ = stream.set_read_timeout(Some(StdDuration::from_millis(400)));
+                    let _ = stream.set_write_timeout(Some(StdDuration::from_millis(400)));
+                    if stream
+                        .write_all(
+                            format!(
+                                "GET {} HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n\r\n",
+                                request_path, browser_host, port
+                            )
+                            .as_bytes(),
+                        )
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    let mut response = String::new();
+                    if stream.read_to_string(&mut response).is_ok()
+                        && (response.starts_with("HTTP/1.1 200")
+                            || response.starts_with("HTTP/1.0 200"))
+                    {
+                        return Ok(());
+                    }
+                    last_error =
+                        Some("server accepted TCP but did not return HTTP 200".to_string());
+                }
+                Err(err) => {
+                    last_error = Some(err.to_string());
+                }
+            }
+        }
+        thread::sleep(StdDuration::from_millis(120));
+    }
+    bail!(
+        "background task gui did not become ready on {}:{} within {} ms{}",
+        browser_host,
+        port,
+        timeout.as_millis(),
+        last_error
+            .as_ref()
+            .map(|value| format!(" ({value})"))
+            .unwrap_or_default()
+    );
+}
+
 fn spawn_task_gui_background(
     repo_root: &Path,
     host: &str,
@@ -10908,8 +12889,13 @@ fn spawn_task_gui_background(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    cmd.spawn()
+    let mut child = cmd
+        .spawn()
         .with_context(|| "failed spawning background task gui process")?;
+    if let Err(err) = wait_for_task_gui_ready(host, port, project, StdDuration::from_secs(6)) {
+        let _ = child.kill();
+        return Err(err);
+    }
     Ok(())
 }
 
@@ -11146,6 +13132,136 @@ fn handle_task_gui_connection(
         }
         let selected_project = query.get("project").map(String::as_str).or(default_project);
         return match task_gui_rerun_advisor(repo_root, selected_project, &request.body) {
+            Ok(payload) => write_http_json(stream, "200 OK", &payload),
+            Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
+        };
+    }
+
+    if path == "/api/codex" {
+        if method != "GET" {
+            return write_http_json_error(
+                stream,
+                "405 Method Not Allowed",
+                "GET required for /api/codex",
+            );
+        }
+        let selected_project = query.get("project").map(String::as_str).or(default_project);
+        return match task_gui_codex_payload(repo_root, selected_project) {
+            Ok(payload) => write_http_json(stream, "200 OK", &payload),
+            Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
+        };
+    }
+
+    if path == "/api/codex/bind" {
+        if method != "POST" {
+            return write_http_json_error(
+                stream,
+                "405 Method Not Allowed",
+                "POST required for /api/codex/bind",
+            );
+        }
+        if !request_content_type_is_json(&request) {
+            return write_http_json_error(
+                stream,
+                "415 Unsupported Media Type",
+                "application/json body required for /api/codex/bind",
+            );
+        }
+        let selected_project = query.get("project").map(String::as_str).or(default_project);
+        return match task_gui_bind_codex_thread(repo_root, selected_project, &request.body) {
+            Ok(payload) => write_http_json(stream, "200 OK", &payload),
+            Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
+        };
+    }
+
+    if path == "/api/codex/adopt-active" {
+        if method != "POST" {
+            return write_http_json_error(
+                stream,
+                "405 Method Not Allowed",
+                "POST required for /api/codex/adopt-active",
+            );
+        }
+        if !request_content_type_is_json(&request) {
+            return write_http_json_error(
+                stream,
+                "415 Unsupported Media Type",
+                "application/json body required for /api/codex/adopt-active",
+            );
+        }
+        let selected_project = query.get("project").map(String::as_str).or(default_project);
+        return match task_gui_adopt_active_codex_threads(repo_root, selected_project, &request.body)
+        {
+            Ok(payload) => write_http_json(stream, "200 OK", &payload),
+            Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
+        };
+    }
+
+    if path == "/api/codex/unbind" {
+        if method != "POST" {
+            return write_http_json_error(
+                stream,
+                "405 Method Not Allowed",
+                "POST required for /api/codex/unbind",
+            );
+        }
+        if !request_content_type_is_json(&request) {
+            return write_http_json_error(
+                stream,
+                "415 Unsupported Media Type",
+                "application/json body required for /api/codex/unbind",
+            );
+        }
+        let selected_project = query.get("project").map(String::as_str).or(default_project);
+        return match task_gui_unbind_codex_thread(repo_root, selected_project, &request.body) {
+            Ok(payload) => write_http_json(stream, "200 OK", &payload),
+            Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
+        };
+    }
+
+    if path == "/api/codex/inject" {
+        if method != "POST" {
+            return write_http_json_error(
+                stream,
+                "405 Method Not Allowed",
+                "POST required for /api/codex/inject",
+            );
+        }
+        if !request_content_type_is_json(&request) {
+            return write_http_json_error(
+                stream,
+                "415 Unsupported Media Type",
+                "application/json body required for /api/codex/inject",
+            );
+        }
+        let selected_project = query.get("project").map(String::as_str).or(default_project);
+        return match task_gui_inject_codex_prompt(repo_root, selected_project, &request.body) {
+            Ok(payload) => write_http_json(stream, "200 OK", &payload),
+            Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
+        };
+    }
+
+    if path == "/api/codex/heartbeat-active" {
+        if method != "POST" {
+            return write_http_json_error(
+                stream,
+                "405 Method Not Allowed",
+                "POST required for /api/codex/heartbeat-active",
+            );
+        }
+        if !request_content_type_is_json(&request) {
+            return write_http_json_error(
+                stream,
+                "415 Unsupported Media Type",
+                "application/json body required for /api/codex/heartbeat-active",
+            );
+        }
+        let selected_project = query.get("project").map(String::as_str).or(default_project);
+        return match task_gui_heartbeat_active_codex_workers(
+            repo_root,
+            selected_project,
+            &request.body,
+        ) {
             Ok(payload) => write_http_json(stream, "200 OK", &payload),
             Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
         };
@@ -11529,9 +13645,127 @@ struct CodexIntegrationState {
     backup_app_asar_path: String,
     launch_agent_path: String,
     tasknerve_executable: String,
+    #[serde(default)]
+    tasknerve_executable_sha256: String,
     panel_repo_root: String,
     panel_host: String,
     panel_port: u16,
+    #[serde(default = "default_codex_bridge_host_string")]
+    bridge_host: String,
+    #[serde(default = "default_codex_bridge_port")]
+    bridge_port: u16,
+    #[serde(default)]
+    sync_launch_agent_path: String,
+    #[serde(default)]
+    app_asar_sha256: String,
+    #[serde(default = "default_codex_patch_mode")]
+    patch_mode: String,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MacosAppIdentity {
+    display_name: String,
+    bundle_name: String,
+    executable_name: String,
+    bundle_id: String,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+const CODEX_HELPER_VARIANTS: [&str; 4] = ["", " (GPU)", " (Plugin)", " (Renderer)"];
+
+#[cfg(any(test, target_os = "macos"))]
+fn codex_helper_name(app_name: &str, suffix: &str) -> String {
+    format!("{app_name} Helper{suffix}")
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn rewrite_codex_clone_main_plist_json(
+    plist: &mut serde_json::Value,
+    app_name: &str,
+    bundle_id: &str,
+    url_scheme: &str,
+) -> Result<()> {
+    let root = plist
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("Codex app Info.plist is not a dictionary"))?;
+    root.insert("CFBundleDisplayName".to_string(), json!(app_name));
+    root.insert("CFBundleExecutable".to_string(), json!(app_name));
+    root.insert("CFBundleIdentifier".to_string(), json!(bundle_id));
+    root.insert("CFBundleName".to_string(), json!(app_name));
+    if !url_scheme.trim().is_empty() {
+        root.insert(
+            "CFBundleURLTypes".to_string(),
+            json!([
+                {
+                    "CFBundleURLName": app_name,
+                    "CFBundleURLSchemes": [url_scheme],
+                }
+            ]),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn rewrite_codex_clone_helper_plist_json(
+    plist: &mut serde_json::Value,
+    helper_name: &str,
+    helper_bundle_id: &str,
+    helper_bundle_name: &str,
+) -> Result<()> {
+    let root = plist
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("Codex helper Info.plist is not a dictionary"))?;
+    root.insert("CFBundleDisplayName".to_string(), json!(helper_name));
+    root.insert("CFBundleExecutable".to_string(), json!(helper_name));
+    root.insert("CFBundleIdentifier".to_string(), json!(helper_bundle_id));
+    root.insert("CFBundleName".to_string(), json!(helper_bundle_name));
+    Ok(())
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn rewrite_codex_asar_integrity_hash_json(
+    plist: &mut serde_json::Value,
+    asar_hash: &str,
+) -> Result<()> {
+    let root = plist
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("Codex app Info.plist is not a dictionary"))?;
+    root.insert(
+        "ElectronAsarIntegrity".to_string(),
+        json!({
+            "Resources/app.asar": {
+                "algorithm": "SHA256",
+                "hash": asar_hash,
+            }
+        }),
+    );
+    Ok(())
+}
+
+fn paths_look_same(left: &Path, right: &Path) -> bool {
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+fn codex_state_targets_app(state: &CodexIntegrationState, app_path: &Path) -> bool {
+    let configured = Path::new(&state.app_path);
+    !state.app_path.trim().is_empty() && paths_look_same(configured, app_path)
+}
+
+fn default_codex_bridge_host_string() -> String {
+    DEFAULT_CODEX_NATIVE_BRIDGE_HOST.to_string()
+}
+
+fn default_codex_bridge_port() -> u16 {
+    DEFAULT_CODEX_NATIVE_BRIDGE_PORT
+}
+
+fn default_codex_patch_mode() -> String {
+    "codex_native_overlay_v1".to_string()
 }
 
 fn tasknerve_codex_state_path() -> Result<PathBuf> {
@@ -11540,6 +13774,7 @@ fn tasknerve_codex_state_path() -> Result<PathBuf> {
         .join("integration.json"))
 }
 
+#[cfg(target_os = "macos")]
 fn tasknerve_codex_backup_dir() -> Result<PathBuf> {
     Ok(resolve_tasknerve_home()?.join("codex").join("backup"))
 }
@@ -11554,23 +13789,174 @@ fn tasknerve_codex_launch_agent_path() -> Result<PathBuf> {
         .join(format!("{CODEX_PANEL_LAUNCH_AGENT_LABEL}.plist")))
 }
 
+#[cfg(target_os = "macos")]
+fn tasknerve_codex_sync_launch_agent_path() -> Result<PathBuf> {
+    let home = std::env::var("HOME")
+        .with_context(|| "unable to resolve HOME for TaskNerve Codex sync launch agent")?;
+    Ok(PathBuf::from(home)
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("{CODEX_SYNC_LAUNCH_AGENT_LABEL}.plist")))
+}
+
 #[cfg(not(target_os = "macos"))]
 fn tasknerve_codex_launch_agent_path() -> Result<PathBuf> {
     bail!("TaskNerve Codex desktop integration is currently supported on macOS only")
 }
 
-fn load_codex_integration_state() -> Result<Option<CodexIntegrationState>> {
-    load_json_optional(&tasknerve_codex_state_path()?)
+#[cfg(not(target_os = "macos"))]
+fn tasknerve_codex_sync_launch_agent_path() -> Result<PathBuf> {
+    bail!("TaskNerve Codex desktop integration is currently supported on macOS only")
 }
 
+fn load_codex_integration_state() -> Result<Option<CodexIntegrationState>> {
+    let Some(mut state) =
+        load_json_optional::<CodexIntegrationState>(&tasknerve_codex_state_path()?)?
+    else {
+        return Ok(None);
+    };
+    if state.schema_version.trim().is_empty() {
+        state.schema_version = SCHEMA_CODEX_INTEGRATION.to_string();
+    }
+    if state.bridge_host.trim().is_empty() {
+        state.bridge_host = default_codex_bridge_host_string();
+    }
+    if state.bridge_port == 0 {
+        state.bridge_port = default_codex_bridge_port();
+    }
+    if state.patch_mode.trim().is_empty() {
+        state.patch_mode = default_codex_patch_mode();
+    }
+    if state.tasknerve_executable_sha256.trim().is_empty() {
+        state.tasknerve_executable_sha256 = String::new();
+    }
+    Ok(Some(state))
+}
+
+#[cfg(target_os = "macos")]
 fn write_codex_integration_state(state: &CodexIntegrationState) -> Result<()> {
     write_pretty_json(&tasknerve_codex_state_path()?, state)
+}
+
+#[cfg(target_os = "macos")]
+fn read_macos_plist_json(plist_path: &Path) -> Result<serde_json::Value> {
+    let output = command_output_checked(
+        ProcessCommand::new("plutil")
+            .arg("-convert")
+            .arg("json")
+            .arg("-o")
+            .arg("-")
+            .arg(plist_path),
+        &format!("plutil convert {} to json", plist_path.display()),
+    )?;
+    serde_json::from_str(output.trim()).with_context(|| {
+        format!(
+            "failed parsing plist json emitted for {}",
+            plist_path.display()
+        )
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn write_macos_plist_json(plist_path: &Path, value: &serde_json::Value) -> Result<()> {
+    let temp_path = std::env::temp_dir().join(format!("tasknerve-plist-{}.json", Uuid::new_v4()));
+    fs::write(&temp_path, serde_json::to_vec_pretty(value)?)
+        .with_context(|| format!("failed writing {}", temp_path.display()))?;
+    let result = command_status_checked(
+        ProcessCommand::new("plutil")
+            .arg("-convert")
+            .arg("xml1")
+            .arg("-o")
+            .arg(plist_path)
+            .arg(&temp_path),
+        &format!("plutil write {}", plist_path.display()),
+    );
+    let _ = fs::remove_file(&temp_path);
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn macos_app_identity(app_path: &Path) -> Result<MacosAppIdentity> {
+    let plist_path = app_path.join("Contents").join("Info.plist");
+    let payload = read_macos_plist_json(&plist_path)?;
+    let display_name = payload["CFBundleDisplayName"]
+        .as_str()
+        .or_else(|| payload["CFBundleName"].as_str())
+        .or_else(|| app_path.file_stem().and_then(|value| value.to_str()))
+        .unwrap_or("Codex")
+        .to_string();
+    let bundle_name = payload["CFBundleName"]
+        .as_str()
+        .unwrap_or(display_name.as_str())
+        .to_string();
+    let executable_name = payload["CFBundleExecutable"]
+        .as_str()
+        .unwrap_or(display_name.as_str())
+        .to_string();
+    let bundle_id = payload["CFBundleIdentifier"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    Ok(MacosAppIdentity {
+        display_name,
+        bundle_name,
+        executable_name,
+        bundle_id,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_app_label(app_path: &Path) -> String {
+    macos_app_identity(app_path)
+        .map(|identity| identity.display_name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            app_path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("Codex")
+                .to_string()
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn applescript_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_codex_clone_source_app_path(source_override: Option<&Path>) -> Result<PathBuf> {
+    if let Some(path) = source_override {
+        return Ok(path.to_path_buf());
+    }
+    let default_path = PathBuf::from(DEFAULT_CODEX_APP_PATH_MACOS);
+    if default_path.exists() {
+        return Ok(default_path);
+    }
+    bail!(
+        "source Codex.app not found at {}; pass --source <path> to clone from a different bundle",
+        DEFAULT_CODEX_APP_PATH_MACOS
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn update_macos_app_asar_integrity(app_path: &Path, asar_hash: &str) -> Result<()> {
+    let plist_path = app_path.join("Contents").join("Info.plist");
+    let mut plist = read_macos_plist_json(&plist_path)?;
+    rewrite_codex_asar_integrity_hash_json(&mut plist, asar_hash)?;
+    write_macos_plist_json(&plist_path, &plist)
 }
 
 fn tasknerve_codex_panel_url(host: &str, port: u16) -> String {
     task_gui_url(host, port, None)
 }
 
+fn tasknerve_codex_native_bridge_url(host: &str, port: u16) -> String {
+    format!("http://{}:{}", host.trim(), port)
+}
+
+#[cfg(any(test, target_os = "macos"))]
 fn codex_panel_origins(host: &str, port: u16) -> Vec<String> {
     let normalized = match host.trim() {
         "" | "0.0.0.0" => "127.0.0.1".to_string(),
@@ -11591,6 +13977,90 @@ fn codex_panel_origins(host: &str, port: u16) -> Vec<String> {
     origins.into_iter().collect()
 }
 
+fn http_json_request_local(
+    host: &str,
+    port: u16,
+    method: &str,
+    path: &str,
+    payload: Option<&serde_json::Value>,
+) -> Result<serde_json::Value> {
+    let address = format!("{}:{}", host.trim(), port);
+    let mut stream = TcpStream::connect(&address)
+        .with_context(|| format!("failed connecting to {}", address))?;
+    let _ = stream.set_read_timeout(Some(StdDuration::from_secs(5)));
+    let _ = stream.set_write_timeout(Some(StdDuration::from_secs(5)));
+    let body = payload
+        .map(serde_json::to_vec)
+        .transpose()
+        .with_context(|| "failed serializing local http payload")?
+        .unwrap_or_default();
+    let request = if body.is_empty() {
+        format!(
+            "{method} {path} HTTP/1.1\r\nHost: {address}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
+            method = method,
+            path = path,
+            address = address
+        )
+    } else {
+        format!(
+            "{method} {path} HTTP/1.1\r\nHost: {address}\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n",
+            method = method,
+            path = path,
+            address = address,
+            content_length = body.len()
+        )
+    };
+    stream
+        .write_all(request.as_bytes())
+        .with_context(|| format!("failed writing request to {}", address))?;
+    if !body.is_empty() {
+        stream
+            .write_all(&body)
+            .with_context(|| format!("failed writing request body to {}", address))?;
+    }
+    stream
+        .flush()
+        .with_context(|| format!("failed flushing request to {}", address))?;
+    let mut response = Vec::<u8>::new();
+    stream
+        .read_to_end(&mut response)
+        .with_context(|| format!("failed reading response from {}", address))?;
+    let header_end = find_http_header_end(&response)
+        .ok_or_else(|| anyhow!("local http response missing header terminator"))?;
+    let header_text = String::from_utf8_lossy(&response[..header_end]);
+    let status_line = header_text
+        .lines()
+        .next()
+        .ok_or_else(|| anyhow!("local http response missing status line"))?;
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(0);
+    let response_body = &response[header_end + 4..];
+    let parsed = if response_body.is_empty() {
+        json!({})
+    } else {
+        serde_json::from_slice::<serde_json::Value>(response_body)
+            .with_context(|| format!("local http response from {} was not valid JSON", address))?
+    };
+    if !(200..300).contains(&status_code) {
+        let message = parsed
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string)
+            .unwrap_or_else(|| {
+                format!(
+                    "local http request {} {} failed with status {}",
+                    method, path, status_code
+                )
+            });
+        bail!("{}", message);
+    }
+    Ok(parsed)
+}
+
+#[cfg(any(test, target_os = "macos"))]
 fn ensure_csp_directive_origins(csp: &str, directive: &str, origins: &[String]) -> String {
     let mut parts = csp
         .split(';')
@@ -11622,6 +14092,7 @@ fn ensure_csp_directive_origins(csp: &str, directive: &str, origins: &[String]) 
     format!("{};", parts.join("; "))
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn patch_codex_index_html(input: &str, host: &str, port: u16) -> Result<String> {
     let marker = "<meta http-equiv=\"Content-Security-Policy\" content=\"";
     let csp_start = input
@@ -11657,10 +14128,166 @@ fn patch_codex_index_html(input: &str, host: &str, port: u16) -> Result<String> 
     Ok(html)
 }
 
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexMainBridgeBindings {
+    local_host_config: String,
+    context_resolver: String,
+    ensure_window: Option<String>,
+    navigate_route: Option<String>,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn is_js_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$'
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn extract_js_identifier_before(input: &str, end_exclusive: usize) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut end = end_exclusive.min(bytes.len());
+    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    let mut start = end;
+    while start > 0 && is_js_identifier_byte(bytes[start - 1]) {
+        start -= 1;
+    }
+    if start == end {
+        None
+    } else {
+        Some(input[start..end].to_string())
+    }
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn extract_js_identifier_at(input: &str, start_inclusive: usize) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut start = start_inclusive.min(bytes.len());
+    while start < bytes.len() && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    let mut end = start;
+    while end < bytes.len() && is_js_identifier_byte(bytes[end]) {
+        end += 1;
+    }
+    if start == end {
+        None
+    } else {
+        Some(input[start..end].to_string())
+    }
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn find_any_token(input: &str, tokens: &[&str]) -> Option<usize> {
+    tokens.iter().filter_map(|token| input.find(token)).min()
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn find_identifier_after_marker(input: &str, marker: &str) -> Option<String> {
+    let mut search_from = 0usize;
+    while let Some(relative_index) = input[search_from..].find(marker) {
+        let marker_index = search_from + relative_index + marker.len();
+        if let Some(identifier) = extract_js_identifier_at(input, marker_index) {
+            return Some(identifier);
+        }
+        search_from = marker_index;
+    }
+    None
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn extract_codex_main_bridge_bindings(input: &str) -> Result<CodexMainBridgeBindings> {
+    let local_kind_index =
+        find_any_token(input, &["kind:`local`", "kind:'local'", "kind:\"local\""])
+            .ok_or_else(|| anyhow!("failed locating Codex local host config in main.js"))?;
+    let local_assignment_index = input[..local_kind_index]
+        .rfind('=')
+        .ok_or_else(|| anyhow!("failed locating local host config assignment in main.js"))?;
+    let local_host_config = extract_js_identifier_before(input, local_assignment_index)
+        .ok_or_else(|| anyhow!("failed parsing local host config identifier in main.js"))?;
+
+    let context_call_pattern = format!("({local_host_config})");
+    let context_call_index = input[local_kind_index..]
+        .find(&context_call_pattern)
+        .map(|offset| local_kind_index + offset)
+        .ok_or_else(|| anyhow!("failed locating Codex context resolver call in main.js"))?;
+    let context_resolver = extract_js_identifier_before(input, context_call_index)
+        .ok_or_else(|| anyhow!("failed parsing Codex context resolver identifier in main.js"))?;
+
+    let ensure_window = find_identifier_after_marker(input, "ensurePrimaryWindowVisible:")
+        .or_else(|| find_identifier_after_marker(input, "selectHost:"));
+    let navigate_route = find_identifier_after_marker(input, "navigateToRoute:");
+
+    Ok(CodexMainBridgeBindings {
+        local_host_config,
+        context_resolver,
+        ensure_window,
+        navigate_route,
+    })
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn patch_codex_main_js(input: &str, bridge_host: &str, bridge_port: u16) -> Result<String> {
+    let bindings = extract_codex_main_bridge_bindings(input)?;
+    let rendered = render_codex_main_bridge_script(&bindings, bridge_host, bridge_port);
+    if input.contains(CODEX_MAIN_BRIDGE_START_MARKER)
+        && input.contains(CODEX_MAIN_BRIDGE_END_MARKER)
+    {
+        let start = input
+            .find(CODEX_MAIN_BRIDGE_START_MARKER)
+            .ok_or_else(|| anyhow!("Codex main.js is missing TaskNerve bridge start marker"))?;
+        let end_marker_index = input
+            .find(CODEX_MAIN_BRIDGE_END_MARKER)
+            .ok_or_else(|| anyhow!("Codex main.js is missing TaskNerve bridge end marker"))?;
+        let end = end_marker_index + CODEX_MAIN_BRIDGE_END_MARKER.len();
+        return Ok(format!("{}{}{}", &input[..start], rendered, &input[end..]));
+    }
+    if let Some(source_map_index) = input.rfind("//# sourceMappingURL=") {
+        return Ok(format!(
+            "{}{}\n{}",
+            &input[..source_map_index],
+            rendered,
+            &input[source_map_index..]
+        ));
+    }
+    Ok(format!("{}\n{}", input, rendered))
+}
+
+#[cfg(any(test, target_os = "macos"))]
 fn render_codex_panel_script(host: &str, port: u16) -> String {
     DEFAULT_CODEX_PANEL_SCRIPT.replace(
         "__TASKNERVE_BASE_URL__",
         &tasknerve_codex_panel_url(host, port),
+    )
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn render_codex_main_bridge_script(
+    bindings: &CodexMainBridgeBindings,
+    host: &str,
+    port: u16,
+) -> String {
+    format!(
+        "{}\n{}\n{}",
+        CODEX_MAIN_BRIDGE_START_MARKER,
+        DEFAULT_CODEX_MAIN_BRIDGE_SCRIPT
+            .replace("__TASKNERVE_BRIDGE_HOST__", host)
+            .replace("__TASKNERVE_BRIDGE_PORT__", &port.to_string())
+            .replace(
+                "__TASKNERVE_LOCAL_HOST_CONFIG__",
+                &bindings.local_host_config,
+            )
+            .replace("__TASKNERVE_CONTEXT_RESOLVER__", &bindings.context_resolver,)
+            .replace(
+                "__TASKNERVE_ENSURE_WINDOW__",
+                bindings.ensure_window.as_deref().unwrap_or("null"),
+            )
+            .replace(
+                "__TASKNERVE_NAVIGATE_ROUTE__",
+                bindings.navigate_route.as_deref().unwrap_or("null"),
+            ),
+        CODEX_MAIN_BRIDGE_END_MARKER
     )
 }
 
@@ -11679,6 +14306,7 @@ fn command_output_checked(cmd: &mut ProcessCommand, context: &str) -> Result<Str
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+#[cfg(target_os = "macos")]
 fn command_status_checked(cmd: &mut ProcessCommand, context: &str) -> Result<()> {
     let status = cmd
         .status()
@@ -11728,6 +14356,28 @@ fn codex_panel_health(host: &str, port: u16) -> serde_json::Value {
     })
 }
 
+fn codex_native_bridge_health(host: &str, port: u16) -> serde_json::Value {
+    match http_json_request_local(host, port, "GET", "/tasknerve/health", None) {
+        Ok(payload) => {
+            json!({
+                "ok": payload["ok"].as_bool().unwrap_or(false),
+                "address": format!("{}:{}", host.trim(), port),
+                "url": tasknerve_codex_native_bridge_url(host, port),
+                "payload": payload
+            })
+        }
+        Err(err) => {
+            json!({
+                "ok": false,
+                "address": format!("{}:{}", host.trim(), port),
+                "url": tasknerve_codex_native_bridge_url(host, port),
+                "error": err.to_string()
+            })
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn wait_for_codex_panel_health(host: &str, port: u16, attempts: usize) -> serde_json::Value {
     for _ in 0..attempts {
         let payload = codex_panel_health(host, port);
@@ -11737,6 +14387,22 @@ fn wait_for_codex_panel_health(host: &str, port: u16, attempts: usize) -> serde_
         thread::sleep(StdDuration::from_millis(350));
     }
     codex_panel_health(host, port)
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_codex_native_bridge_health(
+    host: &str,
+    port: u16,
+    attempts: usize,
+) -> serde_json::Value {
+    for _ in 0..attempts {
+        let payload = codex_native_bridge_health(host, port);
+        if payload["ok"].as_bool().unwrap_or(false) {
+            return payload;
+        }
+        thread::sleep(StdDuration::from_millis(350));
+    }
+    codex_native_bridge_health(host, port)
 }
 
 fn codex_panel_asset_installed(app_asar_path: &Path) -> Result<bool> {
@@ -11756,6 +14422,7 @@ fn codex_panel_asset_installed(app_asar_path: &Path) -> Result<bool> {
         .any(|line| line.trim() == format!("/webview/assets/{}", CODEX_PANEL_ASSET_NAME)))
 }
 
+#[cfg(target_os = "macos")]
 fn codex_backup_asar_path(app_path: &Path) -> Result<PathBuf> {
     let app_name = app_path
         .file_name()
@@ -11798,10 +14465,67 @@ fn codex_app_asar_path(app_path: &Path) -> PathBuf {
 }
 
 #[cfg(target_os = "macos")]
-fn codex_app_is_running() -> bool {
+fn codex_app_is_running(app_path: &Path) -> bool {
+    if let Ok(identity) = macos_app_identity(app_path) {
+        if !identity.bundle_id.trim().is_empty() {
+            let applescript_running = ProcessCommand::new("osascript")
+                .arg("-e")
+                .arg(format!(
+                    "if application id \"{}\" is running then return \"true\" else return \"false\"",
+                    applescript_escape(&identity.bundle_id)
+                ))
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| {
+                    String::from_utf8_lossy(&output.stdout)
+                        .trim()
+                        .eq_ignore_ascii_case("true")
+                })
+                .unwrap_or(false);
+            if applescript_running {
+                return true;
+            }
+        }
+        if !identity.display_name.trim().is_empty() {
+            let applescript_running = ProcessCommand::new("osascript")
+                .arg("-e")
+                .arg(format!(
+                    "if application \"{}\" is running then return \"true\" else return \"false\"",
+                    applescript_escape(&identity.display_name)
+                ))
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| {
+                    String::from_utf8_lossy(&output.stdout)
+                        .trim()
+                        .eq_ignore_ascii_case("true")
+                })
+                .unwrap_or(false);
+            if applescript_running {
+                return true;
+            }
+        }
+        let executable_path = app_path
+            .join("Contents")
+            .join("MacOS")
+            .join(identity.executable_name);
+        if ProcessCommand::new("pgrep")
+            .arg("-f")
+            .arg(executable_path.display().to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
     ProcessCommand::new("pgrep")
-        .arg("-x")
-        .arg("Codex")
+        .arg("-f")
+        .arg(app_path.display().to_string())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -11810,26 +14534,39 @@ fn codex_app_is_running() -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn maybe_quit_codex_app() -> Result<bool> {
-    if !codex_app_is_running() {
+fn maybe_quit_codex_app(app_path: &Path) -> Result<bool> {
+    if !codex_app_is_running(app_path) {
         return Ok(false);
     }
-    let _ = ProcessCommand::new("osascript")
-        .arg("-e")
-        .arg("tell application \"Codex\" to quit")
-        .status();
+    if let Ok(identity) = macos_app_identity(app_path) {
+        if !identity.bundle_id.trim().is_empty() {
+            let _ = ProcessCommand::new("osascript")
+                .arg("-e")
+                .arg(format!(
+                    "tell application id \"{}\" to quit",
+                    applescript_escape(&identity.bundle_id)
+                ))
+                .status();
+        } else if !identity.display_name.trim().is_empty() {
+            let _ = ProcessCommand::new("osascript")
+                .arg("-e")
+                .arg(format!(
+                    "tell application \"{}\" to quit",
+                    applescript_escape(&identity.display_name)
+                ))
+                .status();
+        }
+    }
     for _ in 0..40 {
-        if !codex_app_is_running() {
+        if !codex_app_is_running(app_path) {
             return Ok(true);
         }
         thread::sleep(StdDuration::from_millis(250));
     }
-    bail!("Codex.app did not exit after a polite quit request")
-}
-
-#[cfg(not(target_os = "macos"))]
-fn maybe_quit_codex_app() -> Result<bool> {
-    Ok(false)
+    bail!(
+        "{} did not exit after a polite quit request",
+        macos_app_label(app_path)
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -11839,16 +14576,12 @@ fn maybe_reopen_codex_app(app_path: &Path, reopen: bool) -> Result<bool> {
     }
     command_status_checked(
         ProcessCommand::new("open").arg("-a").arg(app_path),
-        "open -a Codex.app",
+        &format!("open -a {}", macos_app_label(app_path)),
     )?;
     Ok(true)
 }
 
-#[cfg(not(target_os = "macos"))]
-fn maybe_reopen_codex_app(_app_path: &Path, _reopen: bool) -> Result<bool> {
-    Ok(false)
-}
-
+#[cfg(target_os = "macos")]
 fn xml_escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -11858,7 +14591,8 @@ fn xml_escape(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-fn render_codex_launch_agent_plist(
+#[cfg(target_os = "macos")]
+fn render_codex_panel_launch_agent_plist(
     tasknerve_executable: &Path,
     panel_repo_root: &Path,
     host: &str,
@@ -11882,12 +14616,64 @@ fn render_codex_launch_agent_plist(
         .collect::<Vec<_>>()
         .join("\n");
     let tasknerve_home = resolve_tasknerve_home().unwrap_or_else(|_| PathBuf::from(".tasknerve"));
-    let log_path = tasknerve_home.join("codex").join("launch-agent.log");
-    let err_path = tasknerve_home.join("codex").join("launch-agent.err.log");
+    let log_path = tasknerve_home.join("codex").join("panel-launch-agent.log");
+    let err_path = tasknerve_home
+        .join("codex")
+        .join("panel-launch-agent.err.log");
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key>\n  <string>{}</string>\n  <key>ProgramArguments</key>\n  <array>\n{}\n  </array>\n  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <true/>\n  <key>WorkingDirectory</key>\n  <string>{}</string>\n  <key>StandardOutPath</key>\n  <string>{}</string>\n  <key>StandardErrorPath</key>\n  <string>{}</string>\n</dict>\n</plist>\n",
         CODEX_PANEL_LAUNCH_AGENT_LABEL,
         args_xml,
+        xml_escape(&panel_repo_root.display().to_string()),
+        xml_escape(&log_path.display().to_string()),
+        xml_escape(&err_path.display().to_string())
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn render_codex_sync_launch_agent_plist(
+    tasknerve_executable: &Path,
+    panel_repo_root: &Path,
+    app_path: &Path,
+) -> String {
+    let args = vec![
+        tasknerve_executable.display().to_string(),
+        "--repo-root".to_string(),
+        panel_repo_root.display().to_string(),
+        "codex".to_string(),
+        "sync".to_string(),
+        "--app".to_string(),
+        app_path.display().to_string(),
+        "--panel-repo-root".to_string(),
+        panel_repo_root.display().to_string(),
+        "--quiet".to_string(),
+    ];
+    let args_xml = args
+        .iter()
+        .map(|arg| format!("    <string>{}</string>", xml_escape(arg)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let watch_paths_xml = vec![
+        format!(
+            "    <string>{}</string>",
+            xml_escape(&codex_app_asar_path(app_path).display().to_string())
+        ),
+        format!(
+            "    <string>{}</string>",
+            xml_escape(&tasknerve_executable.display().to_string())
+        ),
+    ]
+    .join("\n");
+    let tasknerve_home = resolve_tasknerve_home().unwrap_or_else(|_| PathBuf::from(".tasknerve"));
+    let log_path = tasknerve_home.join("codex").join("sync-launch-agent.log");
+    let err_path = tasknerve_home
+        .join("codex")
+        .join("sync-launch-agent.err.log");
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key>\n  <string>{}</string>\n  <key>ProgramArguments</key>\n  <array>\n{}\n  </array>\n  <key>RunAtLoad</key>\n  <true/>\n  <key>StartInterval</key>\n  <integer>900</integer>\n  <key>WatchPaths</key>\n  <array>\n{}\n  </array>\n  <key>WorkingDirectory</key>\n  <string>{}</string>\n  <key>StandardOutPath</key>\n  <string>{}</string>\n  <key>StandardErrorPath</key>\n  <string>{}</string>\n</dict>\n</plist>\n",
+        CODEX_SYNC_LAUNCH_AGENT_LABEL,
+        args_xml,
+        watch_paths_xml,
         xml_escape(&panel_repo_root.display().to_string()),
         xml_escape(&log_path.display().to_string()),
         xml_escape(&err_path.display().to_string())
@@ -11909,11 +14695,6 @@ fn load_codex_launch_agent(agent_path: &Path) -> Result<()> {
     )
 }
 
-#[cfg(not(target_os = "macos"))]
-fn load_codex_launch_agent(_agent_path: &Path) -> Result<()> {
-    bail!("TaskNerve Codex desktop integration is currently supported on macOS only")
-}
-
 #[cfg(target_os = "macos")]
 fn unload_codex_launch_agent(agent_path: &Path) -> Result<bool> {
     if !agent_path.exists() {
@@ -11926,23 +14707,18 @@ fn unload_codex_launch_agent(agent_path: &Path) -> Result<bool> {
     Ok(true)
 }
 
-#[cfg(not(target_os = "macos"))]
-fn unload_codex_launch_agent(_agent_path: &Path) -> Result<bool> {
-    Ok(false)
-}
-
 #[cfg(target_os = "macos")]
-fn codex_launch_agent_loaded() -> bool {
+fn codex_launch_agent_loaded_by_label(label: &str) -> bool {
     command_output_checked(
         ProcessCommand::new("launchctl").arg("list"),
         "launchctl list",
     )
-    .map(|output| output.contains(CODEX_PANEL_LAUNCH_AGENT_LABEL))
+    .map(|output| output.contains(label))
     .unwrap_or(false)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn codex_launch_agent_loaded() -> bool {
+fn codex_launch_agent_loaded_by_label(_label: &str) -> bool {
     false
 }
 
@@ -11952,8 +14728,22 @@ fn codex_integration_doctor_report(app_override: Option<&Path>) -> Result<serde_
         Some(path) => Some(path.to_path_buf()),
         None => resolve_codex_app_path(None).ok(),
     };
+    let relevant_state = state.as_ref().filter(|value| {
+        app_path
+            .as_ref()
+            .is_some_and(|path| codex_state_targets_app(value, path))
+    });
     let app_detected = app_path.as_ref().is_some_and(|path| path.exists());
     let app_asar_path = app_path.as_ref().map(|path| codex_app_asar_path(path));
+    let app_asar_sha256 = app_asar_path
+        .as_ref()
+        .filter(|path| path.exists())
+        .and_then(|path| hash_file(path).ok());
+    let tasknerve_executable_path = std::env::current_exe().ok();
+    let tasknerve_executable_sha256 = tasknerve_executable_path
+        .as_ref()
+        .filter(|path| path.exists())
+        .and_then(|path| hash_file(path).ok());
     let panel_asset_installed = match app_asar_path.as_ref() {
         Some(path) if path.exists() && command_exists("npx") => {
             codex_panel_asset_installed(path).unwrap_or(false)
@@ -11961,20 +14751,61 @@ fn codex_integration_doctor_report(app_override: Option<&Path>) -> Result<serde_
         _ => false,
     };
     let launch_agent_path = tasknerve_codex_launch_agent_path().ok();
-    let host = state
-        .as_ref()
+    let sync_launch_agent_path = tasknerve_codex_sync_launch_agent_path().ok();
+    let host = relevant_state
         .map(|value| value.panel_host.as_str())
         .unwrap_or(DEFAULT_CODEX_PANEL_HOST);
-    let port = state
-        .as_ref()
+    let port = relevant_state
         .map(|value| value.panel_port)
         .unwrap_or(DEFAULT_CODEX_PANEL_PORT);
+    let bridge_host = relevant_state
+        .map(|value| value.bridge_host.as_str())
+        .unwrap_or(DEFAULT_CODEX_NATIVE_BRIDGE_HOST);
+    let bridge_port = relevant_state
+        .map(|value| value.bridge_port)
+        .unwrap_or(DEFAULT_CODEX_NATIVE_BRIDGE_PORT);
     let panel_health = codex_panel_health(host, port);
+    let native_bridge_health = codex_native_bridge_health(bridge_host, bridge_port);
     let skill = tasknerve_skill_doctor_report();
+    let hash_matches_state = match (relevant_state, app_asar_sha256.as_deref()) {
+        (Some(state), Some(current_hash)) if !state.app_asar_sha256.trim().is_empty() => {
+            Some(state.app_asar_sha256 == current_hash)
+        }
+        _ => None,
+    };
+    let executable_matches_state = match (relevant_state, tasknerve_executable_sha256.as_deref()) {
+        (Some(state), Some(current_hash))
+            if !state.tasknerve_executable_sha256.trim().is_empty() =>
+        {
+            Some(state.tasknerve_executable_sha256 == current_hash)
+        }
+        _ => None,
+    };
+    let app_running = app_path
+        .as_ref()
+        .map(|path| codex_app_is_running(path))
+        .unwrap_or(false);
+    let app_label = app_path
+        .as_ref()
+        .map(|path| macos_app_label(path))
+        .unwrap_or_else(|| "Codex".to_string());
     let hint = if !app_detected {
-        "install Codex.app or rerun `tasknerve codex install --app <path>`".to_string()
+        "install Codex or rerun `tasknerve codex install --app <path>`".to_string()
+    } else if hash_matches_state == Some(false) {
+        "Codex updated or patch drifted; run `tasknerve codex sync` to reapply the native overlay"
+            .to_string()
+    } else if executable_matches_state == Some(false) {
+        "TaskNerve updated; run `tasknerve codex sync` to refresh the native Codex patch layer"
+            .to_string()
     } else if !panel_asset_installed {
         "run `tasknerve codex install` to patch the local Codex desktop bundle".to_string()
+    } else if !app_running {
+        format!(
+            "open {} to bring the native TaskNerve bridge online",
+            app_label
+        )
+    } else if !native_bridge_health["ok"].as_bool().unwrap_or(false) {
+        "Codex native bridge is offline; rerun `tasknerve codex sync --force` if it does not recover".to_string()
     } else if !panel_health["ok"].as_bool().unwrap_or(false) {
         "TaskNerve panel service is not healthy; rerun `tasknerve codex install --force`"
             .to_string()
@@ -11985,15 +14816,31 @@ fn codex_integration_doctor_report(app_override: Option<&Path>) -> Result<serde_
         "schema_version": SCHEMA_CODEX_INTEGRATION,
         "generated_at_utc": now_utc(),
         "app_detected": app_detected,
+        "app_running": app_running,
         "app_path": app_path.as_ref().map(|path| path.display().to_string()),
         "app_asar_path": app_asar_path.as_ref().map(|path| path.display().to_string()),
+        "app_asar_sha256": app_asar_sha256,
+        "current_app_matches_state": hash_matches_state,
+        "tasknerve_executable_path": tasknerve_executable_path.as_ref().map(|path| path.display().to_string()),
+        "tasknerve_executable_sha256": tasknerve_executable_sha256,
+        "current_tasknerve_matches_state": executable_matches_state,
         "panel_asset_installed": panel_asset_installed,
         "launch_agent": {
             "path": launch_agent_path.as_ref().map(|path| path.display().to_string()),
-            "loaded": launch_agent_path.as_ref().is_some_and(|path| path.exists()) && codex_launch_agent_loaded(),
+            "loaded": launch_agent_path.as_ref().is_some_and(|path| path.exists()) && codex_launch_agent_loaded_by_label(CODEX_PANEL_LAUNCH_AGENT_LABEL),
+        },
+        "sync_launch_agent": {
+            "path": sync_launch_agent_path.as_ref().map(|path| path.display().to_string()),
+            "loaded": sync_launch_agent_path.as_ref().is_some_and(|path| path.exists()) && codex_launch_agent_loaded_by_label(CODEX_SYNC_LAUNCH_AGENT_LABEL),
         },
         "panel_health": panel_health,
         "panel_url": tasknerve_codex_panel_url(host, port),
+        "native_bridge": {
+            "host": bridge_host,
+            "port": bridge_port,
+            "url": tasknerve_codex_native_bridge_url(bridge_host, bridge_port),
+            "health": native_bridge_health
+        },
         "state": state,
         "skill": {
             "ok": skill["ok"].as_bool().unwrap_or(false),
@@ -12012,24 +14859,39 @@ fn install_codex_integration(
     panel_repo_root: Option<&Path>,
     host: &str,
     port: u16,
+    bridge_host: &str,
+    bridge_port: u16,
     force: bool,
 ) -> Result<serde_json::Value> {
     if !command_exists("npx") {
-        bail!("npx is required to patch Codex.app locally");
+        bail!("npx is required to patch the local Codex app bundle");
     }
     if !command_exists("codesign") {
-        bail!("codesign is required to re-sign the patched Codex.app bundle");
+        bail!("codesign is required to re-sign the patched Codex app bundle");
     }
     let app_path = resolve_codex_app_path(app_override)?;
     let app_asar_path = codex_app_asar_path(&app_path);
     if !app_asar_path.exists() {
         bail!("Codex app bundle is missing {}", app_asar_path.display());
     }
+    let prior_state =
+        load_codex_integration_state()?.filter(|state| codex_state_targets_app(state, &app_path));
     let panel_repo_root = panel_repo_root.unwrap_or(repo_root);
     let tasknerve_executable =
         std::env::current_exe().with_context(|| "failed resolving current tasknerve executable")?;
+    let tasknerve_executable_sha256 = hash_file(&tasknerve_executable)?;
+    let current_asar_sha256 = hash_file(&app_asar_path)?;
     let backup_path = codex_backup_asar_path(&app_path)?;
-    if !backup_path.exists() {
+    let refresh_backup = force
+        || !backup_path.exists()
+        || prior_state
+            .as_ref()
+            .map(|state| {
+                !state.app_asar_sha256.trim().is_empty()
+                    && state.app_asar_sha256 != current_asar_sha256
+            })
+            .unwrap_or(false);
+    if refresh_backup {
         if let Some(parent) = backup_path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed creating {}", parent.display()))?;
@@ -12042,7 +14904,8 @@ fn install_codex_integration(
             )
         })?;
     }
-    let was_running = maybe_quit_codex_app()?;
+    let app_label = macos_app_label(&app_path);
+    let was_running = maybe_quit_codex_app(&app_path)?;
     let work_dir = std::env::temp_dir().join(format!("tasknerve-codex-patch-{}", Uuid::new_v4()));
     let extract_dir = work_dir.join("extract");
     fs::create_dir_all(&extract_dir)
@@ -12065,6 +14928,15 @@ fn install_codex_integration(
     )?;
     fs::write(&index_path, patched_index)
         .with_context(|| format!("failed writing {}", index_path.display()))?;
+    let main_path = extract_dir.join(".vite").join("build").join("main.js");
+    let patched_main = patch_codex_main_js(
+        &fs::read_to_string(&main_path)
+            .with_context(|| format!("failed reading {}", main_path.display()))?,
+        bridge_host,
+        bridge_port,
+    )?;
+    fs::write(&main_path, patched_main)
+        .with_context(|| format!("failed writing {}", main_path.display()))?;
     let asset_path = extract_dir
         .join("webview")
         .join("assets")
@@ -12088,6 +14960,8 @@ fn install_codex_integration(
             packed_asar.display()
         )
     })?;
+    let patched_asar_sha256 = hash_file(&app_asar_path)?;
+    update_macos_app_asar_integrity(&app_path, &patched_asar_sha256)?;
     command_status_checked(
         ProcessCommand::new("codesign")
             .arg("--force")
@@ -12095,7 +14969,7 @@ fn install_codex_integration(
             .arg("--sign")
             .arg("-")
             .arg(&app_path),
-        "codesign TaskNerve-patched Codex.app",
+        &format!("codesign TaskNerve-patched {}", app_label),
     )?;
     let launch_agent_path = tasknerve_codex_launch_agent_path()?;
     if let Some(parent) = launch_agent_path.parent() {
@@ -12103,7 +14977,7 @@ fn install_codex_integration(
             .with_context(|| format!("failed creating {}", parent.display()))?;
     }
     let launch_agent_contents =
-        render_codex_launch_agent_plist(&tasknerve_executable, panel_repo_root, host, port);
+        render_codex_panel_launch_agent_plist(&tasknerve_executable, panel_repo_root, host, port);
     fs::write(&launch_agent_path, launch_agent_contents).with_context(|| {
         format!(
             "failed writing launch agent {}",
@@ -12111,9 +14985,24 @@ fn install_codex_integration(
         )
     })?;
     load_codex_launch_agent(&launch_agent_path)?;
+    let sync_launch_agent_path = tasknerve_codex_sync_launch_agent_path()?;
+    if let Some(parent) = sync_launch_agent_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed creating {}", parent.display()))?;
+    }
+    let sync_launch_agent_contents =
+        render_codex_sync_launch_agent_plist(&tasknerve_executable, panel_repo_root, &app_path);
+    fs::write(&sync_launch_agent_path, sync_launch_agent_contents).with_context(|| {
+        format!(
+            "failed writing launch agent {}",
+            sync_launch_agent_path.display()
+        )
+    })?;
+    load_codex_launch_agent(&sync_launch_agent_path)?;
     let skill_path = install_tasknerve_skill_to_codex(true)?;
+    let reopened_codex = maybe_reopen_codex_app(&app_path, true)?;
+    let native_bridge_health = wait_for_codex_native_bridge_health(bridge_host, bridge_port, 20);
     let panel_health = wait_for_codex_panel_health(host, port, 16);
-    let reopened_codex = maybe_reopen_codex_app(&app_path, was_running)?;
     let now = now_utc();
     let state = CodexIntegrationState {
         schema_version: SCHEMA_CODEX_INTEGRATION.to_string(),
@@ -12123,9 +15012,15 @@ fn install_codex_integration(
         backup_app_asar_path: backup_path.display().to_string(),
         launch_agent_path: launch_agent_path.display().to_string(),
         tasknerve_executable: tasknerve_executable.display().to_string(),
+        tasknerve_executable_sha256: tasknerve_executable_sha256.clone(),
         panel_repo_root: panel_repo_root.display().to_string(),
         panel_host: host.to_string(),
         panel_port: port,
+        bridge_host: bridge_host.to_string(),
+        bridge_port,
+        sync_launch_agent_path: sync_launch_agent_path.display().to_string(),
+        app_asar_sha256: patched_asar_sha256.clone(),
+        patch_mode: default_codex_patch_mode(),
     };
     write_codex_integration_state(&state)?;
     let _ = fs::remove_dir_all(&work_dir);
@@ -12136,12 +15031,302 @@ fn install_codex_integration(
         "app_asar_path": app_asar_path.display().to_string(),
         "backup_app_asar_path": backup_path.display().to_string(),
         "launch_agent_path": launch_agent_path.display().to_string(),
+        "sync_launch_agent_path": sync_launch_agent_path.display().to_string(),
         "skill_path": skill_path.display().to_string(),
+        "tasknerve_executable_path": tasknerve_executable.display().to_string(),
+        "tasknerve_executable_sha256": tasknerve_executable_sha256,
         "panel_repo_root": panel_repo_root.display().to_string(),
         "panel_url": tasknerve_codex_panel_url(host, port),
         "panel_health": panel_health,
+        "native_bridge_url": tasknerve_codex_native_bridge_url(bridge_host, bridge_port),
+        "native_bridge_health": native_bridge_health,
+        "app_asar_sha256": patched_asar_sha256,
+        "refresh_backup": refresh_backup,
         "reopened_codex": reopened_codex,
+        "was_running": was_running,
         "forced": force
+    }))
+}
+
+#[cfg(target_os = "macos")]
+fn clone_codex_side_by_side_app(
+    repo_root: &Path,
+    source_override: Option<&Path>,
+    dest_path: &Path,
+    app_name: &str,
+    bundle_id: &str,
+    url_scheme: &str,
+    panel_repo_root: Option<&Path>,
+    host: &str,
+    port: u16,
+    bridge_host: &str,
+    bridge_port: u16,
+    skip_install: bool,
+    force: bool,
+) -> Result<serde_json::Value> {
+    if !command_exists("ditto") {
+        bail!("ditto is required to clone the Codex desktop bundle");
+    }
+    if !command_exists("plutil") {
+        bail!("plutil is required to rewrite the cloned Codex bundle metadata");
+    }
+    if !command_exists("codesign") {
+        bail!("codesign is required to re-sign the cloned Codex bundle");
+    }
+    let source_path = resolve_codex_clone_source_app_path(source_override)?;
+    if !source_path.exists() {
+        bail!(
+            "source Codex app bundle is missing {}",
+            source_path.display()
+        );
+    }
+    if paths_look_same(&source_path, dest_path) {
+        bail!("source and destination app bundles must be different paths");
+    }
+    let app_name = normalize_required_text(app_name.to_string(), "app name")?;
+    let bundle_id = normalize_required_text(bundle_id.to_string(), "bundle id")?;
+    let url_scheme = normalize_required_text(url_scheme.to_string(), "url scheme")?;
+    let helper_bundle_id = format!("{}.helper", bundle_id);
+    let source_identity = macos_app_identity(&source_path)?;
+    if dest_path.exists() {
+        if !force {
+            bail!(
+                "destination app already exists at {}; rerun with --force to replace it",
+                dest_path.display()
+            );
+        }
+        let _ = maybe_quit_codex_app(dest_path);
+        fs::remove_dir_all(dest_path)
+            .with_context(|| format!("failed removing {}", dest_path.display()))?;
+    }
+    if let Some(parent) = dest_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed creating {}", parent.display()))?;
+    }
+    command_status_checked(
+        ProcessCommand::new("ditto")
+            .arg(&source_path)
+            .arg(dest_path),
+        &format!("ditto {} {}", source_path.display(), dest_path.display()),
+    )?;
+
+    let main_exec_old = dest_path
+        .join("Contents")
+        .join("MacOS")
+        .join(&source_identity.executable_name);
+    let main_exec_new = dest_path.join("Contents").join("MacOS").join(&app_name);
+    if main_exec_old.exists() && main_exec_old != main_exec_new {
+        fs::rename(&main_exec_old, &main_exec_new).with_context(|| {
+            format!(
+                "failed renaming {} to {}",
+                main_exec_old.display(),
+                main_exec_new.display()
+            )
+        })?;
+    }
+
+    let main_plist_path = dest_path.join("Contents").join("Info.plist");
+    let mut main_plist = read_macos_plist_json(&main_plist_path)?;
+    rewrite_codex_clone_main_plist_json(&mut main_plist, &app_name, &bundle_id, &url_scheme)?;
+    write_macos_plist_json(&main_plist_path, &main_plist)?;
+
+    for suffix in CODEX_HELPER_VARIANTS {
+        let source_helper_name = codex_helper_name(&source_identity.display_name, suffix);
+        let target_helper_name = codex_helper_name(&app_name, suffix);
+        let source_bundle_path = dest_path
+            .join("Contents")
+            .join("Frameworks")
+            .join(format!("{}.app", source_helper_name));
+        let target_bundle_path = dest_path
+            .join("Contents")
+            .join("Frameworks")
+            .join(format!("{}.app", target_helper_name));
+        if source_bundle_path.exists() && source_bundle_path != target_bundle_path {
+            fs::rename(&source_bundle_path, &target_bundle_path).with_context(|| {
+                format!(
+                    "failed renaming {} to {}",
+                    source_bundle_path.display(),
+                    target_bundle_path.display()
+                )
+            })?;
+        }
+        if !target_bundle_path.exists() {
+            continue;
+        }
+        let helper_exec_old = target_bundle_path
+            .join("Contents")
+            .join("MacOS")
+            .join(&source_helper_name);
+        let helper_exec_new = target_bundle_path
+            .join("Contents")
+            .join("MacOS")
+            .join(&target_helper_name);
+        if helper_exec_old.exists() && helper_exec_old != helper_exec_new {
+            fs::rename(&helper_exec_old, &helper_exec_new).with_context(|| {
+                format!(
+                    "failed renaming {} to {}",
+                    helper_exec_old.display(),
+                    helper_exec_new.display()
+                )
+            })?;
+        }
+        let helper_bundle_name = if suffix.is_empty() {
+            app_name.clone()
+        } else {
+            target_helper_name.clone()
+        };
+        let helper_plist_path = target_bundle_path.join("Contents").join("Info.plist");
+        let mut helper_plist = read_macos_plist_json(&helper_plist_path)?;
+        rewrite_codex_clone_helper_plist_json(
+            &mut helper_plist,
+            &target_helper_name,
+            &helper_bundle_id,
+            &helper_bundle_name,
+        )?;
+        write_macos_plist_json(&helper_plist_path, &helper_plist)?;
+    }
+
+    command_status_checked(
+        ProcessCommand::new("codesign")
+            .arg("--force")
+            .arg("--deep")
+            .arg("--sign")
+            .arg("-")
+            .arg(dest_path),
+        &format!("codesign {}", app_name),
+    )?;
+
+    let install_result = if skip_install {
+        None
+    } else {
+        Some(install_codex_integration(
+            repo_root,
+            Some(dest_path),
+            panel_repo_root,
+            host,
+            port,
+            bridge_host,
+            bridge_port,
+            true,
+        )?)
+    };
+
+    Ok(json!({
+        "schema_version": SCHEMA_CODEX_INTEGRATION,
+        "generated_at_utc": now_utc(),
+        "source_app_path": source_path.display().to_string(),
+        "source_bundle_id": source_identity.bundle_id,
+        "app_path": dest_path.display().to_string(),
+        "app_name": app_name,
+        "bundle_id": bundle_id,
+        "helper_bundle_id": helper_bundle_id,
+        "url_scheme": url_scheme,
+        "panel_url": tasknerve_codex_panel_url(host, port),
+        "native_bridge_url": tasknerve_codex_native_bridge_url(bridge_host, bridge_port),
+        "install_result": install_result
+    }))
+}
+
+#[cfg(target_os = "macos")]
+fn sync_codex_integration(
+    repo_root: &Path,
+    app_override: Option<&Path>,
+    panel_repo_root: Option<&Path>,
+    force: bool,
+) -> Result<serde_json::Value> {
+    let app_path = resolve_codex_app_path(app_override)?;
+    let state =
+        load_codex_integration_state()?.filter(|value| codex_state_targets_app(value, &app_path));
+    let app_asar_path = codex_app_asar_path(&app_path);
+    if !app_asar_path.exists() {
+        bail!("Codex app bundle is missing {}", app_asar_path.display());
+    }
+    let current_hash = hash_file(&app_asar_path)?;
+    let tasknerve_executable =
+        std::env::current_exe().with_context(|| "failed resolving current tasknerve executable")?;
+    let tasknerve_executable_sha256 = hash_file(&tasknerve_executable)?;
+    let panel_asset_installed = if command_exists("npx") {
+        codex_panel_asset_installed(&app_asar_path).unwrap_or(false)
+    } else {
+        false
+    };
+    let bridge_host = state
+        .as_ref()
+        .map(|value| value.bridge_host.clone())
+        .unwrap_or_else(default_codex_bridge_host_string);
+    let bridge_port = state
+        .as_ref()
+        .map(|value| value.bridge_port)
+        .unwrap_or_else(default_codex_bridge_port);
+    let panel_host = state
+        .as_ref()
+        .map(|value| value.panel_host.clone())
+        .unwrap_or_else(|| DEFAULT_CODEX_PANEL_HOST.to_string());
+    let panel_port = state
+        .as_ref()
+        .map(|value| value.panel_port)
+        .unwrap_or(DEFAULT_CODEX_PANEL_PORT);
+    let inferred_panel_repo_root = panel_repo_root
+        .map(PathBuf::from)
+        .or_else(|| {
+            state.as_ref().and_then(|value| {
+                if value.panel_repo_root.trim().is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(&value.panel_repo_root))
+                }
+            })
+        })
+        .unwrap_or_else(|| repo_root.to_path_buf());
+    let app_running = codex_app_is_running(&app_path);
+    let app_label = macos_app_label(&app_path);
+    let bridge_health = if app_running {
+        codex_native_bridge_health(&bridge_host, bridge_port)
+    } else {
+        json!({
+            "ok": false,
+            "url": tasknerve_codex_native_bridge_url(&bridge_host, bridge_port),
+            "error": format!("{} is not running", app_label)
+        })
+    };
+    let needs_repair = force
+        || !panel_asset_installed
+        || state
+            .as_ref()
+            .map(|value| value.app_asar_sha256 != current_hash)
+            .unwrap_or(true)
+        || state
+            .as_ref()
+            .map(|value| value.tasknerve_executable_sha256 != tasknerve_executable_sha256)
+            .unwrap_or(true)
+        || (app_running && !bridge_health["ok"].as_bool().unwrap_or(false));
+    if needs_repair {
+        let payload = install_codex_integration(
+            repo_root,
+            Some(app_path.as_path()),
+            Some(inferred_panel_repo_root.as_path()),
+            &panel_host,
+            panel_port,
+            &bridge_host,
+            bridge_port,
+            true,
+        )?;
+        return Ok(json!({
+            "schema_version": SCHEMA_CODEX_INTEGRATION,
+            "generated_at_utc": now_utc(),
+            "action": "codex_sync",
+            "changed": true,
+            "reason": if force { "forced" } else { "repair" },
+            "result": payload
+        }));
+    }
+    Ok(json!({
+        "schema_version": SCHEMA_CODEX_INTEGRATION,
+        "generated_at_utc": now_utc(),
+        "action": "codex_sync",
+        "changed": false,
+        "reason": "up_to_date",
+        "doctor": codex_integration_doctor_report(Some(app_path.as_path()))?
     }))
 }
 
@@ -12152,6 +15337,18 @@ fn install_codex_integration(
     _panel_repo_root: Option<&Path>,
     _host: &str,
     _port: u16,
+    _bridge_host: &str,
+    _bridge_port: u16,
+    _force: bool,
+) -> Result<serde_json::Value> {
+    bail!("TaskNerve Codex desktop integration is currently supported on macOS only")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sync_codex_integration(
+    _repo_root: &Path,
+    _app_override: Option<&Path>,
+    _panel_repo_root: Option<&Path>,
     _force: bool,
 ) -> Result<serde_json::Value> {
     bail!("TaskNerve Codex desktop integration is currently supported on macOS only")
@@ -12170,11 +15367,16 @@ fn uninstall_codex_integration(app_override: Option<&Path>) -> Result<serde_json
         .map(|value| PathBuf::from(&value.backup_app_asar_path))
         .filter(|path| path.exists())
         .unwrap_or(codex_backup_asar_path(&app_path)?);
-    let was_running = maybe_quit_codex_app()?;
+    let was_running = maybe_quit_codex_app(&app_path)?;
     let launch_agent_path = tasknerve_codex_launch_agent_path()?;
     let launch_agent_removed = unload_codex_launch_agent(&launch_agent_path)?;
     if launch_agent_path.exists() {
         let _ = fs::remove_file(&launch_agent_path);
+    }
+    let sync_launch_agent_path = tasknerve_codex_sync_launch_agent_path()?;
+    let sync_launch_agent_removed = unload_codex_launch_agent(&sync_launch_agent_path)?;
+    if sync_launch_agent_path.exists() {
+        let _ = fs::remove_file(&sync_launch_agent_path);
     }
     let restored_backup = if backup_path.exists() {
         fs::copy(&backup_path, &app_asar_path).with_context(|| {
@@ -12184,6 +15386,8 @@ fn uninstall_codex_integration(app_override: Option<&Path>) -> Result<serde_json
                 app_asar_path.display()
             )
         })?;
+        let restored_asar_sha256 = hash_file(&app_asar_path)?;
+        update_macos_app_asar_integrity(&app_path, &restored_asar_sha256)?;
         command_status_checked(
             ProcessCommand::new("codesign")
                 .arg("--force")
@@ -12191,7 +15395,7 @@ fn uninstall_codex_integration(app_override: Option<&Path>) -> Result<serde_json
                 .arg("--sign")
                 .arg("-")
                 .arg(&app_path),
-            "codesign restored Codex.app",
+            &format!("codesign restored {}", macos_app_label(&app_path)),
         )?;
         true
     } else {
@@ -12209,6 +15413,7 @@ fn uninstall_codex_integration(app_override: Option<&Path>) -> Result<serde_json
         "backup_app_asar_path": backup_path.display().to_string(),
         "restored_backup": restored_backup,
         "launch_agent_removed": launch_agent_removed,
+        "sync_launch_agent_removed": sync_launch_agent_removed,
         "reopened_codex": reopened_codex
     }))
 }
@@ -12284,7 +15489,7 @@ fn task_gui_edit_task(
     let mut state = load_task_state(&selected_repo)?;
     let _ = prune_expired_task_claims(&mut state)?;
     let agent_id = normalize_agent_id(request.agent);
-    let task = edit_task_in_state(
+    let outcome = edit_task_in_state(
         &mut state,
         &request.task_id,
         &agent_id,
@@ -12301,17 +15506,20 @@ fn task_gui_edit_task(
             blocked: TaskTextPatch::Keep,
         },
     )?;
-    write_pretty_json(&timeline_tasks_path(&selected_repo), &state)?;
-    append_task_timeline_event(&selected_repo, &task, &agent_id, "edit", None)?;
+    if outcome.changed {
+        write_pretty_json(&timeline_tasks_path(&selected_repo), &state)?;
+        append_task_timeline_event(&selected_repo, &outcome.task, &agent_id, "edit", None)?;
+    }
     Ok(json!({
         "ok": true,
         "action": "edit",
+        "changed": outcome.changed,
         "selected_project": {
             "key": selected.key,
             "name": selected.name,
             "repo_root": selected.repo_root
         },
-        "task": task
+        "task": outcome.task
     }))
 }
 
@@ -12395,6 +15603,375 @@ fn task_gui_advisor_payload(
         );
     }
     Ok(payload)
+}
+
+fn next_available_codex_worker_agent_id(state: &CodexThreadState, thread_id: &str) -> String {
+    let base = codex_auto_worker_agent_id(thread_id);
+    if state
+        .bindings
+        .iter()
+        .all(|binding| binding.agent_id != base)
+    {
+        return base;
+    }
+    let thread_id = thread_id.replace('-', "");
+    for width in [10usize, 12, 16, 20, 24, 32] {
+        let suffix = thread_id
+            .chars()
+            .take(width.min(thread_id.len()))
+            .collect::<String>()
+            .to_ascii_lowercase();
+        let candidate = format!("agent.codex.{suffix}");
+        if state
+            .bindings
+            .iter()
+            .all(|binding| binding.agent_id != candidate)
+        {
+            return candidate;
+        }
+    }
+    format!("agent.codex.{}", Uuid::new_v4().simple())
+}
+
+fn resolve_task_gui_codex_agent_id(
+    state: &CodexThreadState,
+    requested_agent_id: Option<String>,
+    thread_id: &str,
+    controller: bool,
+) -> String {
+    if controller {
+        return codex_controller_agent_id().to_string();
+    }
+    if let Some(agent_id) = requested_agent_id {
+        if !agent_id.trim().is_empty() {
+            return normalize_agent_id(Some(agent_id));
+        }
+    }
+    next_available_codex_worker_agent_id(state, thread_id)
+}
+
+fn set_codex_heartbeat_for_active_workers(
+    state: &mut CodexThreadState,
+    active_thread_ids: &BTreeSet<String>,
+    heartbeat_message: Option<&String>,
+) -> Result<bool> {
+    let Some(template) = heartbeat_message else {
+        return Ok(false);
+    };
+    let normalized = normalize_optional_text(Some(template.clone()), "codex heartbeat message")?;
+    let mut changed = false;
+    for binding in &mut state.bindings {
+        if codex_is_controller_agent(&binding.agent_id) {
+            continue;
+        }
+        if active_thread_ids.contains(&binding.thread_id) && binding.heartbeat_message != normalized
+        {
+            binding.heartbeat_message = normalized.clone();
+            binding.updated_at_utc = now_utc();
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+fn adopt_active_codex_worker_bindings(
+    repo_root: &Path,
+    heartbeat_message: Option<String>,
+) -> Result<serde_json::Value> {
+    let discovered =
+        discover_codex_threads(repo_root, false, DEFAULT_CODEX_ACTIVE_THREAD_BATCH_LIMIT)?;
+    let heartbeat_message = normalize_optional_text(heartbeat_message, "codex heartbeat message")?;
+    let mut state = load_codex_thread_state(repo_root)?;
+    let controller_thread_id = state
+        .bindings
+        .iter()
+        .find(|binding| codex_is_controller_agent(&binding.agent_id))
+        .map(|binding| binding.thread_id.clone());
+    let active_thread_ids = discovered
+        .iter()
+        .filter_map(|row| row["thread_id"].as_str().map(ToString::to_string))
+        .collect::<BTreeSet<_>>();
+    let heartbeat_changed = set_codex_heartbeat_for_active_workers(
+        &mut state,
+        &active_thread_ids,
+        heartbeat_message.as_ref(),
+    )?;
+    let now = now_utc();
+    let mut adopted = Vec::<CodexThreadBinding>::new();
+    for thread in &discovered {
+        let Some(thread_id) = thread["thread_id"].as_str() else {
+            continue;
+        };
+        if controller_thread_id.as_deref() == Some(thread_id) {
+            continue;
+        }
+        if state
+            .bindings
+            .iter()
+            .any(|binding| binding.thread_id == thread_id)
+        {
+            continue;
+        }
+        let binding = CodexThreadBinding {
+            agent_id: next_available_codex_worker_agent_id(&state, thread_id),
+            thread_id: thread_id.to_string(),
+            label: normalize_optional_text(
+                thread["display_label"].as_str().map(ToString::to_string),
+                "codex binding label",
+            )?,
+            heartbeat_message: heartbeat_message.clone(),
+            created_at_utc: now.clone(),
+            updated_at_utc: now.clone(),
+            last_injected_at_utc: None,
+            last_task_id: None,
+            last_result_excerpt: None,
+            last_error: None,
+        };
+        state.bindings.push(binding.clone());
+        adopted.push(binding);
+    }
+    let changed = heartbeat_changed || !adopted.is_empty();
+    if changed {
+        state
+            .bindings
+            .sort_by(|left, right| left.agent_id.cmp(&right.agent_id));
+        state.updated_at_utc = now;
+        write_codex_thread_state(repo_root, &state)?;
+    }
+    Ok(json!({
+        "ok": true,
+        "action": "codex_adopt_active",
+        "adopted_count": adopted.len(),
+        "adopted": adopted,
+        "snapshot": codex_thread_snapshot_payload(repo_root)?
+    }))
+}
+
+fn queue_heartbeats_for_active_codex_workers(
+    repo_root: &Path,
+    cycles: usize,
+    claim_ttl_minutes: i64,
+    steal_after_minutes: i64,
+    exclude_tags: Vec<String>,
+    heartbeat_message: Option<String>,
+    background: bool,
+) -> Result<serde_json::Value> {
+    let adopt_result = adopt_active_codex_worker_bindings(repo_root, heartbeat_message)?;
+    let snapshot = adopt_result["snapshot"].clone();
+    let active_workers = snapshot["active_worker_bindings"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mut results = Vec::<serde_json::Value>::new();
+    let mut queued_count = 0usize;
+    for binding in active_workers {
+        let Some(agent_id) = binding["agent_id"].as_str() else {
+            continue;
+        };
+        let payload = enqueue_codex_prompt_requests(
+            repo_root,
+            &CodexInjectOptions {
+                agent_id: agent_id.to_string(),
+                prompt: None,
+                continue_task: true,
+                cycles,
+                claim_ttl_minutes,
+                steal_after_minutes,
+                exclude_tags: exclude_tags.clone(),
+                model: None,
+                oss: false,
+                local_provider: None,
+            },
+            background,
+        )?;
+        queued_count += payload["queued_count"].as_u64().unwrap_or(0) as usize;
+        results.push(json!({
+            "agent_id": agent_id,
+            "thread_id": binding["thread_id"].clone(),
+            "queued_count": payload["queued_count"].clone(),
+            "worker": payload["worker"].clone()
+        }));
+    }
+    Ok(json!({
+        "ok": true,
+        "action": "codex_heartbeat_active",
+        "queued_agent_count": results.len(),
+        "queued_count": queued_count,
+        "results": results,
+        "snapshot": codex_thread_snapshot_payload(repo_root)?
+    }))
+}
+
+fn task_gui_codex_payload(
+    repo_root: &Path,
+    project_selector: Option<&str>,
+) -> Result<serde_json::Value> {
+    let (_projects, selected, selected_repo) =
+        resolve_task_gui_project_selection(repo_root, project_selector)?;
+    let mut payload = codex_thread_snapshot_payload(&selected_repo)?;
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "selected_project".to_string(),
+            json!({
+                "key": selected.key,
+                "name": selected.name,
+                "repo_root": selected.repo_root
+            }),
+        );
+    }
+    Ok(payload)
+}
+
+fn task_gui_bind_codex_thread(
+    repo_root: &Path,
+    project_selector: Option<&str>,
+    body: &[u8],
+) -> Result<serde_json::Value> {
+    let request: TaskGuiCodexThreadBindRequest =
+        serde_json::from_slice(body).with_context(|| "invalid codex bind payload")?;
+    let (_projects, selected, selected_repo) =
+        resolve_task_gui_project_selection(repo_root, project_selector)?;
+    let state = load_codex_thread_state(&selected_repo)?;
+    let agent_id = resolve_task_gui_codex_agent_id(
+        &state,
+        request.agent_id,
+        &request.thread_id,
+        request.controller.unwrap_or(false),
+    );
+    let binding = bind_codex_thread_to_agent(
+        &selected_repo,
+        &agent_id,
+        request.thread_id,
+        request.label,
+        request.heartbeat_message,
+    )?;
+    Ok(json!({
+        "ok": true,
+        "action": "codex_bind",
+        "selected_project": {
+            "key": selected.key,
+            "name": selected.name,
+            "repo_root": selected.repo_root
+        },
+        "binding": binding,
+        "snapshot": codex_thread_snapshot_payload(&selected_repo)?
+    }))
+}
+
+fn task_gui_adopt_active_codex_threads(
+    repo_root: &Path,
+    project_selector: Option<&str>,
+    body: &[u8],
+) -> Result<serde_json::Value> {
+    let request: TaskGuiCodexAdoptActiveRequest =
+        serde_json::from_slice(body).with_context(|| "invalid codex adopt-active payload")?;
+    let (_projects, selected, selected_repo) =
+        resolve_task_gui_project_selection(repo_root, project_selector)?;
+    let result = adopt_active_codex_worker_bindings(&selected_repo, request.heartbeat_message)?;
+    Ok(json!({
+        "ok": true,
+        "action": "codex_adopt_active",
+        "selected_project": {
+            "key": selected.key,
+            "name": selected.name,
+            "repo_root": selected.repo_root
+        },
+        "result": result
+    }))
+}
+
+fn task_gui_unbind_codex_thread(
+    repo_root: &Path,
+    project_selector: Option<&str>,
+    body: &[u8],
+) -> Result<serde_json::Value> {
+    let request: TaskGuiCodexThreadUnbindRequest =
+        serde_json::from_slice(body).with_context(|| "invalid codex unbind payload")?;
+    let (_projects, selected, selected_repo) =
+        resolve_task_gui_project_selection(repo_root, project_selector)?;
+    let binding =
+        unbind_codex_thread_for_agent(&selected_repo, &normalize_agent_id(Some(request.agent_id)))?;
+    Ok(json!({
+        "ok": true,
+        "action": "codex_unbind",
+        "selected_project": {
+            "key": selected.key,
+            "name": selected.name,
+            "repo_root": selected.repo_root
+        },
+        "binding": binding,
+        "snapshot": codex_thread_snapshot_payload(&selected_repo)?
+    }))
+}
+
+fn task_gui_inject_codex_prompt(
+    repo_root: &Path,
+    project_selector: Option<&str>,
+    body: &[u8],
+) -> Result<serde_json::Value> {
+    let request: TaskGuiCodexInjectRequest =
+        serde_json::from_slice(body).with_context(|| "invalid codex inject payload")?;
+    let (_projects, selected, selected_repo) =
+        resolve_task_gui_project_selection(repo_root, project_selector)?;
+    let payload = enqueue_codex_prompt_requests(
+        &selected_repo,
+        &CodexInjectOptions {
+            agent_id: normalize_agent_id(Some(request.agent_id)),
+            prompt: normalize_optional_text(request.prompt, "codex prompt")?,
+            continue_task: request.continue_task.unwrap_or(false),
+            cycles: request.cycles.unwrap_or(1),
+            claim_ttl_minutes: request.claim_ttl_minutes.unwrap_or(30),
+            steal_after_minutes: request.steal_after_minutes.unwrap_or(90),
+            exclude_tags: dedupe_keep_order(request.exclude_tags.unwrap_or_default()),
+            model: normalize_optional_text(request.model, "codex model")?,
+            oss: request.oss.unwrap_or(false),
+            local_provider: normalize_optional_text(
+                request.local_provider,
+                "codex local provider",
+            )?,
+        },
+        request.background.unwrap_or(true),
+    )?;
+    Ok(json!({
+        "ok": true,
+        "action": "codex_inject",
+        "selected_project": {
+            "key": selected.key,
+            "name": selected.name,
+            "repo_root": selected.repo_root
+        },
+        "result": payload
+    }))
+}
+
+fn task_gui_heartbeat_active_codex_workers(
+    repo_root: &Path,
+    project_selector: Option<&str>,
+    body: &[u8],
+) -> Result<serde_json::Value> {
+    let request: TaskGuiCodexHeartbeatActiveRequest =
+        serde_json::from_slice(body).with_context(|| "invalid codex heartbeat-active payload")?;
+    let (_projects, selected, selected_repo) =
+        resolve_task_gui_project_selection(repo_root, project_selector)?;
+    let payload = queue_heartbeats_for_active_codex_workers(
+        &selected_repo,
+        request.cycles.unwrap_or(1).clamp(1, 100),
+        request.claim_ttl_minutes.unwrap_or(30),
+        request.steal_after_minutes.unwrap_or(90),
+        dedupe_keep_order(request.exclude_tags.unwrap_or_default()),
+        request.heartbeat_message,
+        request.background.unwrap_or(true),
+    )?;
+    Ok(json!({
+        "ok": true,
+        "action": "codex_heartbeat_active",
+        "selected_project": {
+            "key": selected.key,
+            "name": selected.name,
+            "repo_root": selected.repo_root
+        },
+        "result": payload
+    }))
 }
 
 fn task_gui_update_advisor_policy(
@@ -12598,7 +16175,14 @@ fn task_gui_payload(repo_root: &Path, project_selector: Option<&str>) -> Result<
         "timeline_initialized": timeline_is_initialized(&selected_repo),
         "policy": task_policy_payload(&state, &config),
         "count": tasks.len(),
-        "tasks": tasks
+        "tasks": tasks,
+        "codex": codex_thread_snapshot_payload(&selected_repo).unwrap_or_else(|_| json!({
+            "schema_version": "tasknerve.codex.thread_snapshot.v1",
+            "generated_at_utc": now_utc(),
+            "discovered_threads": [],
+            "bindings": [],
+            "queued_prompts": []
+        }))
     }))
 }
 
@@ -13226,6 +16810,58 @@ fn task_gui_html() -> &'static str {
           </div>
           <div class="empty" id="advisorEmpty" style="display:none;">No advisor runs yet. Trigger review or research here, or let low-task mode queue it automatically.</div>
         </section>
+        <section class="advisor-shell">
+          <div class="advisor-top">
+            <div>
+              <strong>codex control</strong>
+              <div class="meta" id="codexMeta">loading codex threads...</div>
+            </div>
+            <div class="panel-actions">
+              <button id="refreshCodex" type="button">refresh</button>
+            </div>
+          </div>
+          <div class="meta">Open or resume Codex conversations in the selected project. Archive a conversation in Codex to remove it from the active worker pool here.</div>
+          <div class="advisor-grid">
+            <label class="field field-span">
+              <span>worker heartbeat template</span>
+              <input id="codexHeartbeatInput" type="text" autocomplete="off" placeholder="supports {project_name}, {agent_id}, {task_id}, {task_title}">
+            </label>
+            <label class="field">
+              <span>queue cycles</span>
+              <input id="codexCyclesInput" type="number" min="1" step="1" value="1">
+            </label>
+            <label class="field field-span">
+              <span>controller prompt</span>
+              <textarea id="codexControllerPromptInput" placeholder="Send a task-planning or review instruction to the controller thread. The response will appear in the bound Codex controller conversation."></textarea>
+            </label>
+            <label class="field">
+              <span>manual thread id</span>
+              <input id="codexThreadIdInput" type="text" autocomplete="off" placeholder="advanced: bind the current header agent to this thread id">
+            </label>
+            <label class="field">
+              <span>manual label</span>
+              <input id="codexThreadLabelInput" type="text" autocomplete="off" placeholder="advanced: optional human label">
+            </label>
+            <label class="field field-span">
+              <span>manual prompt for header agent</span>
+              <textarea id="codexPromptInput" placeholder="advanced: optional manual prompt to inject into the header agent's bound conversation"></textarea>
+            </label>
+          </div>
+          <div class="advisor-actions">
+            <button id="adoptCodexActive" type="button">adopt active workers</button>
+            <button id="heartbeatCodexActive" type="button">heartbeat active workers</button>
+            <button id="sendCodexControllerPrompt" type="button">send to controller</button>
+            <button id="bindCodexThread" type="button">bind header agent</button>
+            <button id="unbindCodexThread" type="button">unbind header agent</button>
+            <button id="queueCodexPrompt" type="button">queue manual prompt</button>
+          </div>
+          <div class="meta" id="codexBindingsMeta">Bindings use stable Codex thread ids. The visible conversation title is only for display.</div>
+          <div class="run-list" id="codexController"></div>
+          <div class="run-list" id="codexBindings"></div>
+          <div class="run-list" id="codexThreads"></div>
+          <div class="run-list" id="codexQueue"></div>
+          <div class="empty" id="codexEmpty" style="display:none;">No active Codex conversations were discovered for this project yet. Start or resume a project thread in Codex, then come back here.</div>
+        </section>
         <div class="timeline-controls">
           <strong>timeline</strong>
           <select id="branchSelect"></select>
@@ -13244,6 +16880,7 @@ fn task_gui_html() -> &'static str {
     let selectedProject = params.get("project") || "";
     let selectedBranch = params.get("branch") || "";
     let advisorSelectedRunId = "";
+    let codexSnapshotState = { payload: null };
     let timelineOffset = 0;
     let timelineHasMore = false;
     let timelineRows = [];
@@ -13311,6 +16948,271 @@ fn task_gui_html() -> &'static str {
       }
       return payload;
     };
+
+    const CODEX_CONTROLLER_AGENT_ID = "agent.controller";
+
+    const codexCurrentAgentId = () => {
+      const agent = currentAgentId();
+      if (!agent) {
+        throw new Error("set the header agent id before using codex bindings");
+      }
+      return agent;
+    };
+
+    const selectedCodexBinding = () => {
+      const bindings = codexSnapshotState.payload?.bindings || [];
+      const agent = currentAgentId();
+      return bindings.find((binding) => binding.agent_id === agent) || null;
+    };
+
+    const controllerCodexBinding = () => {
+      const controller = codexSnapshotState.payload?.controller_binding || null;
+      return controller && controller.agent_id ? controller : null;
+    };
+
+    const codexActiveWorkerBindings = () => {
+      return codexSnapshotState.payload?.active_worker_bindings || [];
+    };
+
+    const syncCodexFormFromBinding = () => {
+      const binding = selectedCodexBinding();
+      if (!binding) return;
+      byId("codexThreadIdInput").value = binding.thread_id || "";
+      byId("codexThreadLabelInput").value = binding.label || "";
+      byId("codexHeartbeatInput").value = binding.heartbeat_message || "";
+    };
+
+    const renderCodex = (payload) => {
+      codexSnapshotState.payload = payload || {
+        discovered_threads: [],
+        bindings: [],
+        active_worker_bindings: [],
+        queued_prompts: [],
+        controller_binding: null
+      };
+      const bindings = codexSnapshotState.payload.bindings || [];
+      const threads = codexSnapshotState.payload.discovered_threads || [];
+      const activeWorkers = codexActiveWorkerBindings();
+      const inactiveBindings = codexSnapshotState.payload.inactive_bindings || [];
+      const controller = controllerCodexBinding();
+      const queued = codexSnapshotState.payload.queued_prompts || [];
+      const bindingByThreadId = new Map(bindings.map((binding) => [binding.thread_id, binding]));
+      const activeBinding = selectedCodexBinding();
+      if (activeBinding) {
+        syncCodexFormFromBinding();
+      }
+      const currentAgent = activeBinding ? activeBinding.agent_id : "none";
+      byId("codexMeta").textContent = `active_threads=${threads.length} • active_workers=${activeWorkers.length} • controller=${controller ? (controller.display_label || controller.thread_id_short || "bound") : "none"} • queued=${queued.length}`;
+      byId("codexBindingsMeta").textContent = activeBinding
+        ? `header agent=${currentAgent} • thread=${activeBinding.thread_id_short || activeBinding.thread_id} • worker=${activeBinding.worker?.status || "idle"} • pending=${activeBinding.queued_pending_count || 0}`
+        : "Pick a project, set one controller thread, then let TaskNerve adopt and heartbeat the active worker threads.";
+      byId("codexEmpty").style.display = threads.length === 0 ? "block" : "none";
+
+      byId("codexController").innerHTML = !controller
+        ? `<div class="meta">No controller thread is bound yet. Pick any active Codex conversation below and mark it as the controller.</div>`
+        : `
+            <article class="run-row">
+              <div><strong>controller</strong> • ${escapeHtml(controller.display_label || controller.thread_id_short || "thread")}</div>
+              <div class="meta-row">thread=${escapeHtml(controller.thread_id_short || controller.thread_id || "")} • worker=${escapeHtml(controller.worker?.status || "idle")} • pending=${escapeHtml(controller.queued_pending_count || 0)}</div>
+              <div class="meta-row">${escapeHtml(controller.last_result_excerpt || controller.last_error || "controller replies appear in this Codex conversation")}</div>
+              <div class="advisor-actions">
+                <button type="button" class="ghost-button codex-unbind-binding" data-agent-id="${escapeHtml(controller.agent_id)}">unbind controller</button>
+              </div>
+            </article>
+          `;
+      byId("codexController").querySelectorAll(".codex-unbind-binding").forEach((button) => {
+        button.onclick = async () => {
+          try {
+            const response = await fetch(`/api/codex/unbind${projectQuery()}`, {
+              method: "POST",
+              cache: "no-store",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ agent_id: button.dataset.agentId })
+            });
+            await readJsonResponse(response);
+            setActionMessage(`unbound codex thread for ${button.dataset.agentId}`);
+            await refreshCodex();
+          } catch (error) {
+            setActionMessage(`codex unbind failed: ${error}`, "error");
+          }
+        };
+      });
+
+      byId("codexBindings").innerHTML = activeWorkers.length === 0 && inactiveBindings.length === 0
+        ? `<div class="meta">No worker threads are bound yet. Click "adopt active workers" or send heartbeats directly to auto-adopt the active project threads.</div>`
+        : [
+            activeWorkers.map((binding) => `
+            <article class="run-row">
+              <div><strong>${escapeHtml(binding.display_label || binding.thread_id_short || "thread")}</strong> • ${escapeHtml(binding.agent_id || "agent")}</div>
+              <div class="meta-row">thread=${escapeHtml(binding.thread_id_short || binding.thread_id || "")} • worker=${escapeHtml(binding.worker?.status || "idle")} • pending=${escapeHtml(binding.queued_pending_count || 0)} • last_task=${escapeHtml(binding.last_task_id || "none")}</div>
+              <div class="meta-row">${escapeHtml(binding.last_result_excerpt || binding.last_error || "no recent injections")}</div>
+              <div class="advisor-actions">
+                <button type="button" class="ghost-button codex-use-binding" data-agent-id="${escapeHtml(binding.agent_id)}">use agent</button>
+                <button type="button" class="ghost-button danger-button codex-unbind-binding" data-agent-id="${escapeHtml(binding.agent_id)}">unbind</button>
+              </div>
+            </article>
+          `).join(""),
+            inactiveBindings.length > 0
+              ? `<div class="meta">Inactive bindings are ignored for project heartbeats. Archive/unarchive in Codex controls activity; unbind here only if you want cleanup.</div>`
+              : "",
+            inactiveBindings.map((binding) => `
+              <article class="run-row">
+                <div><strong>${escapeHtml(binding.display_label || binding.thread_id_short || "thread")}</strong> • ${escapeHtml(binding.agent_id || "agent")} • inactive</div>
+                <div class="meta-row">thread=${escapeHtml(binding.thread_id_short || binding.thread_id || "")} • last_task=${escapeHtml(binding.last_task_id || "none")}</div>
+                <div class="advisor-actions">
+                  <button type="button" class="ghost-button codex-use-binding" data-agent-id="${escapeHtml(binding.agent_id)}">use agent</button>
+                  <button type="button" class="ghost-button danger-button codex-unbind-binding" data-agent-id="${escapeHtml(binding.agent_id)}">unbind</button>
+                </div>
+              </article>
+            `).join("")
+          ].filter(Boolean).join("");
+      byId("codexBindings").querySelectorAll(".codex-use-binding").forEach((button) => {
+        button.onclick = () => {
+          byId("agentInput").value = button.dataset.agentId || "";
+          byId("agentInput").dispatchEvent(new Event("change"));
+          syncCodexFormFromBinding();
+        };
+      });
+      byId("codexBindings").querySelectorAll(".codex-unbind-binding").forEach((button) => {
+        button.onclick = async () => {
+          try {
+            const response = await fetch(`/api/codex/unbind${projectQuery()}`, {
+              method: "POST",
+              cache: "no-store",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ agent_id: button.dataset.agentId })
+            });
+            await readJsonResponse(response);
+            if (currentAgentId() === (button.dataset.agentId || "")) {
+              byId("codexThreadIdInput").value = "";
+              byId("codexThreadLabelInput").value = "";
+              byId("codexHeartbeatInput").value = "";
+            }
+            setActionMessage(`unbound codex thread for ${button.dataset.agentId}`);
+            await refreshCodex();
+          } catch (error) {
+            setActionMessage(`codex unbind failed: ${error}`, "error");
+          }
+        };
+      });
+
+      byId("codexThreads").innerHTML = threads.length === 0
+        ? `<div class="meta">No active Codex conversations were discovered under this project yet.</div>`
+        : threads.map((thread) => {
+            const threadBinding = bindingByThreadId.get(thread.thread_id);
+            const bindingStatus = threadBinding
+              ? `${threadBinding.role || "worker"}=${threadBinding.agent_id || "bound"}`
+              : "unbound";
+            const controllerDisabled = threadBinding && threadBinding.agent_id !== CODEX_CONTROLLER_AGENT_ID ? " disabled" : "";
+            const adoptDisabled = threadBinding ? " disabled" : "";
+            return `
+              <article class="run-row">
+                <div><strong>${escapeHtml(thread.display_label || thread.thread_name || thread.thread_id_short || "thread")}</strong></div>
+                <div class="meta-row">thread=${escapeHtml(thread.thread_id_short || thread.thread_id || "")} • scope=${escapeHtml(thread.cwd_scope || "project")} • updated=${escapeHtml(thread.updated_at_utc || "unknown")} • ${escapeHtml(bindingStatus)}</div>
+                <div class="advisor-actions">
+                  <button type="button" class="ghost-button codex-use-thread" data-thread-id="${escapeHtml(thread.thread_id)}" data-thread-label="${escapeHtml(thread.display_label || "")}">use thread</button>
+                  <button type="button" class="ghost-button codex-set-controller" data-thread-id="${escapeHtml(thread.thread_id)}" data-thread-label="${escapeHtml(thread.display_label || "")}"${controllerDisabled}>set controller</button>
+                  <button type="button" class="ghost-button codex-adopt-thread" data-thread-id="${escapeHtml(thread.thread_id)}" data-thread-label="${escapeHtml(thread.display_label || "")}"${adoptDisabled}>adopt worker</button>
+                  <button type="button" class="ghost-button codex-bind-thread" data-thread-id="${escapeHtml(thread.thread_id)}" data-thread-label="${escapeHtml(thread.display_label || "")}">bind header agent</button>
+                </div>
+              </article>
+            `;
+          }).join("");
+      byId("codexThreads").querySelectorAll(".codex-use-thread").forEach((button) => {
+        button.onclick = () => {
+          byId("codexThreadIdInput").value = button.dataset.threadId || "";
+          if (!byId("codexThreadLabelInput").value.trim()) {
+            byId("codexThreadLabelInput").value = button.dataset.threadLabel || "";
+          }
+        };
+      });
+      byId("codexThreads").querySelectorAll(".codex-set-controller").forEach((button) => {
+        button.onclick = async () => {
+          try {
+            const response = await fetch(`/api/codex/bind${projectQuery()}`, {
+              method: "POST",
+              cache: "no-store",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                controller: true,
+                thread_id: button.dataset.threadId,
+                label: button.dataset.threadLabel || null
+              })
+            });
+            await readJsonResponse(response);
+            setActionMessage(`controller bound to ${button.dataset.threadId}`);
+            await refreshCodex();
+          } catch (error) {
+            setActionMessage(`controller bind failed: ${error}`, "error");
+          }
+        };
+      });
+      byId("codexThreads").querySelectorAll(".codex-adopt-thread").forEach((button) => {
+        button.onclick = async () => {
+          try {
+            const response = await fetch(`/api/codex/bind${projectQuery()}`, {
+              method: "POST",
+              cache: "no-store",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                thread_id: button.dataset.threadId,
+                label: button.dataset.threadLabel || null,
+                heartbeat_message: byId("codexHeartbeatInput").value.trim() || null
+              })
+            });
+            const result = await readJsonResponse(response);
+            setActionMessage(`adopted ${result.binding?.agent_id || "worker"} for ${button.dataset.threadId}`);
+            await refreshCodex();
+          } catch (error) {
+            setActionMessage(`worker adopt failed: ${error}`, "error");
+          }
+        };
+      });
+      byId("codexThreads").querySelectorAll(".codex-bind-thread").forEach((button) => {
+        button.onclick = async () => {
+          try {
+            const agent = codexCurrentAgentId();
+            const response = await fetch(`/api/codex/bind${projectQuery()}`, {
+              method: "POST",
+              cache: "no-store",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                agent_id: agent,
+                thread_id: button.dataset.threadId,
+                label: byId("codexThreadLabelInput").value.trim() || button.dataset.threadLabel || null,
+                heartbeat_message: byId("codexHeartbeatInput").value.trim() || null
+              })
+            });
+            await readJsonResponse(response);
+            byId("codexThreadIdInput").value = button.dataset.threadId || "";
+            setActionMessage(`bound ${agent} to ${button.dataset.threadId}`);
+            await refreshCodex();
+          } catch (error) {
+            setActionMessage(`codex bind failed: ${error}`, "error");
+          }
+        };
+      });
+
+      byId("codexQueue").innerHTML = queued.length === 0
+        ? `<div class="meta">No recent queued injections yet.</div>`
+        : queued.map((entry) => `
+            <article class="run-row">
+              <div><strong>${escapeHtml(entry.agent_id || "agent")}</strong> • ${escapeHtml(entry.kind || "prompt")} • ${escapeHtml(entry.status || "pending")}</div>
+              <div class="meta-row">thread=${escapeHtml(entry.thread_id_short || entry.thread_id || "")} • task=${escapeHtml(entry.task_id || "none")} • created=${escapeHtml(entry.created_at_utc || "unknown")}</div>
+              <div class="meta-row">${escapeHtml(entry.result_excerpt || entry.error || "waiting")}</div>
+            </article>
+          `).join("");
+    };
+
+    async function refreshCodex() {
+      try {
+        const response = await fetch(`/api/codex${projectQuery()}`, { cache: "no-store" });
+        const payload = await readJsonResponse(response);
+        renderCodex(payload);
+      } catch (error) {
+        byId("codexMeta").textContent = `failed to load codex threads: ${error}`;
+      }
+    }
 
     const closeEditor = () => {
       const editor = byId("taskEditor");
@@ -13778,6 +17680,7 @@ fn task_gui_html() -> &'static str {
         byId("meta").textContent = `project: ${label} • ${initState} • ${policyText} • updated: ${new Date(payload.generated_at_utc).toLocaleString()} • total: ${tasks.length}`;
         renderSummary(tasks);
         renderTasks(tasks);
+        renderCodex(payload.codex || { discovered_threads: [], bindings: [], queued_prompts: [] });
         if (selectedProject !== previousProject) {
           resetTimeline();
           await refreshAdvisor();
@@ -13842,6 +17745,9 @@ fn task_gui_html() -> &'static str {
     byId("refreshAdvisor").onclick = () => {
       refreshAdvisor();
     };
+    byId("refreshCodex").onclick = () => {
+      refreshCodex();
+    };
     byId("saveAdvisorPolicy").onclick = async () => {
       try {
         const response = await fetch(`/api/advisor/policy${projectQuery()}`, {
@@ -13892,6 +17798,135 @@ fn task_gui_html() -> &'static str {
         await refreshAdvisor();
       } catch (error) {
         setActionMessage(`advisor rerun failed: ${error}`, "error");
+      }
+    };
+    byId("bindCodexThread").onclick = async () => {
+      try {
+        const agent = codexCurrentAgentId();
+        const threadId = byId("codexThreadIdInput").value.trim();
+        if (!threadId) {
+          throw new Error("codex thread id cannot be empty");
+        }
+        const response = await fetch(`/api/codex/bind${projectQuery()}`, {
+          method: "POST",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            agent_id: agent,
+            thread_id: threadId,
+            label: byId("codexThreadLabelInput").value.trim() || null,
+            heartbeat_message: byId("codexHeartbeatInput").value.trim() || null
+          })
+        });
+        await readJsonResponse(response);
+        setActionMessage(`bound ${agent} to ${threadId}`);
+        await refreshCodex();
+      } catch (error) {
+        setActionMessage(`codex bind failed: ${error}`, "error");
+      }
+    };
+    byId("unbindCodexThread").onclick = async () => {
+      try {
+        const agent = codexCurrentAgentId();
+        const response = await fetch(`/api/codex/unbind${projectQuery()}`, {
+          method: "POST",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ agent_id: agent })
+        });
+        await readJsonResponse(response);
+        byId("codexThreadIdInput").value = "";
+        byId("codexThreadLabelInput").value = "";
+        byId("codexHeartbeatInput").value = "";
+        setActionMessage(`unbound ${agent}`);
+        await refreshCodex();
+      } catch (error) {
+        setActionMessage(`codex unbind failed: ${error}`, "error");
+      }
+    };
+    byId("adoptCodexActive").onclick = async () => {
+      try {
+        const response = await fetch(`/api/codex/adopt-active${projectQuery()}`, {
+          method: "POST",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            heartbeat_message: byId("codexHeartbeatInput").value.trim() || null
+          })
+        });
+        const result = await readJsonResponse(response);
+        setActionMessage(`adopted ${result.result?.adopted_count || 0} active workers`);
+        await refreshCodex();
+      } catch (error) {
+        setActionMessage(`active worker adoption failed: ${error}`, "error");
+      }
+    };
+    byId("heartbeatCodexActive").onclick = async () => {
+      try {
+        const response = await fetch(`/api/codex/heartbeat-active${projectQuery()}`, {
+          method: "POST",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            cycles: Number(byId("codexCyclesInput").value || "1"),
+            heartbeat_message: byId("codexHeartbeatInput").value.trim() || null,
+            background: true
+          })
+        });
+        const result = await readJsonResponse(response);
+        setActionMessage(`queued ${result.result?.queued_count || 0} heartbeats across ${result.result?.queued_agent_count || 0} active workers`);
+        await refreshCodex();
+      } catch (error) {
+        setActionMessage(`active heartbeat queue failed: ${error}`, "error");
+      }
+    };
+    byId("sendCodexControllerPrompt").onclick = async () => {
+      try {
+        const prompt = byId("codexControllerPromptInput").value.trim();
+        if (!prompt) {
+          throw new Error("controller prompt cannot be empty");
+        }
+        const response = await fetch(`/api/codex/inject${projectQuery()}`, {
+          method: "POST",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            agent_id: CODEX_CONTROLLER_AGENT_ID,
+            prompt,
+            background: true
+          })
+        });
+        const result = await readJsonResponse(response);
+        byId("codexControllerPromptInput").value = "";
+        setActionMessage(`queued controller prompt (${result.result?.queued_count || 1})`);
+        await refreshCodex();
+      } catch (error) {
+        setActionMessage(`controller prompt failed: ${error}`, "error");
+      }
+    };
+    byId("queueCodexPrompt").onclick = async () => {
+      try {
+        const agent = codexCurrentAgentId();
+        const prompt = byId("codexPromptInput").value.trim();
+        if (!prompt) {
+          throw new Error("manual prompt cannot be empty");
+        }
+        const response = await fetch(`/api/codex/inject${projectQuery()}`, {
+          method: "POST",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            agent_id: agent,
+            prompt,
+            background: true
+          })
+        });
+        const result = await readJsonResponse(response);
+        byId("codexPromptInput").value = "";
+        setActionMessage(`queued manual codex prompt for ${agent} (${result.result?.queued_count || 1})`);
+        await refreshCodex();
+      } catch (error) {
+        setActionMessage(`codex prompt queue failed: ${error}`, "error");
       }
     };
     byId("newTaskButton").onclick = () => {
@@ -13953,6 +17988,7 @@ fn task_gui_html() -> &'static str {
     agentInput.value = localStorage.getItem(EDITOR_STORAGE_KEY) || "";
     agentInput.onchange = () => {
       localStorage.setItem(EDITOR_STORAGE_KEY, agentInput.value.trim());
+      syncCodexFormFromBinding();
     };
     agentInput.onblur = agentInput.onchange;
 
@@ -14153,7 +18189,9 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "agent": { "type": "string" },
                     "priority": { "type": "integer" },
                     "tags": { "type": "array", "items": { "type": "string" } },
-                    "depends_on": { "type": "array", "items": { "type": "string" } }
+                    "tags_csv": { "type": "string" },
+                    "depends_on": { "type": "array", "items": { "type": "string" } },
+                    "depends_on_csv": { "type": "string" }
                 }
             }
         }),
@@ -14171,8 +18209,10 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "agent": { "type": "string" },
                     "priority": { "type": "integer" },
                     "tags": { "type": "array", "items": { "type": "string" } },
+                    "tags_csv": { "type": "string" },
                     "clear_tags": { "type": "boolean" },
                     "depends_on": { "type": "array", "items": { "type": "string" } },
+                    "depends_on_csv": { "type": "string" },
                     "clear_depends_on": { "type": "boolean" },
                     "blocked_reason": { "type": "string" },
                     "clear_blocked": { "type": "boolean" }
@@ -14355,6 +18395,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "agent": { "type": "string" },
                     "task_id": { "type": "string" },
                     "exclude_task_ids": { "type": "array", "items": { "type": "string" } },
+                    "exclude_tags": { "type": "array", "items": { "type": "string" } },
                     "view": { "type": "string" },
                     "tags": { "type": "array", "items": { "type": "string" } },
                     "focus": { "type": "string" },
@@ -14383,6 +18424,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "agent": { "type": "string" },
                     "task_id": { "type": "string" },
                     "exclude_task_ids": { "type": "array", "items": { "type": "string" } },
+                    "exclude_tags": { "type": "array", "items": { "type": "string" } },
                     "view": { "type": "string" },
                     "tags": { "type": "array", "items": { "type": "string" } },
                     "focus": { "type": "string" },
@@ -15207,6 +19249,10 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                     }
                 }
             }
+            if let Some(tags_csv) = args.get("tags_csv").and_then(serde_json::Value::as_str) {
+                cli_args.push("--tags-csv".to_string());
+                cli_args.push(tags_csv.to_string());
+            }
             if let Some(depends_on) = args.get("depends_on").and_then(serde_json::Value::as_array) {
                 for dependency in depends_on {
                     if let Some(dep_value) = dependency.as_str() {
@@ -15214,6 +19260,13 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                         cli_args.push(dep_value.to_string());
                     }
                 }
+            }
+            if let Some(depends_on_csv) = args
+                .get("depends_on_csv")
+                .and_then(serde_json::Value::as_str)
+            {
+                cli_args.push("--depends-on-csv".to_string());
+                cli_args.push(depends_on_csv.to_string());
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
@@ -15260,6 +19313,10 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                     }
                 }
             }
+            if let Some(tags_csv) = args.get("tags_csv").and_then(serde_json::Value::as_str) {
+                cli_args.push("--tags-csv".to_string());
+                cli_args.push(tags_csv.to_string());
+            }
             if args
                 .get("clear_tags")
                 .and_then(serde_json::Value::as_bool)
@@ -15274,6 +19331,13 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                         cli_args.push(dep_value.to_string());
                     }
                 }
+            }
+            if let Some(depends_on_csv) = args
+                .get("depends_on_csv")
+                .and_then(serde_json::Value::as_str)
+            {
+                cli_args.push("--depends-on-csv".to_string());
+                cli_args.push(depends_on_csv.to_string());
             }
             if args
                 .get("clear_depends_on")
@@ -15903,6 +19967,17 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                     }
                 }
             }
+            if let Some(exclude_tags) = args
+                .get("exclude_tags")
+                .and_then(serde_json::Value::as_array)
+            {
+                for exclude_tag in exclude_tags {
+                    if let Some(value) = exclude_tag.as_str() {
+                        cli_args.push("--exclude-tag".to_string());
+                        cli_args.push(value.to_string());
+                    }
+                }
+            }
             if let Some(view) = args.get("view").and_then(serde_json::Value::as_str) {
                 cli_args.push("--view".to_string());
                 cli_args.push(view.to_string());
@@ -15996,6 +20071,17 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 for exclude_task_id in exclude_task_ids {
                     if let Some(value) = exclude_task_id.as_str() {
                         cli_args.push("--exclude-task-id".to_string());
+                        cli_args.push(value.to_string());
+                    }
+                }
+            }
+            if let Some(exclude_tags) = args
+                .get("exclude_tags")
+                .and_then(serde_json::Value::as_array)
+            {
+                for exclude_tag in exclude_tags {
+                    if let Some(value) = exclude_tag.as_str() {
+                        cli_args.push("--exclude-tag".to_string());
                         cli_args.push(value.to_string());
                     }
                 }
@@ -21486,15 +25572,10 @@ fn normalize_agent_id(agent: Option<String>) -> String {
 
 fn normalize_task_exclusion_list(
     values: Vec<String>,
+    csv: Option<String>,
     requested_task_id: Option<&str>,
 ) -> Result<Vec<String>> {
-    let mut normalized = Vec::<String>::new();
-    for raw in values {
-        if let Some(value) = normalize_optional_text(Some(raw), "exclude task id")? {
-            normalized.push(value);
-        }
-    }
-    let normalized = dedupe_keep_order(normalized);
+    let normalized = normalize_cli_csv_or_repeat_list(values, csv, "exclude task id")?;
     if let Some(requested_task_id) = requested_task_id
         && normalized
             .iter()
@@ -21506,6 +25587,29 @@ fn normalize_task_exclusion_list(
         );
     }
     Ok(normalized)
+}
+
+fn normalize_task_excluded_tags(values: Vec<String>, csv: Option<String>) -> Result<Vec<String>> {
+    normalize_cli_csv_or_repeat_list(values, csv, "exclude tag")
+}
+
+fn normalize_cli_csv_or_repeat_list(
+    values: Vec<String>,
+    csv: Option<String>,
+    field_name: &str,
+) -> Result<Vec<String>> {
+    let mut normalized = Vec::<String>::new();
+    for raw in values {
+        if let Some(value) = normalize_optional_text(Some(raw), field_name)? {
+            normalized.push(value);
+        }
+    }
+    if let Some(raw_csv) = normalize_optional_text(csv, field_name)? {
+        for token in parse_task_import_csv_tokens(&raw_csv) {
+            normalized.push(token);
+        }
+    }
+    Ok(dedupe_keep_order(normalized))
 }
 
 fn resolve_checkpoint_repair_mode(
@@ -21539,17 +25643,14 @@ fn resolve_task_text_patch(value: Option<String>, clear: bool) -> Result<TaskTex
 fn resolve_task_list_patch(
     values: Vec<String>,
     clear: bool,
-    field_name: &str,
+    _field_name: &str,
 ) -> Result<Option<Vec<String>>> {
-    if clear && !values.is_empty() {
-        bail!(
-            "cannot combine {} replacement values with --clear-{}",
-            field_name,
-            field_name
-        );
-    }
     if clear {
-        Ok(Some(Vec::new()))
+        if values.is_empty() {
+            Ok(Some(Vec::new()))
+        } else {
+            Ok(Some(dedupe_keep_order(values)))
+        }
     } else if values.is_empty() {
         Ok(None)
     } else {
@@ -21650,7 +25751,7 @@ fn edit_task_in_state(
     task_id: &str,
     agent_id: &str,
     patch: TaskEditPatch,
-) -> Result<TaskNerveTask> {
+) -> Result<TaskEditOutcome> {
     let Some(task_index) = state.tasks.iter().position(|task| task.task_id == task_id) else {
         bail!("task not found: {}", task_id);
     };
@@ -21742,14 +25843,15 @@ fn edit_task_in_state(
         }
     }
 
-    if !changed {
-        bail!("task edit produced no changes: {}", task_id);
+    if changed {
+        let now = now_utc();
+        state.tasks[task_index].updated_at_utc = now.clone();
+        state.updated_at_utc = now;
     }
-
-    let now = now_utc();
-    state.tasks[task_index].updated_at_utc = now.clone();
-    state.updated_at_utc = now;
-    Ok(state.tasks[task_index].clone())
+    Ok(TaskEditOutcome {
+        task: state.tasks[task_index].clone(),
+        changed,
+    })
 }
 
 fn remove_task_from_state(
@@ -22800,14 +26902,17 @@ fn extract_iso_dates_with_positions(text: &str) -> Vec<(usize, usize, NaiveDate)
     let mut out = Vec::<(usize, usize, NaiveDate)>::new();
     let mut idx = 0usize;
     while idx + 10 <= bytes.len() {
-        let candidate = &text[idx..idx + 10];
-        let matches_shape = candidate.as_bytes()[4] == b'-'
-            && candidate.as_bytes()[7] == b'-'
+        let candidate = &bytes[idx..idx + 10];
+        let matches_shape = candidate[4] == b'-'
+            && candidate[7] == b'-'
             && candidate
-                .chars()
+                .iter()
                 .enumerate()
-                .all(|(pos, ch)| matches!(pos, 4 | 7) || ch.is_ascii_digit());
-        if matches_shape && let Some(date) = parse_naive_date_token(candidate) {
+                .all(|(pos, byte)| matches!(pos, 4 | 7) || byte.is_ascii_digit());
+        if matches_shape
+            && let Ok(token) = std::str::from_utf8(candidate)
+            && let Some(date) = parse_naive_date_token(token)
+        {
             out.push((idx, idx + 10, date));
             idx += 10;
             continue;
@@ -22858,7 +26963,7 @@ fn parse_task_date_window_from_text(text: &str) -> Option<TaskDateWindow> {
         for pair in dates.windows(2) {
             let left = pair[0];
             let right = pair[1];
-            let bridge = lowered[left.1..right.0].trim();
+            let bridge = lowered.get(left.1..right.0).unwrap_or("").trim();
             if bridge.contains("through")
                 || bridge == "-"
                 || bridge.contains(" to ")
@@ -22881,7 +26986,7 @@ fn parse_task_date_window_from_text(text: &str) -> Option<TaskDateWindow> {
         "on or after",
     ];
     for (start, _end, date) in dates {
-        let prefix = lowered[..start].trim_end();
+        let prefix = lowered.get(..start).unwrap_or("").trim_end();
         if keywords.iter().any(|keyword| prefix.ends_with(keyword)) {
             return Some(TaskDateWindow {
                 not_before: Some(date),
@@ -23324,6 +27429,7 @@ fn task_request_has_date_gated_match_with_exclusions(
     agent_id: &str,
     filters: &TaskQueryFilter,
     exclude_task_ids: &BTreeSet<String>,
+    exclude_task_tags: &BTreeSet<&str>,
     allow_steal: bool,
     include_owned_claims: bool,
     steal_after_minutes: i64,
@@ -23336,6 +27442,13 @@ fn task_request_has_date_gated_match_with_exclusions(
             return false;
         }
         if exclude_task_ids.contains(task.task_id.as_str()) {
+            return false;
+        }
+        if task
+            .tags
+            .iter()
+            .any(|tag| exclude_task_tags.contains(tag.as_str()))
+        {
             return false;
         }
         if !task_matches_query_filter(task, filters) {
@@ -23443,11 +27556,13 @@ fn task_status_summary_payload(
         })
         .count();
     let excluded_task_ids = BTreeSet::<String>::new();
+    let excluded_tags = BTreeSet::<&str>::new();
     let next_task = select_task_candidates_for_agent_with_exclusions(
         state,
         agent_id,
         &TaskQueryFilter::default(),
         &excluded_task_ids,
+        &excluded_tags,
         true,
         true,
         true,
@@ -23559,6 +27674,7 @@ fn build_peek_open_payload(
     now: DateTime<Utc>,
     include_context: bool,
     exclude_task_ids: &[String],
+    exclude_tags: &[String],
     selected_task_id: Option<&str>,
 ) -> Vec<serde_json::Value> {
     if peek_open == 0 {
@@ -23567,6 +27683,10 @@ fn build_peek_open_payload(
     let status_map = task_status_map(state);
     let today = now.date_naive();
     let mut excluded = exclude_task_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let excluded_tags = exclude_tags
+        .iter()
+        .map(|value| value.as_str())
+        .collect::<BTreeSet<_>>();
     if let Some(selected_task_id) = selected_task_id {
         excluded.insert(selected_task_id.to_string());
     }
@@ -23577,6 +27697,10 @@ fn build_peek_open_payload(
         .filter(|(_, task)| {
             task.status == TaskStatus::Open
                 && !excluded.contains(task.task_id.as_str())
+                && !task
+                    .tags
+                    .iter()
+                    .any(|tag| excluded_tags.contains(tag.as_str()))
                 && (!task_is_auto_replenish(task)
                     || task_is_auto_replenish_for_agent(task, agent_id))
                 && task_matches_query_filter(task, filters)
@@ -23621,6 +27745,11 @@ fn execute_task_request(
         .exclude_task_ids
         .iter()
         .cloned()
+        .collect::<BTreeSet<_>>();
+    let excluded_tags = options
+        .exclude_tags
+        .iter()
+        .map(|value| value.as_str())
         .collect::<BTreeSet<_>>();
     let issue_monitor = if options.requested_task_id.is_none() {
         maybe_sync_github_issue_monitor(repo_root, state).unwrap_or_else(|err| {
@@ -23684,6 +27813,7 @@ fn execute_task_request(
             &options.agent_id,
             &options.filters,
             &excluded_task_ids,
+            &excluded_tags,
             options.allow_steal,
             include_owned_claims,
             options.respect_date_gates,
@@ -23696,9 +27826,11 @@ fn execute_task_request(
     let should_seed_auto_replenish = options.requested_task_id.is_none()
         && candidates.is_empty()
         && config.auto_replenish_enabled
-        && !agent_has_available_standard_work(
+        && !agent_has_available_standard_work_with_exclusions(
             state,
             &options.agent_id,
+            &excluded_task_ids,
+            &excluded_tags,
             options.allow_steal,
             options.respect_date_gates,
             options.steal_after_minutes,
@@ -23771,6 +27903,7 @@ fn execute_task_request(
                 &options.agent_id,
                 &options.filters,
                 &excluded_task_ids,
+                &excluded_tags,
                 options.allow_steal,
                 !options.skip_owned,
                 options.steal_after_minutes,
@@ -23812,6 +27945,7 @@ fn execute_task_request(
             "max_new_claims": options.max_new_claims,
             "requested_task_id": options.requested_task_id.clone(),
             "excluded_task_ids": options.exclude_task_ids.clone(),
+            "excluded_tags": options.exclude_tags.clone(),
             "owned_claim_count": owned_claim_indices.len(),
             "skip_owned": options.skip_owned,
             "peek_open_requested": options.peek_open,
@@ -23825,6 +27959,7 @@ fn execute_task_request(
                 now,
                 options.include_context,
                 &options.exclude_task_ids,
+                &options.exclude_tags,
                 options.requested_task_id.as_deref()
             ),
             "selection_reason": selection_reason,
@@ -23902,6 +28037,7 @@ fn execute_task_request(
         now,
         options.include_context,
         &options.exclude_task_ids,
+        &options.exclude_tags,
         Some(task.task_id.as_str()),
     );
     let task_rows = candidates
@@ -23930,6 +28066,7 @@ fn execute_task_request(
         "max_new_claims": options.max_new_claims,
         "requested_task_id": options.requested_task_id.clone(),
         "excluded_task_ids": options.exclude_task_ids.clone(),
+        "excluded_tags": options.exclude_tags.clone(),
         "owned_claim_count": owned_claim_indices.len(),
         "skip_owned": options.skip_owned,
         "peek_open_requested": options.peek_open,
@@ -26463,6 +30600,7 @@ fn select_task_for_agent(
         agent_id,
         filters,
         &BTreeSet::new(),
+        &BTreeSet::new(),
         allow_steal,
         include_owned_claims,
         respect_date_gates,
@@ -26477,6 +30615,7 @@ fn select_task_for_agent_with_exclusions(
     agent_id: &str,
     filters: &TaskQueryFilter,
     exclude_task_ids: &BTreeSet<String>,
+    exclude_task_tags: &BTreeSet<&str>,
     allow_steal: bool,
     include_owned_claims: bool,
     respect_date_gates: bool,
@@ -26488,6 +30627,7 @@ fn select_task_for_agent_with_exclusions(
         agent_id,
         filters,
         exclude_task_ids,
+        exclude_task_tags,
         allow_steal,
         include_owned_claims,
         respect_date_gates,
@@ -26500,37 +30640,12 @@ fn select_task_for_agent_with_exclusions(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn select_task_candidates_for_agent(
-    state: &TaskState,
-    agent_id: &str,
-    filters: &TaskQueryFilter,
-    allow_steal: bool,
-    include_owned_claims: bool,
-    respect_date_gates: bool,
-    steal_after_minutes: i64,
-    now: DateTime<Utc>,
-    max: usize,
-) -> Vec<(usize, TaskDispatchKind)> {
-    select_task_candidates_for_agent_with_exclusions(
-        state,
-        agent_id,
-        filters,
-        &BTreeSet::new(),
-        allow_steal,
-        include_owned_claims,
-        respect_date_gates,
-        steal_after_minutes,
-        now,
-        max,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 fn select_task_candidates_for_agent_with_exclusions(
     state: &TaskState,
     agent_id: &str,
     filters: &TaskQueryFilter,
     exclude_task_ids: &BTreeSet<String>,
+    exclude_task_tags: &BTreeSet<&str>,
     allow_steal: bool,
     include_owned_claims: bool,
     respect_date_gates: bool,
@@ -26552,6 +30667,13 @@ fn select_task_candidates_for_agent_with_exclusions(
             continue;
         }
         if exclude_task_ids.contains(task.task_id.as_str()) {
+            continue;
+        }
+        if task
+            .tags
+            .iter()
+            .any(|tag| exclude_task_tags.contains(tag.as_str()))
+        {
             continue;
         }
         if task_is_auto_replenish(task) {
@@ -26761,18 +30883,22 @@ fn select_auto_replenish_candidates_for_agent(
     out
 }
 
-fn agent_has_available_standard_work(
+fn agent_has_available_standard_work_with_exclusions(
     state: &TaskState,
     agent_id: &str,
+    exclude_task_ids: &BTreeSet<String>,
+    exclude_task_tags: &BTreeSet<&str>,
     allow_steal: bool,
     respect_date_gates: bool,
     steal_after_minutes: i64,
     now: DateTime<Utc>,
 ) -> bool {
-    !select_task_candidates_for_agent(
+    !select_task_candidates_for_agent_with_exclusions(
         state,
         agent_id,
         &TaskQueryFilter::default(),
+        exclude_task_ids,
+        exclude_task_tags,
         allow_steal,
         true,
         respect_date_gates,
@@ -27741,6 +31867,9 @@ mod tests {
 - `tasknerve --repo-root . task start --agent agent.runner --json`
 - `tasknerve skill doctor --json`
 - `tasknerve --repo-root . bridge issue-monitor show --json`
+- `tasknerve --repo-root . codex thread bind --agent agent.runner --thread-id 019cd618-36bd-7060-a8fc-2d523f3a50be --json`
+- `tasknerve --repo-root . codex inject --agent agent.runner --continue-task --background --json`
+- `tasknerve codex sync --json`
 "#;
         let paths = extract_skill_command_paths(skill);
         assert!(paths.contains("task"));
@@ -27749,6 +31878,10 @@ mod tests {
         assert!(paths.contains("skill/doctor"));
         assert!(paths.contains("bridge"));
         assert!(paths.contains("bridge/issue-monitor"));
+        assert!(paths.contains("codex"));
+        assert!(paths.contains("codex/sync"));
+        assert!(paths.contains("codex/thread"));
+        assert!(paths.contains("codex/inject"));
     }
 
     #[test]
@@ -28420,6 +32553,42 @@ mod tests {
             "agent.worker",
             &TaskQueryFilter::default(),
             &excluded,
+            &BTreeSet::new(),
+            true,
+            true,
+            true,
+            DEFAULT_TASK_CLAIM_STALE_MINUTES,
+            Utc::now(),
+        )
+        .expect("expected selected task");
+        assert_eq!(state.tasks[selected.0].task_id, "task_next");
+    }
+
+    #[test]
+    fn task_request_excluded_tags_skip_matching_tasks() {
+        let mut skipped = sample_task(
+            "task_blocked_external",
+            "blocked external",
+            20,
+            TaskStatus::Open,
+        );
+        skipped.tags = vec!["blocked-external".to_string(), "needs-policy".to_string()];
+        let state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![
+                skipped,
+                sample_task("task_next", "next task", 10, TaskStatus::Open),
+            ],
+        };
+        let excluded_ids = BTreeSet::new();
+        let excluded_tags = BTreeSet::from(["blocked-external"]);
+        let selected = select_task_for_agent_with_exclusions(
+            &state,
+            "agent.worker",
+            &TaskQueryFilter::default(),
+            &excluded_ids,
+            &excluded_tags,
             true,
             true,
             true,
@@ -28652,6 +32821,31 @@ mod tests {
     }
 
     #[test]
+    fn task_payload_handles_unicode_punctuation_without_panicking() {
+        let title = "TaskNerve queue mirrors this file\u{2019}s open backlog (2026-04-21 through 2026-06-01)";
+        let task = sample_task("task_unicode", title, 50, TaskStatus::Open);
+        let state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![task.clone()],
+        };
+
+        let payload = task_to_json_payload(&task, &task_status_map(&state));
+        assert_eq!(
+            payload["schedule"]["not_before"],
+            serde_json::Value::from("2026-04-21")
+        );
+        assert_eq!(
+            payload["schedule"]["not_after"],
+            serde_json::Value::from("2026-06-01")
+        );
+        assert_eq!(
+            payload["schedule"]["source"],
+            serde_json::Value::from("text_range")
+        );
+    }
+
+    #[test]
     fn add_task_progress_entry_appends_notes() {
         let mut state = TaskState {
             schema_version: SCHEMA_TASKS.to_string(),
@@ -28864,6 +33058,7 @@ mod tests {
                 agent_id: "agent.worker".to_string(),
                 requested_task_id: None,
                 exclude_task_ids: Vec::new(),
+                exclude_tags: Vec::new(),
                 filters: TaskQueryFilter::default(),
                 max: 1,
                 max_new_claims: 0,
@@ -28955,6 +33150,7 @@ mod tests {
                 agent_id: "agent.worker".to_string(),
                 requested_task_id: None,
                 exclude_task_ids: Vec::new(),
+                exclude_tags: Vec::new(),
                 filters: TaskQueryFilter::default(),
                 max: 1,
                 max_new_claims: 1,
@@ -29024,6 +33220,7 @@ mod tests {
                 agent_id: "agent.worker".to_string(),
                 requested_task_id: None,
                 exclude_task_ids: Vec::new(),
+                exclude_tags: Vec::new(),
                 filters: TaskQueryFilter::default(),
                 max: 1,
                 max_new_claims: 0,
@@ -29294,7 +33491,7 @@ Prefer evidence-backed tasks.
         );
         assert!(blocked.is_none());
 
-        let task = edit_task_in_state(
+        let outcome = edit_task_in_state(
             &mut state,
             "task_blocked",
             "agent.worker",
@@ -29304,7 +33501,8 @@ Prefer evidence-backed tasks.
             },
         )
         .expect("clear blocked");
-        assert!(task.blocked_reason.is_none());
+        assert!(outcome.changed);
+        assert!(outcome.task.blocked_reason.is_none());
 
         let selected = select_task_for_agent(
             &state,
@@ -29882,6 +34080,122 @@ Prefer evidence-backed tasks.
     }
 
     #[test]
+    fn extract_codex_main_bridge_bindings_handles_minified_symbol_names() {
+        let input = concat!(
+            "var AA={id:q1,display_name:n1,kind:\"local\"};",
+            "var BB=new Map,CC=x=>{let y=BB.get(x.id);if(y)return y;let z=new hne({hostProcess:qre,host:x});return BB.set(x.id,z),L9.registerContext(x.id,z),z},",
+            "DD=CC(AA);",
+            "MENU=tj({ensurePrimaryWindowVisible:EE,navigateToRoute:(win,path)=>noop(win,path),selectHost:GG,navigateToRoute:FF});",
+            "EE=async id=>{let win=L9.getPrimaryWindow(id);if(win)return win;return null};",
+            "GG=async id=>{return id};",
+            "function FF(win,path,state){L9.sendMessageToWindow(win,{type:'navigate-to-route',path:path,state:state})}"
+        );
+        let bindings = extract_codex_main_bridge_bindings(input).expect("bindings");
+        assert_eq!(
+            bindings,
+            CodexMainBridgeBindings {
+                local_host_config: "AA".to_string(),
+                context_resolver: "CC".to_string(),
+                ensure_window: Some("EE".to_string()),
+                navigate_route: Some("FF".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn patch_codex_main_js_embeds_discovered_codex_symbols() {
+        let input = concat!(
+            "var AA={id:q1,display_name:n1,kind:`local`};",
+            "var BB=new Map,CC=x=>{let y=BB.get(x.id);if(y)return y;let z=new hne({hostProcess:qre,host:x});return BB.set(x.id,z),L9.registerContext(x.id,z),z},",
+            "DD=CC(AA);",
+            "MENU=tj({ensurePrimaryWindowVisible:EE,navigateToRoute:(win,path)=>noop(win,path),selectHost:GG,navigateToRoute:FF});",
+            "EE=async id=>{let win=L9.getPrimaryWindow(id);if(win)return win;return null};",
+            "GG=async id=>{return id};",
+            "function FF(win,path,state){L9.sendMessageToWindow(win,{type:`navigate-to-route`,path:path,state:state})}",
+            "\n//# sourceMappingURL=main.js.map\n"
+        );
+        let output = patch_codex_main_js(input, "127.0.0.1", 7791).expect("patch main");
+        assert!(output.contains("const TASKNERVE_LOCAL_HOST_CONFIG = AA;"));
+        assert!(output.contains("const TASKNERVE_CONTEXT_RESOLVER = CC;"));
+        assert!(output.contains("const TASKNERVE_ENSURE_WINDOW = EE;"));
+        assert!(output.contains("const TASKNERVE_NAVIGATE_ROUTE = FF;"));
+        assert!(output.contains("const TASKNERVE_BRIDGE_HOST = \"127.0.0.1\";"));
+        assert!(output.contains("const TASKNERVE_BRIDGE_PORT = 7791;"));
+        assert!(output.contains(CODEX_MAIN_BRIDGE_START_MARKER));
+        assert!(output.contains("//# sourceMappingURL=main.js.map"));
+    }
+
+    #[test]
+    fn rewrite_codex_clone_main_plist_json_rebrands_bundle_metadata() {
+        let mut plist = json!({
+            "CFBundleDisplayName": "Codex",
+            "CFBundleExecutable": "Codex",
+            "CFBundleIdentifier": "com.openai.codex",
+            "CFBundleName": "Codex",
+            "CFBundleURLTypes": [{
+                "CFBundleURLName": "Codex",
+                "CFBundleURLSchemes": ["codex"]
+            }]
+        });
+        rewrite_codex_clone_main_plist_json(
+            &mut plist,
+            "Codex TaskNerve",
+            "com.openai.codex.tasknerve",
+            "codex-tasknerve",
+        )
+        .expect("rewrite plist");
+        assert_eq!(
+            plist["CFBundleDisplayName"],
+            serde_json::Value::from("Codex TaskNerve")
+        );
+        assert_eq!(
+            plist["CFBundleExecutable"],
+            serde_json::Value::from("Codex TaskNerve")
+        );
+        assert_eq!(
+            plist["CFBundleIdentifier"],
+            serde_json::Value::from("com.openai.codex.tasknerve")
+        );
+        assert_eq!(
+            plist["CFBundleURLTypes"][0]["CFBundleURLSchemes"][0],
+            serde_json::Value::from("codex-tasknerve")
+        );
+    }
+
+    #[test]
+    fn rewrite_codex_clone_helper_plist_json_rebrands_helper_metadata() {
+        let mut plist = json!({
+            "CFBundleDisplayName": "Codex Helper",
+            "CFBundleExecutable": "Codex Helper",
+            "CFBundleIdentifier": "com.openai.codex.helper",
+            "CFBundleName": "Codex"
+        });
+        rewrite_codex_clone_helper_plist_json(
+            &mut plist,
+            "Codex TaskNerve Helper",
+            "com.openai.codex.tasknerve.helper",
+            "Codex TaskNerve",
+        )
+        .expect("rewrite helper plist");
+        assert_eq!(
+            plist["CFBundleDisplayName"],
+            serde_json::Value::from("Codex TaskNerve Helper")
+        );
+        assert_eq!(
+            plist["CFBundleExecutable"],
+            serde_json::Value::from("Codex TaskNerve Helper")
+        );
+        assert_eq!(
+            plist["CFBundleIdentifier"],
+            serde_json::Value::from("com.openai.codex.tasknerve.helper")
+        );
+        assert_eq!(
+            plist["CFBundleName"],
+            serde_json::Value::from("Codex TaskNerve")
+        );
+    }
+
+    #[test]
     fn resolve_selected_task_gui_project_prefers_selector_then_most_recent_then_default() {
         let projects = vec![
             TaskGuiProject {
@@ -30130,7 +34444,7 @@ Prefer evidence-backed tasks.
             ],
         };
 
-        let task = edit_task_in_state(
+        let outcome = edit_task_in_state(
             &mut state,
             "task_main",
             "agent.editor",
@@ -30144,11 +34458,50 @@ Prefer evidence-backed tasks.
             },
         )
         .expect("expected edit to succeed");
-        assert_eq!(task.title, "after");
-        assert!(task.detail.is_none());
-        assert_eq!(task.priority, 9);
-        assert_eq!(task.tags, vec!["compiler".to_string(), "gui".to_string()]);
-        assert_eq!(task.depends_on, vec!["task_dep".to_string()]);
+        assert!(outcome.changed);
+        assert_eq!(outcome.task.title, "after");
+        assert!(outcome.task.detail.is_none());
+        assert_eq!(outcome.task.priority, 9);
+        assert_eq!(
+            outcome.task.tags,
+            vec!["compiler".to_string(), "gui".to_string()]
+        );
+        assert_eq!(outcome.task.depends_on, vec!["task_dep".to_string()]);
+    }
+
+    #[test]
+    fn edit_task_in_state_noop_is_idempotent_success() {
+        let mut state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![sample_task("task_noop", "noop", 1, TaskStatus::Open)],
+        };
+        let original_updated = state.tasks[0].updated_at_utc.clone();
+        let original_state_updated = state.updated_at_utc.clone();
+
+        let outcome = edit_task_in_state(
+            &mut state,
+            "task_noop",
+            "agent.editor",
+            TaskEditPatch::default(),
+        )
+        .expect("no-op edit should succeed");
+        assert!(!outcome.changed);
+        assert_eq!(outcome.task.task_id, "task_noop");
+        assert_eq!(state.tasks[0].updated_at_utc, original_updated);
+        assert_eq!(state.updated_at_utc, original_state_updated);
+    }
+
+    #[test]
+    fn resolve_task_list_patch_clear_with_values_means_replace() {
+        let patched = resolve_task_list_patch(
+            vec!["task_a".to_string(), "task_b".to_string()],
+            true,
+            "depends-on",
+        )
+        .expect("clear+values should be accepted")
+        .expect("patch should be present");
+        assert_eq!(patched, vec!["task_a".to_string(), "task_b".to_string()]);
     }
 
     #[test]
@@ -30623,5 +34976,95 @@ Prefer evidence-backed tasks.
             .expect_err("expected invalid priority");
         let message = format!("{err:#}");
         assert!(message.contains("invalid priority"));
+    }
+
+    #[test]
+    fn render_codex_heartbeat_message_interpolates_known_placeholders() {
+        let rendered = render_codex_heartbeat_message(
+            "Continue {project_name} as {agent_id} on {task_id}: {task_title}",
+            "taskNerve",
+            "agent.alpha",
+            "task_123",
+            "Wire prompt queue",
+        );
+        assert_eq!(
+            rendered,
+            "Continue taskNerve as agent.alpha on task_123: Wire prompt queue"
+        );
+    }
+
+    #[test]
+    fn resolve_task_gui_codex_agent_id_uses_controller_identity() {
+        let state = default_codex_thread_state();
+        let agent_id = resolve_task_gui_codex_agent_id(
+            &state,
+            Some("agent.custom".to_string()),
+            "019cd618-36bd-7060-a8fc-2d523f3a50be",
+            true,
+        );
+        assert_eq!(agent_id, CODEX_CONTROLLER_AGENT_ID);
+    }
+
+    #[test]
+    fn next_available_codex_worker_agent_id_avoids_existing_binding_collision() {
+        let mut state = default_codex_thread_state();
+        state.bindings.push(CodexThreadBinding {
+            agent_id: "agent.codex.019cd618".to_string(),
+            thread_id: "019cd618-36bd-7060-a8fc-2d523f3a50be".to_string(),
+            label: Some("worker".to_string()),
+            heartbeat_message: None,
+            created_at_utc: now_utc(),
+            updated_at_utc: now_utc(),
+            last_injected_at_utc: None,
+            last_task_id: None,
+            last_result_excerpt: None,
+            last_error: None,
+        });
+        let candidate =
+            next_available_codex_worker_agent_id(&state, "019cd618-0000-0000-0000-000000000001");
+        assert_ne!(candidate, "agent.codex.019cd618");
+        assert!(candidate.starts_with("agent.codex."));
+    }
+
+    #[test]
+    fn build_codex_continue_task_prompt_includes_task_contract() {
+        let repo = TestRepo::new("codex-prompt");
+        let binding = CodexThreadBinding {
+            agent_id: "agent.alpha".to_string(),
+            thread_id: "019cd609-2351-73f0-b208-a6c26e3999da".to_string(),
+            label: Some("Agent Alpha".to_string()),
+            heartbeat_message: Some(
+                "Please continue working on {project_name} project utilizing the taskNerve system."
+                    .to_string(),
+            ),
+            created_at_utc: now_utc(),
+            updated_at_utc: now_utc(),
+            last_injected_at_utc: None,
+            last_task_id: None,
+            last_result_excerpt: None,
+            last_error: None,
+        };
+        let task_payload = json!({
+            "task_id": "task_abc",
+            "title": "Implement prompt queue",
+            "detail": "Persist stable agent bindings and queue follow-up prompts.",
+            "priority": 8,
+            "tags": ["codex", "automation"],
+            "context": {
+                "source": { "reference": "plan.md#P1" },
+                "acceptance_criteria": ["Bind by stable thread id", "Queue continuation prompts"],
+                "plan_notes": ["Use the TaskNerve GUI iframe."],
+                "dependency_blockers": [],
+                "next_recommended_substep": "Add the codex queue controls to the panel."
+            }
+        });
+
+        let prompt =
+            build_codex_continue_task_prompt(repo.path(), "agent.alpha", &binding, &task_payload);
+
+        assert!(prompt.contains("Implement prompt queue"));
+        assert!(prompt.contains("tasknerve --repo-root . task current --agent agent.alpha"));
+        assert!(prompt.contains("task advance task_abc"));
+        assert!(prompt.contains("Queue continuation prompts"));
     }
 }
