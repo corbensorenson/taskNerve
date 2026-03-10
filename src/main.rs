@@ -27942,13 +27942,19 @@ mod tests {
     #[test]
     fn run_local_quality_check_command_reports_timeout() {
         let repo = TestRepo::new("quality-check-timeout");
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-        let result = run_local_quality_check_command(
-            repo.path(),
-            &shell,
-            "echo tasknerve-check-start && sleep 2 && echo tasknerve-check-end",
-            1,
-        );
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| {
+            if cfg!(windows) {
+                "sh".to_string()
+            } else {
+                "/bin/sh".to_string()
+            }
+        });
+        let command = if cfg!(windows) {
+            "powershell -NoLogo -NoProfile -Command \"Write-Output tasknerve-check-start; Start-Sleep -Seconds 2; Write-Output tasknerve-check-end\""
+        } else {
+            "echo tasknerve-check-start && sleep 2 && echo tasknerve-check-end"
+        };
+        let result = run_local_quality_check_command(repo.path(), &shell, command, 1);
         assert!(result.timed_out, "expected local check command to time out");
         assert!(!result.ok, "timed-out command should not report success");
         assert!(
