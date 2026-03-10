@@ -12,6 +12,35 @@ log() {
   printf '[tasknerve-dev-auto-install] %s\n' "$*" >&2
 }
 
+read_active_version() {
+  local active_bin="$1"
+  python3 - "$active_bin" <<'PY'
+import pathlib
+import subprocess
+import sys
+
+bin_path = pathlib.Path(sys.argv[1])
+if not bin_path.exists():
+    raise SystemExit(0)
+
+cmd = [str(bin_path), "--version"]
+try:
+    first_line = bin_path.read_bytes().splitlines()[:1]
+except Exception:
+    first_line = []
+if first_line and first_line[0].startswith(b"#!"):
+    cmd = ["/bin/bash", str(bin_path), "--version"]
+
+try:
+    completed = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+except Exception:
+    raise SystemExit(0)
+
+if completed.returncode == 0:
+    sys.stdout.write(completed.stdout.strip())
+PY
+}
+
 run_install() {
   python3 - "$REPO_ROOT" "$TIMEOUT_SECONDS" <<'PY'
 import os
@@ -82,7 +111,7 @@ log "refreshing local tasknerve install after ${HOOK_NAME}"
 if run_install; then
   printf '%s\n' "$CURRENT_STAMP" >"$STAMP_FILE"
   ACTIVE_BIN="$(command -v tasknerve || true)"
-  ACTIVE_VERSION="$(tasknerve --version 2>/dev/null || true)"
+  ACTIVE_VERSION="$(read_active_version "$ACTIVE_BIN" 2>/dev/null || true)"
   log "active binary: ${ACTIVE_BIN:-unknown}"
   if [[ -n "$ACTIVE_VERSION" ]]; then
     log "active version: $ACTIVE_VERSION"
