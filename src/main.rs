@@ -22521,11 +22521,9 @@ fn task_current_payload(
     let status_map = task_status_map(state);
     let now = Utc::now();
     let indices = agent_owned_claim_indices(state, agent_id);
-    let (fresh_indices, stale_indices): (Vec<_>, Vec<_>) = indices
-        .into_iter()
-        .partition(|idx| {
-            !task_claim_is_stale(&state.tasks[*idx], now, DEFAULT_TASK_CLAIM_STALE_MINUTES)
-        });
+    let (fresh_indices, stale_indices): (Vec<_>, Vec<_>) = indices.into_iter().partition(|idx| {
+        !task_claim_is_stale(&state.tasks[*idx], now, DEFAULT_TASK_CLAIM_STALE_MINUTES)
+    });
     let ordered_indices = fresh_indices
         .iter()
         .chain(stale_indices.iter())
