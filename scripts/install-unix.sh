@@ -168,10 +168,20 @@ install_shell_bootstrap() {
   cat >"$SHELL_BOOTSTRAP_FILE" <<EOF
 tasknerve_bin_dir="$INSTALL_DIR"
 
-case ":\$PATH:" in
-  *":\$tasknerve_bin_dir:"*) ;;
-  *) export PATH="\$tasknerve_bin_dir:\$PATH" ;;
-esac
+tasknerve_prepend_path() {
+  local bin_dir="\$1"
+  local normalized=":\$PATH:"
+  normalized="\${normalized//:\$bin_dir:/:}"
+  normalized="\${normalized#:}"
+  normalized="\${normalized%:}"
+  if [[ -n "\$normalized" ]]; then
+    export PATH="\$bin_dir:\$normalized"
+  else
+    export PATH="\$bin_dir"
+  fi
+}
+
+tasknerve_prepend_path "\$tasknerve_bin_dir"
 
 tasknerve_run_installed() {
   local bin="\$1"
