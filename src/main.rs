@@ -1040,6 +1040,9 @@ struct CheckRunCheckResult {
     status: String,
     exit_code: Option<i32>,
     duration_ms: u64,
+    timed_out: bool,
+    stdout_excerpt: String,
+    stderr_excerpt: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2969,8 +2972,12 @@ fn cmd_doctor(repo_root: &Path, args: DoctorArgs) -> Result<()> {
     let repair_attempted = args.fix && timeline_initialized && !missing_timeline_objects.is_empty();
     let mut repaired_timeline_objects = Vec::<MissingTimelineObject>::new();
     if repair_attempted {
-        repaired_timeline_objects =
-            repair_missing_timeline_objects_from_git(repo_root, &missing_timeline_objects)?;
+        let worktree_hash_lookup = build_worktree_hash_lookup(repo_root).ok();
+        repaired_timeline_objects = repair_missing_timeline_objects_from_git(
+            repo_root,
+            &missing_timeline_objects,
+            worktree_hash_lookup.as_ref(),
+        )?;
         missing_timeline_objects = collect_missing_timeline_objects_detailed(repo_root)?;
     }
     let timeline_object_integrity = missing_timeline_objects.is_empty();
@@ -4585,6 +4592,11 @@ fn checkpoint_suggested_commands(repo_root: &Path, summary: &str) -> Vec<String>
             summary
         ),
         format!(
+            "tasknerve --repo-root {} checkpoint --summary {:?} --allow-baseline-reseed",
+            repo_root.display(),
+            summary
+        ),
+        format!(
             "tasknerve --repo-root {} checkpoint --summary {:?} --repair lossy",
             repo_root.display(),
             summary
@@ -4615,6 +4627,7 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
     let hash_jobs = resolve_parallel_jobs(args.hash_jobs, args.burst);
     let object_jobs = resolve_parallel_jobs(args.object_jobs.or(args.hash_jobs), args.burst);
     let new_index = scan_repo(repo_root, Some(&old_index), args.strict_hash, hash_jobs)?;
+    let repair_worktree_hash_lookup = build_hash_lookup_from_index(repo_root, &new_index);
     let repair_mode = resolve_checkpoint_repair_mode(
         args.repair,
         args.repair_missing_blobs,
@@ -4715,10 +4728,23 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
     let repaired_old_objects = if matches!(repair_mode, CheckpointRepairModeArg::Strict) {
         Vec::new()
     } else {
-        repair_missing_change_objects_from_git(repo_root, &changes, false)?
+        repair_missing_change_objects_from_git(
+            repo_root,
+            &changes,
+            false,
+            Some(&repair_worktree_hash_lookup),
+        )?
     };
     if !repaired_old_objects.is_empty() {
         missing_old_objects.retain(|row| !timeline_objects_dir(repo_root).join(&row.hash).exists());
+    }
+    let mut baseline_reseeded_old_objects = 0_usize;
+    if args.allow_baseline_reseed && !missing_old_objects.is_empty() {
+        baseline_reseeded_old_objects =
+            baseline_reseed_missing_old_change_hashes(&mut changes, &missing_old_objects);
+        if baseline_reseeded_old_objects > 0 {
+            missing_old_objects = render_checkpoint_missing_blob_rows(&changes, repo_root);
+        }
     }
     if !missing_old_objects.is_empty() {
         if !matches!(repair_mode, CheckpointRepairModeArg::Lossy) {
@@ -4728,7 +4754,7 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
                 .collect::<Vec<_>>()
                 .join("\n");
             let message = format!(
-                "checkpoint would lose recoverability because old object blobs are missing:\n{}\nRecreate the baseline snapshot first (for new repos, run `tasknerve init` before edits).\nTry `tasknerve doctor --fix` for safe Git-backed repair, rerun with `--repair auto` or `--repair-missing-blobs` to auto-heal during checkpoint, or use `--repair lossy` only when those blobs are irrecoverable.",
+                "checkpoint would lose recoverability because old object blobs are missing:\n{}\nRecreate the baseline snapshot first (for new repos, run `tasknerve init` before edits).\nTry `tasknerve doctor --fix` for safe Git-backed repair, rerun with `--repair auto` or `--repair-missing-blobs` to auto-heal during checkpoint, try `--allow-baseline-reseed` to reseal irrecoverable modified-file history, or use `--repair lossy` only when those blobs are irrecoverable.",
                 rendered_missing,
             );
             if args.json {
@@ -4752,9 +4778,15 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
             );
         }
     }
+    if baseline_reseeded_old_objects > 0 && !args.json {
+        println!(
+            "[tasknerve] warning=baseline_reseed reseeded_old_objects={} historical_checkout_for_reseeded_paths_before_this_checkpoint_may_be_lossy",
+            baseline_reseeded_old_objects
+        );
+    }
     if !repaired_old_objects.is_empty() && !args.json {
         println!(
-            "[tasknerve] repaired_missing_old_objects={} source=git_history repair_mode={}",
+            "[tasknerve] repaired_missing_old_objects={} source=git_or_worktree repair_mode={}",
             repaired_old_objects.len(),
             checkpoint_repair_mode_label(repair_mode)
         );
@@ -4807,6 +4839,10 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
         event_tags.push("lossy_repair".to_string());
         event_tags = dedupe_keep_order(event_tags);
     }
+    if baseline_reseeded_old_objects > 0 {
+        event_tags.push("baseline_reseed".to_string());
+        event_tags = dedupe_keep_order(event_tags);
+    }
     let event = TimelineEvent {
         schema_version: SCHEMA_EVENT.to_string(),
         event_id: event_id.clone(),
@@ -4855,6 +4891,7 @@ fn cmd_checkpoint(repo_root: &Path, args: CheckpointArgs) -> Result<()> {
                 "repair_mode": checkpoint_repair_mode_label(repair_mode),
                 "lossy_repair": matches!(repair_mode, CheckpointRepairModeArg::Lossy) && !missing_old_objects.is_empty(),
                 "repaired_old_objects": repaired_old_objects,
+                "baseline_reseeded_old_object_count": baseline_reseeded_old_objects,
                 "metrics": {
                     "tracked_file_count": event.metrics.tracked_file_count,
                     "changed_file_count": event.metrics.changed_file_count,
@@ -6869,8 +6906,13 @@ fn cmd_checkout(repo_root: &Path, args: CheckoutArgs) -> Result<()> {
             ChangeKind::Deleted => {}
         }
     }
-    let repaired_target_objects =
-        repair_missing_change_objects_from_git(repo_root, &planned, true)?;
+    let checkout_worktree_hash_lookup = build_hash_lookup_from_index(repo_root, &current_index);
+    let repaired_target_objects = repair_missing_change_objects_from_git(
+        repo_root,
+        &planned,
+        true,
+        Some(&checkout_worktree_hash_lookup),
+    )?;
     if !repaired_target_objects.is_empty() {
         missing_objects.retain(|row| {
             let (_, hash) = row
@@ -6889,7 +6931,7 @@ fn cmd_checkout(repo_root: &Path, args: CheckoutArgs) -> Result<()> {
     }
     if !repaired_target_objects.is_empty() {
         println!(
-            "[tasknerve-checkout] repaired_missing_objects={} source=git_history",
+            "[tasknerve-checkout] repaired_missing_objects={} source=git_or_worktree",
             repaired_target_objects.len()
         );
     }
@@ -19104,6 +19146,7 @@ fn collect_missing_timeline_objects_detailed(
 fn repair_missing_timeline_objects_from_git(
     repo_root: &Path,
     missing: &[MissingTimelineObject],
+    worktree_hash_lookup: Option<&BTreeMap<String, PathBuf>>,
 ) -> Result<Vec<MissingTimelineObject>> {
     let mut repaired = Vec::<MissingTimelineObject>::new();
     let mut attempted = BTreeSet::<(String, String)>::new();
@@ -19116,7 +19159,8 @@ fn repair_missing_timeline_objects_from_git(
             repaired.push(item.clone());
             continue;
         }
-        if repair_timeline_object_from_git(repo_root, &item.path, &item.hash)? {
+        if repair_timeline_object_from_git(repo_root, &item.path, &item.hash, worktree_hash_lookup)?
+        {
             repaired.push(item.clone());
         }
     }
@@ -19127,6 +19171,7 @@ fn repair_missing_change_objects_from_git(
     repo_root: &Path,
     changes: &[ChangeRecord],
     use_new_hash: bool,
+    worktree_hash_lookup: Option<&BTreeMap<String, PathBuf>>,
 ) -> Result<Vec<String>> {
     let mut repaired = Vec::<String>::new();
     let mut attempted = BTreeSet::<(String, String)>::new();
@@ -19153,7 +19198,12 @@ fn repair_missing_change_objects_from_git(
         if timeline_objects_dir(repo_root).join(expected_hash).exists() {
             continue;
         }
-        if repair_timeline_object_from_git(repo_root, &change.path, expected_hash)? {
+        if repair_timeline_object_from_git(
+            repo_root,
+            &change.path,
+            expected_hash,
+            worktree_hash_lookup,
+        )? {
             repaired.push(format!("{} ({})", key.0, key.1));
         }
     }
@@ -19165,6 +19215,7 @@ fn repair_timeline_object_from_git(
     repo_root: &Path,
     rel_path: &str,
     expected_hash: &str,
+    worktree_hash_lookup: Option<&BTreeMap<String, PathBuf>>,
 ) -> Result<bool> {
     let object_path = timeline_objects_dir(repo_root).join(expected_hash);
     if object_path.exists() {
@@ -19190,7 +19241,94 @@ fn repair_timeline_object_from_git(
         return Ok(true);
     }
 
+    if let Some(bytes) = read_worktree_path_if_hash_matches(repo_root, &rel_path, expected_hash)? {
+        store_object_bytes(repo_root, expected_hash, &bytes)?;
+        return Ok(true);
+    }
+
+    if let Some(source_path) = worktree_hash_lookup.and_then(|lookup| lookup.get(expected_hash))
+        && source_path.exists()
+    {
+        store_object(repo_root, expected_hash, source_path)?;
+        return Ok(true);
+    }
+
     Ok(false)
+}
+
+fn read_worktree_path_if_hash_matches(
+    repo_root: &Path,
+    rel_path: &str,
+    expected_hash: &str,
+) -> Result<Option<Vec<u8>>> {
+    let source_path = repo_root.join(rel_path);
+    if !source_path.is_file() {
+        return Ok(None);
+    }
+    let bytes = match fs::read(&source_path) {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(None),
+    };
+    if hash_bytes(&bytes) != expected_hash {
+        return Ok(None);
+    }
+    Ok(Some(bytes))
+}
+
+fn build_hash_lookup_from_index(
+    repo_root: &Path,
+    index: &BTreeMap<String, FileRecord>,
+) -> BTreeMap<String, PathBuf> {
+    let mut lookup = BTreeMap::<String, PathBuf>::new();
+    for (rel_path, row) in index {
+        let source_path = repo_root.join(rel_path);
+        if source_path.is_file() {
+            lookup
+                .entry(row.hash.clone())
+                .or_insert_with(|| source_path.clone());
+        }
+    }
+    lookup
+}
+
+fn build_worktree_hash_lookup(repo_root: &Path) -> Result<BTreeMap<String, PathBuf>> {
+    let index = scan_repo(repo_root, None, false, 1)?;
+    Ok(build_hash_lookup_from_index(repo_root, &index))
+}
+
+fn baseline_reseed_missing_old_change_hashes(
+    changes: &mut [ChangeRecord],
+    missing_old_objects: &[CheckpointMissingBlob],
+) -> usize {
+    let missing_modified = missing_old_objects
+        .iter()
+        .filter(|row| row.change_kind == "modified")
+        .map(|row| (row.path.clone(), row.hash.clone()))
+        .collect::<BTreeSet<_>>();
+    if missing_modified.is_empty() {
+        return 0;
+    }
+
+    let mut reseeded = 0_usize;
+    for change in changes {
+        if !matches!(change.kind, ChangeKind::Modified) {
+            continue;
+        }
+        let Some(old_hash) = change.old_hash.as_deref() else {
+            continue;
+        };
+        if !missing_modified.contains(&(change.path.clone(), old_hash.to_string())) {
+            continue;
+        }
+        let Some(new_hash) = change.new_hash.clone() else {
+            continue;
+        };
+        change.old_hash = Some(new_hash);
+        change.old_size_bytes = change.new_size_bytes;
+        reseeded += 1;
+    }
+
+    reseeded
 }
 
 fn git_history_revisions_for_path(repo_root: &Path, rel_path: &str) -> Result<Vec<String>> {
@@ -20675,6 +20813,136 @@ fn check_policy_payload(state: &CheckState, config: &TimelineConfig) -> serde_js
     })
 }
 
+#[derive(Debug, Clone)]
+struct LocalQualityCheckExecution {
+    ok: bool,
+    status: String,
+    exit_code: Option<i32>,
+    duration_ms: u64,
+    timed_out: bool,
+    stdout_excerpt: String,
+    stderr_excerpt: String,
+}
+
+fn resolve_local_quality_check_timeout_seconds() -> u64 {
+    std::env::var("TASKNERVE_LOCAL_CHECK_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(300)
+        .max(1)
+}
+
+fn truncate_check_output(bytes: &[u8], max_bytes: usize) -> String {
+    if bytes.len() <= max_bytes {
+        return String::from_utf8_lossy(bytes).trim().to_string();
+    }
+    let clipped = &bytes[..max_bytes];
+    let omitted = bytes.len().saturating_sub(max_bytes);
+    format!(
+        "{}\n...[truncated {} bytes]",
+        String::from_utf8_lossy(clipped).trim(),
+        omitted
+    )
+}
+
+fn run_local_quality_check_command(
+    repo_root: &Path,
+    shell: &str,
+    command: &str,
+    timeout_seconds: u64,
+) -> LocalQualityCheckExecution {
+    let timeout = StdDuration::from_secs(timeout_seconds.max(1));
+    let started = Instant::now();
+    let mut child = match ProcessCommand::new(shell)
+        .current_dir(repo_root)
+        .arg("-lc")
+        .arg(command)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) => {
+            return LocalQualityCheckExecution {
+                ok: false,
+                status: format!("spawn_error: {}", err),
+                exit_code: None,
+                duration_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                timed_out: false,
+                stdout_excerpt: String::new(),
+                stderr_excerpt: String::new(),
+            };
+        }
+    };
+
+    let mut timed_out = false;
+    let exit_status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                if started.elapsed() >= timeout {
+                    timed_out = true;
+                    let _ = child.kill();
+                    break child.wait().ok();
+                }
+                thread::sleep(StdDuration::from_millis(50));
+            }
+            Err(err) => {
+                let mut stdout = Vec::<u8>::new();
+                if let Some(mut pipe) = child.stdout.take() {
+                    let _ = pipe.read_to_end(&mut stdout);
+                }
+                let mut stderr = Vec::<u8>::new();
+                if let Some(mut pipe) = child.stderr.take() {
+                    let _ = pipe.read_to_end(&mut stderr);
+                }
+                return LocalQualityCheckExecution {
+                    ok: false,
+                    status: format!("wait_error: {}", err),
+                    exit_code: None,
+                    duration_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                    timed_out,
+                    stdout_excerpt: truncate_check_output(&stdout, 8 * 1024),
+                    stderr_excerpt: truncate_check_output(&stderr, 8 * 1024),
+                };
+            }
+        }
+    };
+
+    let mut stdout = Vec::<u8>::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let _ = pipe.read_to_end(&mut stdout);
+    }
+    let mut stderr = Vec::<u8>::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_end(&mut stderr);
+    }
+
+    let ok = exit_status
+        .as_ref()
+        .map(|status| status.success())
+        .unwrap_or(false)
+        && !timed_out;
+    let status = if timed_out {
+        format!("timed_out_after_{}s", timeout_seconds.max(1))
+    } else if ok {
+        "passed".to_string()
+    } else {
+        "failed".to_string()
+    };
+
+    LocalQualityCheckExecution {
+        ok,
+        status,
+        exit_code: exit_status.and_then(|status| status.code()),
+        duration_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+        timed_out,
+        stdout_excerpt: truncate_check_output(&stdout, 8 * 1024),
+        stderr_excerpt: truncate_check_output(&stderr, 8 * 1024),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_quality_checks(
     repo_root: &Path,
@@ -20686,6 +20954,7 @@ fn run_quality_checks(
     trigger: &str,
     persist_results: bool,
 ) -> Result<serde_json::Value> {
+    let local_timeout_seconds = resolve_local_quality_check_timeout_seconds();
     let selected_indices = state
         .checks
         .iter()
@@ -20705,26 +20974,17 @@ fn run_quality_checks(
     for index in selected_indices {
         let check = state.checks[index].clone();
         let started_at = now_utc();
-        let started = Instant::now();
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-        let output = ProcessCommand::new(&shell)
-            .current_dir(repo_root)
-            .arg("-lc")
-            .arg(&check.command)
-            .output();
-        let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-        let (ok, status, exit_code) = match output {
-            Ok(output) => (
-                output.status.success(),
-                if output.status.success() {
-                    "passed".to_string()
-                } else {
-                    "failed".to_string()
-                },
-                output.status.code(),
-            ),
-            Err(err) => (false, format!("spawn_error: {}", err), None),
-        };
+        let run = run_local_quality_check_command(
+            repo_root,
+            &shell,
+            &check.command,
+            local_timeout_seconds,
+        );
+        let ok = run.ok;
+        let status = run.status.clone();
+        let exit_code = run.exit_code;
+        let duration_ms = run.duration_ms;
         state.checks[index].last_run_at_utc = Some(started_at);
         state.checks[index].last_run_status = Some(status.clone());
         state.checks[index].last_run_duration_ms = Some(duration_ms);
@@ -20743,6 +21003,9 @@ fn run_quality_checks(
             status,
             exit_code,
             duration_ms,
+            timed_out: run.timed_out,
+            stdout_excerpt: run.stdout_excerpt,
+            stderr_excerpt: run.stderr_excerpt,
         });
         if fail_fast && failed_count > 0 {
             break;
@@ -20750,6 +21013,7 @@ fn run_quality_checks(
     }
 
     let passed_count = results.iter().filter(|row| row.ok).count();
+    let timed_out_count = results.iter().filter(|row| row.timed_out).count();
     if persist_results {
         state.updated_at_utc = now_utc();
         write_check_state(repo_root, state)?;
@@ -20770,6 +21034,8 @@ fn run_quality_checks(
 
     let status = if results.is_empty() {
         "no_checks"
+    } else if timed_out_count > 0 && timed_out_count == failed_count {
+        "timed_out"
     } else if failed_count == 0 {
         "passed"
     } else {
@@ -20783,9 +21049,11 @@ fn run_quality_checks(
         "status": status,
         "trigger": trigger,
         "persisted": persist_results,
+        "local_timeout_seconds": local_timeout_seconds,
         "selected_count": results.len(),
         "passed_count": passed_count,
         "failed_count": failed_count,
+        "timed_out_count": timed_out_count,
         "checks": results
     }))
 }
@@ -26258,6 +26526,29 @@ mod tests {
     }
 
     #[test]
+    fn run_local_quality_check_command_reports_timeout() {
+        let repo = TestRepo::new("quality-check-timeout");
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let result = run_local_quality_check_command(
+            repo.path(),
+            &shell,
+            "echo tasknerve-check-start && sleep 2 && echo tasknerve-check-end",
+            1,
+        );
+        assert!(result.timed_out, "expected local check command to time out");
+        assert!(!result.ok, "timed-out command should not report success");
+        assert!(
+            result.status.contains("timed_out_after_1s"),
+            "expected timeout status, got: {}",
+            result.status
+        );
+        assert!(
+            result.stdout_excerpt.contains("tasknerve-check-start"),
+            "stdout excerpt should preserve early output for debugging"
+        );
+    }
+
+    #[test]
     fn github_issue_skip_reason_filters_non_actionable_and_unsafe_requests() {
         let duplicate = GithubIssue {
             number: 1,
@@ -27660,6 +27951,196 @@ Prefer evidence-backed tasks.
         assert!(
             object_path.exists(),
             "expected missing object to be restored from git history"
+        );
+    }
+
+    #[test]
+    fn checkpoint_repairs_missing_old_objects_from_worktree_hash_lookup() {
+        let repo = TestRepo::new("checkpoint-worktree-hash-repair");
+        repo.git(&["init"]);
+        repo.git(&["config", "user.name", "TaskNerve Test"]);
+        repo.git(&["config", "user.email", "tasknerve-test@example.com"]);
+        repo.write_file("tracked.txt", "alpha\n");
+        repo.git(&["add", "."]);
+        repo.git(&["commit", "-m", "baseline"]);
+
+        cmd_init(
+            repo.path(),
+            InitArgs {
+                branch: "trunk".to_string(),
+                bridge_branch: None,
+                bridge_remote: "origin".to_string(),
+            },
+        )
+        .expect("init timeline");
+
+        repo.write_file("latest_pointer.txt", "alpha pointer\n");
+        cmd_checkpoint(
+            repo.path(),
+            CheckpointArgs {
+                summary: "add latest pointer".to_string(),
+                agent: Some("test.agent".to_string()),
+                tags: vec![],
+                files: vec![],
+                strict_hash: true,
+                ignore_locks: false,
+                hash_jobs: None,
+                object_jobs: None,
+                burst: false,
+                repair: CheckpointRepairModeArg::Auto,
+                repair_missing_blobs: false,
+                allow_baseline_reseed: false,
+                allow_lossy_repair: false,
+                preflight: false,
+                json: false,
+            },
+        )
+        .expect("add pointer checkpoint");
+
+        let alpha_hash = hash_bytes(b"alpha pointer\n");
+        let alpha_object_path = timeline_objects_dir(repo.path()).join(&alpha_hash);
+        fs::remove_file(&alpha_object_path).expect("remove missing old pointer object");
+
+        repo.write_file("latest_pointer.txt", "beta pointer\n");
+        repo.write_file("latest_pointer_backup.txt", "alpha pointer\n");
+
+        cmd_checkpoint(
+            repo.path(),
+            CheckpointArgs {
+                summary: "repair from worktree hash".to_string(),
+                agent: Some("test.agent".to_string()),
+                tags: vec![],
+                files: vec![],
+                strict_hash: true,
+                ignore_locks: false,
+                hash_jobs: None,
+                object_jobs: None,
+                burst: false,
+                repair: CheckpointRepairModeArg::Auto,
+                repair_missing_blobs: false,
+                allow_baseline_reseed: false,
+                allow_lossy_repair: false,
+                preflight: false,
+                json: false,
+            },
+        )
+        .expect("checkpoint repairs old pointer hash from another worktree file");
+
+        assert!(
+            alpha_object_path.exists(),
+            "expected missing old pointer object to be repaired from working tree hash source"
+        );
+    }
+
+    #[test]
+    fn checkpoint_allow_baseline_reseed_reseals_unrecoverable_modified_paths() {
+        let repo = TestRepo::new("checkpoint-baseline-reseed");
+        repo.git(&["init"]);
+        repo.git(&["config", "user.name", "TaskNerve Test"]);
+        repo.git(&["config", "user.email", "tasknerve-test@example.com"]);
+        repo.write_file("tracked.txt", "alpha\n");
+        repo.git(&["add", "."]);
+        repo.git(&["commit", "-m", "baseline"]);
+
+        cmd_init(
+            repo.path(),
+            InitArgs {
+                branch: "trunk".to_string(),
+                bridge_branch: None,
+                bridge_remote: "origin".to_string(),
+            },
+        )
+        .expect("init timeline");
+
+        repo.write_file("latest_pointer.txt", "alpha pointer\n");
+        cmd_checkpoint(
+            repo.path(),
+            CheckpointArgs {
+                summary: "add latest pointer".to_string(),
+                agent: Some("test.agent".to_string()),
+                tags: vec![],
+                files: vec![],
+                strict_hash: true,
+                ignore_locks: false,
+                hash_jobs: None,
+                object_jobs: None,
+                burst: false,
+                repair: CheckpointRepairModeArg::Auto,
+                repair_missing_blobs: false,
+                allow_baseline_reseed: false,
+                allow_lossy_repair: false,
+                preflight: false,
+                json: false,
+            },
+        )
+        .expect("add pointer checkpoint");
+
+        let alpha_hash = hash_bytes(b"alpha pointer\n");
+        fs::remove_file(timeline_objects_dir(repo.path()).join(alpha_hash))
+            .expect("remove old pointer object");
+        repo.write_file("latest_pointer.txt", "beta pointer\n");
+
+        let strict_err = cmd_checkpoint(
+            repo.path(),
+            CheckpointArgs {
+                summary: "beta pointer strict".to_string(),
+                agent: Some("test.agent".to_string()),
+                tags: vec![],
+                files: vec![],
+                strict_hash: true,
+                ignore_locks: false,
+                hash_jobs: None,
+                object_jobs: None,
+                burst: false,
+                repair: CheckpointRepairModeArg::Auto,
+                repair_missing_blobs: false,
+                allow_baseline_reseed: false,
+                allow_lossy_repair: false,
+                preflight: false,
+                json: false,
+            },
+        )
+        .expect_err("checkpoint should fail without reseed when old blob is irrecoverable");
+        assert!(
+            strict_err.to_string().contains("missing old object blobs"),
+            "expected recoverability error, got: {strict_err:#}"
+        );
+
+        cmd_checkpoint(
+            repo.path(),
+            CheckpointArgs {
+                summary: "beta pointer baseline reseed".to_string(),
+                agent: Some("test.agent".to_string()),
+                tags: vec![],
+                files: vec![],
+                strict_hash: true,
+                ignore_locks: false,
+                hash_jobs: None,
+                object_jobs: None,
+                burst: false,
+                repair: CheckpointRepairModeArg::Auto,
+                repair_missing_blobs: false,
+                allow_baseline_reseed: true,
+                allow_lossy_repair: false,
+                preflight: false,
+                json: false,
+            },
+        )
+        .expect("checkpoint should succeed with baseline reseed");
+
+        let events = read_branch_events(repo.path(), "trunk").expect("read branch events");
+        let last_event = events.last().expect("latest checkpoint event");
+        let pointer_change = last_event
+            .changes
+            .iter()
+            .find(|change| change.path == "latest_pointer.txt")
+            .expect("latest pointer change");
+        let beta_hash = hash_bytes(b"beta pointer\n");
+        assert_eq!(pointer_change.old_hash.as_deref(), Some(beta_hash.as_str()));
+        assert_eq!(pointer_change.new_hash.as_deref(), Some(beta_hash.as_str()));
+        assert!(
+            last_event.tags.iter().any(|tag| tag == "baseline_reseed"),
+            "expected baseline_reseed tag to be attached"
         );
     }
 
