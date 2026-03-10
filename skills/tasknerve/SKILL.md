@@ -116,6 +116,8 @@ Use this skill when any of the following are true:
 - `tasknerve --repo-root . task heartbeat <task_id> --agent <agent_id> --claim-ttl-minutes 60 --note "<what changed>"`
 - To close work and pull the next ready item in one round trip:
 - `tasknerve --repo-root . task done --task-id <task_id> --agent <agent_id> --claim-next`
+- To preview the active/new quality checks before mutating task state:
+- `tasknerve --repo-root . task done --task-id <task_id> --dry-run-checks --json`
 - Direct blocked-state command when the work is real but currently stuck:
 - `tasknerve --repo-root . task block --task-id <task_id> --agent <agent_id> --reason "<why blocked>" --claim-next`
 - To block work and move on without faking completion:
@@ -127,6 +129,7 @@ Use this skill when any of the following are true:
 - To renew ownership on a long-running claim without re-claim side effects:
 - `tasknerve --repo-root . task claim <task_id> --agent <agent_id> --extend-only --claim-ttl-minutes 60`
 - Default quality gate is GitHub-first: GitHub-backed repos verify pushed commits through GitHub CI by default, and task completion does not require local check registration unless the repo policy explicitly opts into that. Local/non-GitHub repos can still use registered regression/benchmark checks when needed.
+- On local-check repos, `task done|advance --check-timeout-seconds <n>` overrides the per-run local check timeout that background bridge verification will inherit.
 - Low-task GitHub repos also run a deterministic issue monitor by default: safe open issues can be imported into the queue under `.tasknerve:github_issues`, while obviously harmful/non-actionable issues are skipped.
 - Register or retire checks explicitly when needed:
 - `tasknerve --repo-root . check add --kind regression --task-id <task_id> --command "<test command>"`
@@ -178,8 +181,12 @@ Use this skill when any of the following are true:
 - `tasknerve --repo-root . task policy set --auto-replenish-enabled false --agent <agent_id>`
 - For preview scheduling without claiming:
 - `tasknerve --repo-root . task request --agent <agent_id> --no-claim --max 3 --json`
+- To skip a just-released or externally blocked task on the next dispatch:
+- `tasknerve --repo-root . task request --agent <agent_id> --exclude-task-id <task_id> --json`
 - Run the active verification backend manually:
 - `tasknerve --repo-root . check run --json`
+- Override the local check timeout for a one-off manual run:
+- `tasknerve --repo-root . check run --timeout-seconds 120 --json`
 - Inspect or run advisor automation:
 - `tasknerve --repo-root . advisor show --json`
 - `tasknerve --repo-root . advisor workflow show --json`

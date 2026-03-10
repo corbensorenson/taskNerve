@@ -183,10 +183,12 @@ tasknerve --repo-root . task list --format table --limit 10
 tasknerve --repo-root . task start --agent agent.worker
 tasknerve task start --repo-root . --agent agent.worker --focus compiler --peek-open 3 --json
 tasknerve --repo-root . task start --agent agent.worker --task-id <task_id>
+tasknerve --repo-root . task request --agent agent.worker --exclude-task-id <task_id> --json
 tasknerve --repo-root . task progress --task-id <task_id> --agent agent.worker --note "landed parser wiring"
 tasknerve --repo-root . task note --task-id <task_id> --agent agent.worker --message "captured benchmark delta" --artifact artifacts/report.json
 tasknerve --repo-root . task block --task-id <task_id> --agent agent.worker --reason "waiting on schema decision" --claim-next
 tasknerve --repo-root . checkpoint --summary "implemented feature X" --agent agent.worker --tag feature
+tasknerve --repo-root . task done --task-id <task_id> --dry-run-checks --json
 tasknerve --repo-root . task done --task-id <task_id> --agent agent.worker --summary "validated feature X" --command "cargo test" --claim-next
 tasknerve --repo-root . task advance --task-id <task_id> --agent agent.worker --summary "validated feature X" --command "cargo test"
 tasknerve --repo-root . log --limit 20
@@ -214,7 +216,7 @@ When you want more deterministic backlog without spending model tokens, use `tas
 
 When an agent already owns a claim, `task request` now returns that owned claim without silently shrinking its lease. If the agent explicitly wants an additional claim, use `--max-new-claims 1` (or higher) and branch on `selection_reason` / `claim_ttl_remaining_seconds` from the JSON payload.
 
-For tighter agent loops, `task request --peek-open N` and `task start --peek-open N` return the next ready open candidates alongside the selected task. JSON `task request`, `task start`, `task current`, and `task show` payloads can also include deterministic plan-derived `context` with source refs, acceptance criteria, and a next recommended substep. When multiple claims exist, `task current --json` now prefers a non-stale primary claim and exposes any stale carryover claims under `stale_claims`.
+For tighter agent loops, `task request --peek-open N` and `task start --peek-open N` return the next ready open candidates alongside the selected task. Use `task request|start --exclude-task-id <task_id>` when you just released or blocked one task and want the next dispatch to skip that exact item. JSON `task request`, `task start`, `task current`, and `task show` payloads can also include deterministic plan-derived `context` with source refs, acceptance criteria, and a next recommended substep. When multiple claims exist, `task current --json` now prefers a non-stale primary claim and exposes any stale carryover claims under `stale_claims`.
 
 Task lifecycle operations (`add`, `edit`, `claim`, `done`, `block`, `reopen`, `release`, `remove`) are mirrored into timeline events.
 
@@ -227,6 +229,8 @@ By default, `task request` also auto-seeds one queue-scout task per known agent 
 By default, `task request` respects date gates discovered from tags like `not_before:2026-04-21` or from task text like `2026-04-21 through 2026-06-01`. Use `--ignore-date-gates` only when you intentionally want to bypass that scheduling guard.
 
 By default, tasknerve uses GitHub CI verification when the repo's `origin` points at GitHub, and it does not require local check registration just to complete a task. On GitHub-backed repos, `bridge sync-github` waits for the pushed commit's Actions runs, reports the result, and deterministically opens or refreshes CI-failure tasks when verification fails. On non-GitHub or fully local repos, registered regression/benchmark checks stay available through `check add|run|deprecate|policy` as an explicit opt-in.
+
+When a repo still uses local registered checks, `task done --dry-run-checks --json` previews the active checks, new `--regression` / `--benchmark` commands, and the effective local timeout before mutating task state. `task done|advance --check-timeout-seconds <n>` and `check run --timeout-seconds <n>` override the local check timeout for that run path.
 
 By default, low-task requests also run a deterministic GitHub issue monitor on GitHub-backed repos. It fetches open issues, filters out obvious spam/non-actionable/harmful requests, syncs safe issues into the backlog under `.tasknerve:github_issues`, and queues a reviewer pass when a reviewer provider is configured.
 

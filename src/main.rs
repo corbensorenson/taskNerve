@@ -58,6 +58,7 @@ const ADVISOR_WORKFLOW_FILE: &str = "TASKNERVE_WORKFLOW.md";
 const SYSTEM_AGENT_ID: &str = "tasknerve.system";
 const AUTO_BRIDGE_SYNC_STALE_MINUTES: i64 = 30;
 const ADVISOR_WORKER_STALE_MINUTES: i64 = 45;
+const DEFAULT_TASK_CLAIM_STALE_MINUTES: i64 = 90;
 const TASK_GUI_MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const COMMENT_SYNC_MAX_FILE_BYTES: u64 = 512 * 1024;
 const SKILL_ID: &str = "tasknerve";
@@ -419,6 +420,8 @@ enum BridgeAction {
         verification_timeout_minutes: Option<u64>,
         #[arg(long)]
         verification_poll_seconds: Option<u64>,
+        #[arg(long)]
+        local_check_timeout_seconds: Option<u64>,
         #[arg(long, default_value_t = false)]
         background: bool,
         #[arg(long, hide = true, default_value_t = false)]
@@ -895,6 +898,8 @@ enum CheckAction {
         include_deprecated: bool,
         #[arg(long, default_value_t = false)]
         fail_fast: bool,
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -1476,6 +1481,7 @@ struct AutoReplenishEnsureResult {
 struct TaskRequestExecutionOptions {
     agent_id: String,
     requested_task_id: Option<String>,
+    exclude_task_ids: Vec<String>,
     filters: TaskQueryFilter,
     max: usize,
     max_new_claims: usize,
@@ -1853,6 +1859,8 @@ enum TaskAction {
         task_id: Option<String>,
         #[arg(value_name = "TASK_ID")]
         task_id_arg: Option<String>,
+        #[arg(long = "exclude-task-id")]
+        exclude_task_ids: Vec<String>,
         #[arg(long)]
         view: Option<String>,
         #[arg(long = "tag")]
@@ -2011,6 +2019,8 @@ enum TaskAction {
         agent: Option<String>,
         #[arg(long)]
         task_id: Option<String>,
+        #[arg(long = "exclude-task-id")]
+        exclude_task_ids: Vec<String>,
         #[arg(long)]
         view: Option<String>,
         #[arg(long = "tag")]
@@ -2100,6 +2110,10 @@ enum TaskAction {
         regressions: Vec<String>,
         #[arg(long = "benchmark")]
         benchmarks: Vec<String>,
+        #[arg(long)]
+        check_timeout_seconds: Option<u64>,
+        #[arg(long, default_value_t = false)]
+        dry_run_checks: bool,
         #[arg(long, default_value_t = false)]
         skip_check_requirement: bool,
         #[arg(long, default_value_t = false)]
@@ -2133,6 +2147,10 @@ enum TaskAction {
         regressions: Vec<String>,
         #[arg(long = "benchmark")]
         benchmarks: Vec<String>,
+        #[arg(long)]
+        check_timeout_seconds: Option<u64>,
+        #[arg(long, default_value_t = false)]
+        dry_run_checks: bool,
         #[arg(long, default_value_t = false)]
         skip_check_requirement: bool,
         #[arg(long, default_value_t = false)]
@@ -2684,6 +2702,7 @@ struct BridgeSyncGithubOptions {
     skip_remote_verification: bool,
     verification_timeout_minutes: Option<u64>,
     verification_poll_seconds: Option<u64>,
+    local_check_timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -5351,6 +5370,7 @@ fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
             skip_remote_verification,
             verification_timeout_minutes,
             verification_poll_seconds,
+            local_check_timeout_seconds,
             background,
             background_worker,
             trigger,
@@ -5368,6 +5388,7 @@ fn cmd_bridge(repo_root: &Path, args: BridgeArgs) -> Result<()> {
                 skip_remote_verification,
                 verification_timeout_minutes,
                 verification_poll_seconds,
+                local_check_timeout_seconds,
             };
             if background {
                 let payload = queue_bridge_auto_sync_background(repo_root, &config, &options)?;
@@ -7239,6 +7260,7 @@ fn cmd_check(repo_root: &Path, args: CheckArgs) -> Result<()> {
             kind,
             include_deprecated,
             fail_fast,
+            timeout_seconds,
             json,
         } => {
             let task_id = normalize_optional_text(task_id, "task id")?;
@@ -7261,6 +7283,7 @@ fn cmd_check(repo_root: &Path, args: CheckArgs) -> Result<()> {
                             skip_remote_verification: false,
                             verification_timeout_minutes: None,
                             verification_poll_seconds: None,
+                            local_check_timeout_seconds: timeout_seconds,
                         };
                         let mut payload = verify_github_ci_for_commit(
                             repo_root,
@@ -7308,6 +7331,7 @@ fn cmd_check(repo_root: &Path, args: CheckArgs) -> Result<()> {
                     include_deprecated,
                     fail_fast,
                     "manual",
+                    timeout_seconds,
                     true,
                 )?
             };
@@ -8062,6 +8086,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             agent,
             task_id,
             task_id_arg,
+            exclude_task_ids,
             view,
             tags,
             focus,
@@ -8091,6 +8116,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 (None, Some(task_id)) => Some(task_id),
                 (None, None) => None,
             };
+            let exclude_task_ids =
+                normalize_task_exclusion_list(exclude_task_ids, requested_task_id.as_deref())?;
             let resolved_view = load_named_task_view(repo_root, view)?;
             let explicit_filter =
                 normalize_task_query_filter(tags, focus, prefix, contains, title_contains)?;
@@ -8127,6 +8154,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                             !ignore_date_gates,
                             Utc::now(),
                             json || include_context,
+                            &exclude_task_ids,
                             current["task"]["task_id"].as_str()
                         ),
                         "task": current["task"].clone(),
@@ -8151,6 +8179,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 &TaskRequestExecutionOptions {
                     agent_id,
                     requested_task_id,
+                    exclude_task_ids,
                     filters,
                     max: 1,
                     max_new_claims: 0,
@@ -8834,6 +8863,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
         TaskAction::Request {
             agent,
             task_id,
+            exclude_task_ids,
             view,
             tags,
             focus,
@@ -8854,6 +8884,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
         } => {
             let agent_id = agent.unwrap_or_else(default_agent_id);
             let requested_task_id = normalize_optional_text(task_id, "task id")?;
+            let exclude_task_ids =
+                normalize_task_exclusion_list(exclude_task_ids, requested_task_id.as_deref())?;
             let resolved_view = load_named_task_view(repo_root, view)?;
             let explicit_filter =
                 normalize_task_query_filter(tags, focus, prefix, contains, title_contains)?;
@@ -8869,6 +8901,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 &TaskRequestExecutionOptions {
                     agent_id,
                     requested_task_id,
+                    exclude_task_ids,
                     filters,
                     max,
                     max_new_claims,
@@ -9098,6 +9131,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             commands,
             regressions,
             benchmarks,
+            check_timeout_seconds,
+            dry_run_checks,
             skip_check_requirement,
             claim_next,
             next_ignore_date_gates,
@@ -9124,18 +9159,77 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             let reason_value = normalize_optional_text(reason, "task reason")?;
             let regression_commands = normalize_string_list(regressions);
             let benchmark_commands = normalize_string_list(benchmarks);
+            let effective_local_check_timeout_seconds = check_timeout_seconds
+                .map(|value| value.max(1))
+                .unwrap_or_else(resolve_local_quality_check_timeout_seconds);
             let existing_active_checks =
                 task_active_check_count(&check_state, &state.tasks[task_index].task_id);
+            let active_checks = check_state
+                .checks
+                .iter()
+                .filter(|check| {
+                    check.task_id.as_deref() == Some(state.tasks[task_index].task_id.as_str())
+                        && check_is_active(check)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let requirement_would_block = matches!(done_state, TaskDoneStateArg::Done)
+                && config.quality_checks_enabled
+                && config.quality_checks_require_on_task_done
+                && quality_checks_backend(&config) == QUALITY_CHECK_BACKEND_LOCAL
+                && !skip_check_requirement
+                && existing_active_checks == 0
+                && regression_commands.is_empty()
+                && benchmark_commands.is_empty();
+            if dry_run_checks {
+                let payload = json!({
+                    "schema_version": "tasknerve.task.done.check_preview.v1",
+                    "generated_at_utc": now_utc(),
+                    "repo_root": repo_root.display().to_string(),
+                    "task_id": state.tasks[task_index].task_id,
+                    "agent_id": agent_id,
+                    "done_state": if matches!(done_state, TaskDoneStateArg::Blocked) { "blocked" } else { "done" },
+                    "mutating": false,
+                    "quality_checks": {
+                        "enabled": config.quality_checks_enabled,
+                        "backend": quality_checks_backend(&config),
+                        "require_on_task_done": config.quality_checks_require_on_task_done,
+                        "skip_check_requirement": skip_check_requirement,
+                        "requirement_would_block": requirement_would_block,
+                        "existing_active_count": existing_active_checks,
+                        "existing_active": active_checks,
+                        "new_regressions": regression_commands,
+                        "new_benchmarks": benchmark_commands,
+                        "local_timeout_seconds": effective_local_check_timeout_seconds
+                    },
+                    "auto_bridge_sync": {
+                        "enabled": config.auto_bridge_sync_enabled,
+                        "on_task_done": config.auto_bridge_sync_on_task_done,
+                        "would_queue": matches!(done_state, TaskDoneStateArg::Done)
+                            && config.auto_bridge_sync_enabled
+                            && config.auto_bridge_sync_on_task_done
+                    }
+                });
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    println!(
+                        "[tasknerve-task] dry_run_checks task_id={} backend={} active_checks={} new_checks={} requirement_would_block={} local_timeout_seconds={} auto_bridge_sync={}",
+                        payload["task_id"].as_str().unwrap_or("unknown"),
+                        payload["quality_checks"]["backend"].as_str().unwrap_or("unknown"),
+                        payload["quality_checks"]["existing_active_count"].as_u64().unwrap_or(0),
+                        payload["quality_checks"]["new_regressions"].as_array().map(|rows| rows.len()).unwrap_or(0)
+                            + payload["quality_checks"]["new_benchmarks"].as_array().map(|rows| rows.len()).unwrap_or(0),
+                        payload["quality_checks"]["requirement_would_block"].as_bool().unwrap_or(false),
+                        payload["quality_checks"]["local_timeout_seconds"].as_u64().unwrap_or(0),
+                        payload["auto_bridge_sync"]["would_queue"].as_bool().unwrap_or(false)
+                    );
+                }
+                return Ok(());
+            }
             let mut created_checks = Vec::<TaskNerveCheck>::new();
             if matches!(done_state, TaskDoneStateArg::Done) {
-                if config.quality_checks_enabled
-                    && config.quality_checks_require_on_task_done
-                    && quality_checks_backend(&config) == QUALITY_CHECK_BACKEND_LOCAL
-                    && !skip_check_requirement
-                    && existing_active_checks == 0
-                    && regression_commands.is_empty()
-                    && benchmark_commands.is_empty()
-                {
+                if requirement_would_block {
                     bail!(
                         "task {} requires at least one regression or benchmark check; use --regression/--benchmark, add one with `tasknerve check add --task-id {}` first, or opt out with `tasknerve check policy set --require-on-task-done false`",
                         state.tasks[task_index].task_id,
@@ -9264,7 +9358,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     true,
                     false,
                     respect_date_gates,
-                    90,
+                    DEFAULT_TASK_CLAIM_STALE_MINUTES,
                     now,
                 );
                 if next_dispatch.is_none() && config.auto_replenish_enabled {
@@ -9275,7 +9369,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                         true,
                         false,
                         respect_date_gates,
-                        90,
+                        DEFAULT_TASK_CLAIM_STALE_MINUTES,
                         now,
                         1,
                     )
@@ -9321,7 +9415,12 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 )?;
             }
             let auto_bridge_sync = if matches!(done_state, TaskDoneStateArg::Done) {
-                maybe_queue_auto_bridge_sync_for_task_done(repo_root, &config, &task)
+                maybe_queue_auto_bridge_sync_for_task_done(
+                    repo_root,
+                    &config,
+                    &task,
+                    Some(effective_local_check_timeout_seconds),
+                )
             } else {
                 json!({
                     "enabled": config.auto_bridge_sync_enabled,
@@ -9339,6 +9438,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                             "backend": quality_checks_backend(&config),
                             "require_on_task_done": config.quality_checks_require_on_task_done,
                             "skipped_requirement": skip_check_requirement,
+                            "local_timeout_seconds": effective_local_check_timeout_seconds,
                             "existing_active_count": existing_active_checks,
                             "created_count": created_checks.len(),
                             "created": created_checks
@@ -9395,6 +9495,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             commands,
             regressions,
             benchmarks,
+            check_timeout_seconds,
+            dry_run_checks,
             skip_check_requirement,
             next_ignore_date_gates,
             json,
@@ -9414,6 +9516,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                         commands,
                         regressions,
                         benchmarks,
+                        check_timeout_seconds,
+                        dry_run_checks,
                         skip_check_requirement,
                         claim_next: true,
                         next_ignore_date_gates,
@@ -13327,6 +13431,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                 "properties": {
                     "agent": { "type": "string" },
                     "task_id": { "type": "string" },
+                    "exclude_task_ids": { "type": "array", "items": { "type": "string" } },
                     "view": { "type": "string" },
                     "tags": { "type": "array", "items": { "type": "string" } },
                     "focus": { "type": "string" },
@@ -13354,6 +13459,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                 "properties": {
                     "agent": { "type": "string" },
                     "task_id": { "type": "string" },
+                    "exclude_task_ids": { "type": "array", "items": { "type": "string" } },
                     "view": { "type": "string" },
                     "tags": { "type": "array", "items": { "type": "string" } },
                     "focus": { "type": "string" },
@@ -13401,6 +13507,8 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "commands": { "type": "array", "items": { "type": "string" } },
                     "regressions": { "type": "array", "items": { "type": "string" } },
                     "benchmarks": { "type": "array", "items": { "type": "string" } },
+                    "check_timeout_seconds": { "type": "integer", "minimum": 1 },
+                    "dry_run_checks": { "type": "boolean" },
                     "skip_check_requirement": { "type": "boolean" },
                     "claim_next": { "type": "boolean" },
                     "next_ignore_date_gates": { "type": "boolean" }
@@ -13424,6 +13532,8 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "commands": { "type": "array", "items": { "type": "string" } },
                     "regressions": { "type": "array", "items": { "type": "string" } },
                     "benchmarks": { "type": "array", "items": { "type": "string" } },
+                    "check_timeout_seconds": { "type": "integer", "minimum": 1 },
+                    "dry_run_checks": { "type": "boolean" },
                     "skip_check_requirement": { "type": "boolean" },
                     "next_ignore_date_gates": { "type": "boolean" }
                 }
@@ -13559,7 +13669,8 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "task_id": { "type": "string" },
                     "kind": { "type": "string", "enum": ["regression", "benchmark"] },
                     "include_deprecated": { "type": "boolean" },
-                    "fail_fast": { "type": "boolean" }
+                    "fail_fast": { "type": "boolean" },
+                    "timeout_seconds": { "type": "integer", "minimum": 1 }
                 }
             }
         }),
@@ -14807,6 +14918,20 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             {
                 cli_args.push("--skip-check-requirement".to_string());
             }
+            if let Some(timeout_seconds) = args
+                .get("check_timeout_seconds")
+                .and_then(serde_json::Value::as_u64)
+            {
+                cli_args.push("--check-timeout-seconds".to_string());
+                cli_args.push(timeout_seconds.to_string());
+            }
+            if args
+                .get("dry_run_checks")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--dry-run-checks".to_string());
+            }
             if args
                 .get("next_ignore_date_gates")
                 .and_then(serde_json::Value::as_bool)
@@ -14841,6 +14966,17 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             if let Some(task_id) = args.get("task_id").and_then(serde_json::Value::as_str) {
                 cli_args.push("--task-id".to_string());
                 cli_args.push(task_id.to_string());
+            }
+            if let Some(exclude_task_ids) = args
+                .get("exclude_task_ids")
+                .and_then(serde_json::Value::as_array)
+            {
+                for exclude_task_id in exclude_task_ids {
+                    if let Some(value) = exclude_task_id.as_str() {
+                        cli_args.push("--exclude-task-id".to_string());
+                        cli_args.push(value.to_string());
+                    }
+                }
             }
             if let Some(view) = args.get("view").and_then(serde_json::Value::as_str) {
                 cli_args.push("--view".to_string());
@@ -14927,6 +15063,17 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             if let Some(task_id) = args.get("task_id").and_then(serde_json::Value::as_str) {
                 cli_args.push("--task-id".to_string());
                 cli_args.push(task_id.to_string());
+            }
+            if let Some(exclude_task_ids) = args
+                .get("exclude_task_ids")
+                .and_then(serde_json::Value::as_array)
+            {
+                for exclude_task_id in exclude_task_ids {
+                    if let Some(value) = exclude_task_id.as_str() {
+                        cli_args.push("--exclude-task-id".to_string());
+                        cli_args.push(value.to_string());
+                    }
+                }
             }
             if let Some(view) = args.get("view").and_then(serde_json::Value::as_str) {
                 cli_args.push("--view".to_string());
@@ -15141,6 +15288,20 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 .unwrap_or(false)
             {
                 cli_args.push("--skip-check-requirement".to_string());
+            }
+            if let Some(timeout_seconds) = args
+                .get("check_timeout_seconds")
+                .and_then(serde_json::Value::as_u64)
+            {
+                cli_args.push("--check-timeout-seconds".to_string());
+                cli_args.push(timeout_seconds.to_string());
+            }
+            if args
+                .get("dry_run_checks")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--dry-run-checks".to_string());
             }
             if args
                 .get("claim_next")
@@ -15427,6 +15588,13 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
                 .unwrap_or(false)
             {
                 cli_args.push("--fail-fast".to_string());
+            }
+            if let Some(timeout_seconds) = args
+                .get("timeout_seconds")
+                .and_then(serde_json::Value::as_u64)
+            {
+                cli_args.push("--timeout-seconds".to_string());
+                cli_args.push(timeout_seconds.to_string());
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
@@ -16269,6 +16437,7 @@ fn perform_bridge_sync_github(
                 false,
                 false,
                 "bridge_sync",
+                options.local_check_timeout_seconds,
                 false,
             )?
         } else {
@@ -16564,6 +16733,12 @@ fn queue_bridge_auto_sync_background(
         cmd.arg("--verification-poll-seconds")
             .arg(poll_seconds.to_string());
     }
+    if let Some(timeout_seconds) = options.local_check_timeout_seconds.map(|value| value.max(1)) {
+        cmd.env(
+            "TASKNERVE_LOCAL_CHECK_TIMEOUT_SECONDS",
+            timeout_seconds.to_string(),
+        );
+    }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -16747,6 +16922,7 @@ fn maybe_queue_auto_bridge_sync_for_task_done(
     repo_root: &Path,
     config: &TimelineConfig,
     task: &TaskNerveTask,
+    local_check_timeout_seconds: Option<u64>,
 ) -> serde_json::Value {
     let mut state = load_bridge_auto_sync_state(repo_root, config)
         .unwrap_or_else(|_| default_bridge_auto_sync_state(config));
@@ -16785,6 +16961,7 @@ fn maybe_queue_auto_bridge_sync_for_task_done(
         skip_remote_verification: false,
         verification_timeout_minutes: None,
         verification_poll_seconds: None,
+        local_check_timeout_seconds,
     };
     match queue_bridge_auto_sync_background(repo_root, config, &options) {
         Ok(payload) => payload,
@@ -20290,6 +20467,28 @@ fn normalize_agent_id(agent: Option<String>) -> String {
         .unwrap_or_else(default_agent_id)
 }
 
+fn normalize_task_exclusion_list(
+    values: Vec<String>,
+    requested_task_id: Option<&str>,
+) -> Result<Vec<String>> {
+    let mut normalized = Vec::<String>::new();
+    for raw in values {
+        if let Some(value) = normalize_optional_text(Some(raw), "exclude task id")? {
+            normalized.push(value);
+        }
+    }
+    let normalized = dedupe_keep_order(normalized);
+    if let Some(requested_task_id) = requested_task_id
+        && normalized.iter().any(|task_id| task_id == requested_task_id)
+    {
+        bail!(
+            "cannot exclude explicitly requested task {} from task dispatch",
+            requested_task_id
+        );
+    }
+    Ok(normalized)
+}
+
 fn resolve_checkpoint_repair_mode(
     requested: CheckpointRepairModeArg,
     repair_missing_blobs: bool,
@@ -20952,9 +21151,12 @@ fn run_quality_checks(
     include_deprecated: bool,
     fail_fast: bool,
     trigger: &str,
+    timeout_seconds_override: Option<u64>,
     persist_results: bool,
 ) -> Result<serde_json::Value> {
-    let local_timeout_seconds = resolve_local_quality_check_timeout_seconds();
+    let local_timeout_seconds = timeout_seconds_override
+        .unwrap_or_else(resolve_local_quality_check_timeout_seconds)
+        .max(1);
     let selected_indices = state
         .checks
         .iter()
@@ -22102,10 +22304,36 @@ fn task_request_has_date_gated_match(
     steal_after_minutes: i64,
     now: DateTime<Utc>,
 ) -> bool {
+    task_request_has_date_gated_match_with_exclusions(
+        state,
+        agent_id,
+        filters,
+        &BTreeSet::new(),
+        allow_steal,
+        include_owned_claims,
+        steal_after_minutes,
+        now,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn task_request_has_date_gated_match_with_exclusions(
+    state: &TaskState,
+    agent_id: &str,
+    filters: &TaskQueryFilter,
+    exclude_task_ids: &BTreeSet<String>,
+    allow_steal: bool,
+    include_owned_claims: bool,
+    steal_after_minutes: i64,
+    now: DateTime<Utc>,
+) -> bool {
     let status_map = task_status_map(state);
     let today = now.date_naive();
     state.tasks.iter().any(|task| {
         if task.status == TaskStatus::Done || task_is_auto_replenish(task) {
+            return false;
+        }
+        if exclude_task_ids.contains(task.task_id.as_str()) {
             return false;
         }
         if !task_matches_query_filter(task, filters) {
@@ -22171,15 +22399,11 @@ fn task_status_summary_payload(
 ) -> serde_json::Value {
     let status_map = task_status_map(state);
     let today = Utc::now().date_naive();
-    let mine = state
-        .tasks
-        .iter()
-        .filter(|task| {
-            task.status == TaskStatus::Claimed
-                && task.claimed_by_agent_id.as_deref() == Some(agent_id)
-        })
-        .map(|task| task_to_response_payload(repo_root, state, task, &status_map, false))
-        .collect::<Vec<_>>();
+    let current_payload = task_current_payload(repo_root, state, agent_id, false);
+    let mine = current_payload["tasks"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let ready_open_count = state
         .tasks
         .iter()
@@ -22216,14 +22440,16 @@ fn task_status_summary_payload(
                     ))
         })
         .count();
-    let next_task = select_task_candidates_for_agent(
+    let excluded_task_ids = BTreeSet::<String>::new();
+    let next_task = select_task_candidates_for_agent_with_exclusions(
         state,
         agent_id,
         &TaskQueryFilter::default(),
+        &excluded_task_ids,
         true,
         true,
         true,
-        90,
+        DEFAULT_TASK_CLAIM_STALE_MINUTES,
         Utc::now(),
         1,
     )
@@ -22240,7 +22466,7 @@ fn task_status_summary_payload(
         "generated_at_utc": now_utc(),
         "repo_root": repo_root.display().to_string(),
         "agent_id": agent_id,
-        "current": mine.first().cloned().unwrap_or(serde_json::Value::Null),
+        "current": current_payload["task"].clone(),
         "mine": mine,
         "counts": {
             "total": state.tasks.len(),
@@ -22272,8 +22498,33 @@ fn task_current_payload(
     include_context: bool,
 ) -> serde_json::Value {
     let status_map = task_status_map(state);
+    let now = Utc::now();
     let indices = agent_owned_claim_indices(state, agent_id);
-    let rows = indices
+    let (fresh_indices, stale_indices): (Vec<_>, Vec<_>) = indices.into_iter().partition(|idx| {
+        !task_claim_is_stale(
+            &state.tasks[*idx],
+            now,
+            DEFAULT_TASK_CLAIM_STALE_MINUTES,
+        )
+    });
+    let ordered_indices = fresh_indices
+        .iter()
+        .chain(stale_indices.iter())
+        .copied()
+        .collect::<Vec<_>>();
+    let rows = ordered_indices
+        .iter()
+        .map(|idx| {
+            task_to_response_payload(
+                repo_root,
+                state,
+                &state.tasks[*idx],
+                &status_map,
+                include_context,
+            )
+        })
+        .collect::<Vec<_>>();
+    let stale_claims = stale_indices
         .iter()
         .map(|idx| {
             task_to_response_payload(
@@ -22289,10 +22540,13 @@ fn task_current_payload(
         "schema_version": "tasknerve.task.current.v1",
         "generated_at_utc": now_utc(),
         "agent_id": agent_id,
+        "selection_mode": "prefer_non_stale_highest_priority",
         "found": !rows.is_empty(),
         "count": rows.len(),
+        "primary_task_id": rows.first().and_then(|row| row["task_id"].as_str()).map(str::to_string),
         "task": rows.first().cloned().unwrap_or(serde_json::Value::Null),
-        "tasks": rows
+        "tasks": rows,
+        "stale_claims": stale_claims
     })
 }
 
@@ -22306,20 +22560,25 @@ fn build_peek_open_payload(
     respect_date_gates: bool,
     now: DateTime<Utc>,
     include_context: bool,
-    exclude_task_id: Option<&str>,
+    exclude_task_ids: &[String],
+    selected_task_id: Option<&str>,
 ) -> Vec<serde_json::Value> {
     if peek_open == 0 {
         return Vec::new();
     }
     let status_map = task_status_map(state);
     let today = now.date_naive();
+    let mut excluded = exclude_task_ids.iter().cloned().collect::<BTreeSet<_>>();
+    if let Some(selected_task_id) = selected_task_id {
+        excluded.insert(selected_task_id.to_string());
+    }
     let mut candidates = state
         .tasks
         .iter()
         .enumerate()
         .filter(|(_, task)| {
             task.status == TaskStatus::Open
-                && exclude_task_id != Some(task.task_id.as_str())
+                && !excluded.contains(task.task_id.as_str())
                 && (!task_is_auto_replenish(task)
                     || task_is_auto_replenish_for_agent(task, agent_id))
                 && task_matches_query_filter(task, filters)
@@ -22360,6 +22619,11 @@ fn execute_task_request(
 
     let now = Utc::now();
     let config = load_timeline_config_or_default(repo_root)?;
+    let excluded_task_ids = options
+        .exclude_task_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let issue_monitor = if options.requested_task_id.is_none() {
         maybe_sync_github_issue_monitor(repo_root, state).unwrap_or_else(|err| {
             json!({
@@ -22417,10 +22681,11 @@ fn execute_task_request(
     } else {
         let include_owned_claims =
             !(options.skip_owned || has_owned_claims && options.max_new_claims > 0);
-        select_task_candidates_for_agent(
+        select_task_candidates_for_agent_with_exclusions(
             state,
             &options.agent_id,
             &options.filters,
+            &excluded_task_ids,
             options.allow_steal,
             include_owned_claims,
             options.respect_date_gates,
@@ -22503,10 +22768,11 @@ fn execute_task_request(
         };
         let date_gate_filtered = options.respect_date_gates
             && options.requested_task_id.is_none()
-            && task_request_has_date_gated_match(
+            && task_request_has_date_gated_match_with_exclusions(
                 state,
                 &options.agent_id,
                 &options.filters,
+                &excluded_task_ids,
                 options.allow_steal,
                 !options.skip_owned,
                 options.steal_after_minutes,
@@ -22547,6 +22813,7 @@ fn execute_task_request(
             "max": max,
             "max_new_claims": options.max_new_claims,
             "requested_task_id": options.requested_task_id.clone(),
+            "excluded_task_ids": options.exclude_task_ids.clone(),
             "owned_claim_count": owned_claim_indices.len(),
             "skip_owned": options.skip_owned,
             "peek_open_requested": options.peek_open,
@@ -22559,6 +22826,7 @@ fn execute_task_request(
                 options.respect_date_gates,
                 now,
                 options.include_context,
+                &options.exclude_task_ids,
                 options.requested_task_id.as_deref()
             ),
             "selection_reason": selection_reason,
@@ -22635,6 +22903,7 @@ fn execute_task_request(
         options.respect_date_gates,
         now,
         options.include_context,
+        &options.exclude_task_ids,
         Some(task.task_id.as_str()),
     );
     let task_rows = candidates
@@ -22662,6 +22931,7 @@ fn execute_task_request(
         "max": max,
         "max_new_claims": options.max_new_claims,
         "requested_task_id": options.requested_task_id.clone(),
+        "excluded_task_ids": options.exclude_task_ids.clone(),
         "owned_claim_count": owned_claim_indices.len(),
         "skip_owned": options.skip_owned,
         "peek_open_requested": options.peek_open,
@@ -25190,10 +25460,36 @@ fn select_task_for_agent(
     steal_after_minutes: i64,
     now: DateTime<Utc>,
 ) -> Option<(usize, TaskDispatchKind)> {
-    select_task_candidates_for_agent(
+    select_task_for_agent_with_exclusions(
         state,
         agent_id,
         filters,
+        &BTreeSet::new(),
+        allow_steal,
+        include_owned_claims,
+        respect_date_gates,
+        steal_after_minutes,
+        now,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn select_task_for_agent_with_exclusions(
+    state: &TaskState,
+    agent_id: &str,
+    filters: &TaskQueryFilter,
+    exclude_task_ids: &BTreeSet<String>,
+    allow_steal: bool,
+    include_owned_claims: bool,
+    respect_date_gates: bool,
+    steal_after_minutes: i64,
+    now: DateTime<Utc>,
+) -> Option<(usize, TaskDispatchKind)> {
+    select_task_candidates_for_agent_with_exclusions(
+        state,
+        agent_id,
+        filters,
+        exclude_task_ids,
         allow_steal,
         include_owned_claims,
         respect_date_gates,
@@ -25217,6 +25513,33 @@ fn select_task_candidates_for_agent(
     now: DateTime<Utc>,
     max: usize,
 ) -> Vec<(usize, TaskDispatchKind)> {
+    select_task_candidates_for_agent_with_exclusions(
+        state,
+        agent_id,
+        filters,
+        &BTreeSet::new(),
+        allow_steal,
+        include_owned_claims,
+        respect_date_gates,
+        steal_after_minutes,
+        now,
+        max,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn select_task_candidates_for_agent_with_exclusions(
+    state: &TaskState,
+    agent_id: &str,
+    filters: &TaskQueryFilter,
+    exclude_task_ids: &BTreeSet<String>,
+    allow_steal: bool,
+    include_owned_claims: bool,
+    respect_date_gates: bool,
+    steal_after_minutes: i64,
+    now: DateTime<Utc>,
+    max: usize,
+) -> Vec<(usize, TaskDispatchKind)> {
     if max == 0 {
         return Vec::new();
     }
@@ -25228,6 +25551,9 @@ fn select_task_candidates_for_agent(
 
     for (idx, task) in state.tasks.iter().enumerate() {
         if task.status == TaskStatus::Done {
+            continue;
+        }
+        if exclude_task_ids.contains(task.task_id.as_str()) {
             continue;
         }
         if task_is_auto_replenish(task) {
@@ -26291,6 +26617,41 @@ mod tests {
     }
 
     #[test]
+    fn task_current_payload_prefers_non_stale_primary_claim() {
+        let now = Utc::now();
+        let mut stale = sample_task("task_stale", "stale task", 50, TaskStatus::Claimed);
+        stale.claimed_by_agent_id = Some("agent.runner".to_string());
+        stale.claim_started_at_utc = Some(format_utc(now - Duration::minutes(180)));
+        stale.claim_expires_at_utc = Some(format_utc(now - Duration::minutes(120)));
+
+        let mut fresh = sample_task("task_fresh", "fresh task", 10, TaskStatus::Claimed);
+        fresh.claimed_by_agent_id = Some("agent.runner".to_string());
+        fresh.claim_started_at_utc = Some(format_utc(now - Duration::minutes(5)));
+        fresh.claim_expires_at_utc = Some(format_utc(now + Duration::minutes(25)));
+
+        let state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![stale, fresh],
+        };
+
+        let payload = task_current_payload(Path::new("."), &state, "agent.runner", false);
+        assert_eq!(
+            payload["selection_mode"],
+            serde_json::Value::from("prefer_non_stale_highest_priority")
+        );
+        assert_eq!(
+            payload["primary_task_id"],
+            serde_json::Value::from("task_fresh")
+        );
+        assert_eq!(payload["task"]["task_id"], serde_json::Value::from("task_fresh"));
+        assert_eq!(
+            payload["stale_claims"][0]["task_id"],
+            serde_json::Value::from("task_stale")
+        );
+    }
+
+    #[test]
     fn normalize_user_path_collapses_tokens() {
         let raw = "./src//core\\utils/../index.rs";
         let normalized = normalize_user_path(raw);
@@ -26949,6 +27310,32 @@ mod tests {
     }
 
     #[test]
+    fn task_request_exclusions_skip_matching_tasks() {
+        let state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![
+                sample_task("task_blocked_now", "blocked now", 20, TaskStatus::Open),
+                sample_task("task_next", "next task", 10, TaskStatus::Open),
+            ],
+        };
+        let excluded = BTreeSet::from([String::from("task_blocked_now")]);
+        let selected = select_task_for_agent_with_exclusions(
+            &state,
+            "agent.worker",
+            &TaskQueryFilter::default(),
+            &excluded,
+            true,
+            true,
+            true,
+            DEFAULT_TASK_CLAIM_STALE_MINUTES,
+            Utc::now(),
+        )
+        .expect("expected selected task");
+        assert_eq!(state.tasks[selected.0].task_id, "task_next");
+    }
+
+    #[test]
     fn task_request_can_steal_stale_claims() {
         let now = Utc::now();
         let state = TaskState {
@@ -27381,6 +27768,7 @@ mod tests {
             &TaskRequestExecutionOptions {
                 agent_id: "agent.worker".to_string(),
                 requested_task_id: None,
+                exclude_task_ids: Vec::new(),
                 filters: TaskQueryFilter::default(),
                 max: 1,
                 max_new_claims: 0,
@@ -27471,6 +27859,7 @@ mod tests {
             &TaskRequestExecutionOptions {
                 agent_id: "agent.worker".to_string(),
                 requested_task_id: None,
+                exclude_task_ids: Vec::new(),
                 filters: TaskQueryFilter::default(),
                 max: 1,
                 max_new_claims: 1,
@@ -27539,6 +27928,7 @@ mod tests {
             &TaskRequestExecutionOptions {
                 agent_id: "agent.worker".to_string(),
                 requested_task_id: None,
+                exclude_task_ids: Vec::new(),
                 filters: TaskQueryFilter::default(),
                 max: 1,
                 max_new_claims: 0,
@@ -28102,7 +28492,9 @@ Prefer evidence-backed tasks.
         )
         .expect_err("checkpoint should fail without reseed when old blob is irrecoverable");
         assert!(
-            strict_err.to_string().contains("missing old object blobs"),
+            strict_err
+                .to_string()
+                .contains("lose recoverability because old object blobs are missing"),
             "expected recoverability error, got: {strict_err:#}"
         );
 
