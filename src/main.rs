@@ -22316,28 +22316,6 @@ fn task_request_failure_reason(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn task_request_has_date_gated_match(
-    state: &TaskState,
-    agent_id: &str,
-    filters: &TaskQueryFilter,
-    allow_steal: bool,
-    include_owned_claims: bool,
-    steal_after_minutes: i64,
-    now: DateTime<Utc>,
-) -> bool {
-    task_request_has_date_gated_match_with_exclusions(
-        state,
-        agent_id,
-        filters,
-        &BTreeSet::new(),
-        allow_steal,
-        include_owned_claims,
-        steal_after_minutes,
-        now,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 fn task_request_has_date_gated_match_with_exclusions(
     state: &TaskState,
     agent_id: &str,
