@@ -4058,6 +4058,15 @@ fn fetch_update_remote_sha(repo_url: &str, branch: &str) -> Result<String> {
     Ok(sha.to_string())
 }
 
+fn git_shas_match(installed_sha: &str, remote_sha: &str) -> bool {
+    let installed = installed_sha.trim();
+    let remote = remote_sha.trim();
+    if installed.is_empty() || remote.is_empty() {
+        return false;
+    }
+    installed == remote || remote.starts_with(installed) || installed.starts_with(remote)
+}
+
 fn refresh_update_state(state: &mut UpdateState) -> Result<()> {
     state.updated_at_utc = now_utc();
     state.status = "checking".to_string();
@@ -4067,8 +4076,8 @@ fn refresh_update_state(state: &mut UpdateState) -> Result<()> {
             state.last_checked_at_utc = Some(now_utc());
             state.last_check_status = Some("success".to_string());
             state.latest_remote_sha = Some(remote_sha.clone());
-            state.update_available = remote_sha.trim() != state.installed_git_sha.trim()
-                && !remote_sha.trim().is_empty();
+            state.update_available = !remote_sha.trim().is_empty()
+                && !git_shas_match(&state.installed_git_sha, &remote_sha);
             state.status = if state.update_available {
                 "update_available".to_string()
             } else {
@@ -4303,7 +4312,7 @@ fn apply_update(state: &mut UpdateState, force: bool) -> Result<()> {
     state.last_apply_error = None;
     state.last_applied_sha = state.latest_remote_sha.clone();
     if let Some(latest) = state.latest_remote_sha.as_deref() {
-        state.update_available = latest.trim() != state.installed_git_sha.trim();
+        state.update_available = !git_shas_match(&state.installed_git_sha, latest);
     } else {
         state.update_available = false;
     }
@@ -29373,6 +29382,26 @@ Prefer evidence-backed tasks.
         assert!(!update_check_due(&state, Utc::now()));
         state.last_checked_at_utc = Some(format_utc(Utc::now() - Duration::hours(25)));
         assert!(update_check_due(&state, Utc::now()));
+    }
+
+    #[test]
+    fn git_shas_match_accepts_short_and_full_same_commit() {
+        assert!(git_shas_match(
+            "25f9e32ec62b",
+            "25f9e32ec62bacc729fa97254303b596b8f701b6"
+        ));
+        assert!(git_shas_match(
+            "25f9e32ec62bacc729fa97254303b596b8f701b6",
+            "25f9e32ec62b"
+        ));
+    }
+
+    #[test]
+    fn git_shas_match_rejects_different_commits() {
+        assert!(!git_shas_match(
+            "25f9e32ec62b",
+            "6d710d05b1faacc729fa97254303b596b8f701b6"
+        ));
     }
 
     #[test]
