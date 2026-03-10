@@ -41,6 +41,7 @@
 - Added a repo-owned advisor workflow contract (`TASKNERVE_WORKFLOW.md`), `advisor workflow init|show|validate|sync-policy`, advisor run report inspection/rerun, workflow-aware GUI advisor detail panes, and MCP tools for workflow/run operations.
 - Added repo-root `project_goals.md` awareness for advisor prompts/snapshots/run reports, a direct `task block` command/MCP tool, non-stale primary selection plus `stale_claims` in `task current --json`, and worktree-backed recoverability repair for missing timeline objects.
 - Added `task request|start --exclude-task-id`, `task done|advance --dry-run-checks`, per-run local check timeout overrides, and `check run --timeout-seconds` for smoother blocked-task loops and safer local-check diagnostics.
+- Added explicit handoff-friendly yielding via `task release --handoff-ready|--waiting-on-user` and the `task yield` alias, plus queue preference for yielded tasks and payload metadata so frozen agents do not strand claimed work.
 - Improved the Unix installer to print the installed version and warn when `PATH` still resolves to a different `tasknerve` binary.
 - Added multi-project registry (`project add|list|use|remove`) and GUI project switching to keep task streams isolated across repos.
 - Hardened release validation script to run dependency advisory checks with `cargo-audit` when available.

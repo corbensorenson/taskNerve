@@ -187,6 +187,7 @@ tasknerve --repo-root . task request --agent agent.worker --exclude-task-id <tas
 tasknerve --repo-root . task progress --task-id <task_id> --agent agent.worker --note "landed parser wiring"
 tasknerve --repo-root . task note --task-id <task_id> --agent agent.worker --message "captured benchmark delta" --artifact artifacts/report.json
 tasknerve --repo-root . task block --task-id <task_id> --agent agent.worker --reason "waiting on schema decision" --claim-next
+tasknerve --repo-root . task yield --task-id <task_id> --agent agent.worker --waiting-on-user --reason "reported findings and waiting for approval"
 tasknerve --repo-root . checkpoint --summary "implemented feature X" --agent agent.worker --tag feature
 tasknerve --repo-root . task done --task-id <task_id> --dry-run-checks --json
 tasknerve --repo-root . task done --task-id <task_id> --agent agent.worker --summary "validated feature X" --command "cargo test" --claim-next
@@ -205,6 +206,8 @@ tasknerve --repo-root . task add --title "Implement feature X" --priority 10 --t
 `task advance` is the tight completion loop: it is equivalent to `task done --claim-next`, but easier for agents to discover from `--help` and easier to standardize in shared skills.
 
 `task block` is the direct blocked-state transition for runtime or dependency blockers. It preserves task context, records the blocker reason, and can optionally `--claim-next` in one round trip.
+
+`task release` also has a `task yield` alias for handoff-friendly pauses. Use `task yield --handoff-ready` when an agent is stepping away but another agent could continue, and `task yield --waiting-on-user` when the agent is effectively frozen pending user response. Yielded tasks keep explicit handoff tags in the queue and are preferred ahead of generic open tasks at the same priority.
 
 `task list --format table|compact|json|jsonl` gives an explicit render mode so agents do not need to infer output shape from a mix of flags.
 
@@ -443,6 +446,8 @@ tasknerve --repo-root . task heartbeat <task_id> --agent <agent_id> --claim-ttl-
 tasknerve --repo-root . task progress <task_id> --note "waiting on benchmark rerun"
 tasknerve --repo-root . task note <task_id> --message "captured handoff notes" --artifact artifacts/report.json --artifact artifacts/trace.log
 tasknerve --repo-root . task release <task_id> --agent <agent_id> --state blocked --reason "waiting on upstream API"
+tasknerve --repo-root . task yield <task_id> --agent <agent_id> --handoff-ready --reason "returning control after status report"
+tasknerve --repo-root . task yield <task_id> --agent <agent_id> --waiting-on-user --reason "paused for approval"
 tasknerve --repo-root . task cancel <task_id> --agent <agent_id> --reason "superseded by replacement plan"
 tasknerve --repo-root . task remove --task-id <task_id>
 tasknerve --repo-root . task approve --all-pending-auto-replenish --agent reviewer

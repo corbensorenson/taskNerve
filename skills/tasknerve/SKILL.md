@@ -124,6 +124,12 @@ Use this skill when any of the following are true:
 - `tasknerve --repo-root . task done --task-id <task_id> --agent <agent_id> --state blocked --reason "<why blocked>" --claim-next`
 - To release a task back to the queue with explicit blocker context:
 - `tasknerve --repo-root . task release --task-id <task_id> --agent <agent_id> --state blocked --reason "<why blocked>"`
+- To hand work off cleanly when you are returning control to the user or otherwise pausing:
+- `tasknerve --repo-root . task yield --task-id <task_id> --agent <agent_id> --handoff-ready --reason "<why another agent can take over>"`
+- If you are specifically paused on user input or reporting back, prefer:
+- `tasknerve --repo-root . task yield --task-id <task_id> --agent <agent_id> --waiting-on-user --reason "<what you are waiting for>"`
+- `task yield` is an alias of `task release`, but it also marks the task with explicit handoff tags so another agent can find and take it over quickly.
+- Do not just leave a long-running claim behind when you are effectively frozen; use `task yield` or `task block`.
 - To retire a malformed or superseded task without deleting its history:
 - `tasknerve --repo-root . task cancel --task-id <task_id> --agent <agent_id> --reason "<why canceled>"`
 - To renew ownership on a long-running claim without re-claim side effects:
@@ -310,6 +316,8 @@ Use this contract to keep task execution deterministic across agents.
 4. Keep ownership explicit:
 - claim specific work when needed: `tasknerve --repo-root . task claim <task_id> --agent <agent_id>`
 - release immediately on context switch: `tasknerve --repo-root . task release --task-id <task_id> --agent <agent_id>`
+- if you are pausing in a way another agent could take over, yield instead: `tasknerve --repo-root . task yield --task-id <task_id> --agent <agent_id> --handoff-ready --reason "<handoff summary>"`
+- if you are waiting on the user, mark it explicitly: `tasknerve --repo-root . task yield --task-id <task_id> --agent <agent_id> --waiting-on-user --reason "<what you need from the user>"`
 
 5. Close the loop:
 - checkpoint progress: `tasknerve --repo-root . checkpoint --summary "<change>" --agent <agent_id> --tag <tag>`

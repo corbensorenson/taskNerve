@@ -72,6 +72,8 @@ const DEFAULT_ADVISOR_WORKFLOW_TEMPLATE: &str = include_str!("../templates/TASKN
 const DEFAULT_UPDATE_REPO_URL: &str = "https://github.com/corbensorenson/taskNerve.git";
 const DEFAULT_UPDATE_BRANCH: &str = "main";
 const PRODUCT_NAME: &str = "tasknerve";
+const TASK_TAG_HANDOFF_READY: &str = "handoff_ready";
+const TASK_TAG_WAITING_ON_USER: &str = "waiting_on_user";
 
 const IGNORE_ROOT_ENTRIES: &[&str] = &[
     ".git",
@@ -2194,6 +2196,7 @@ enum TaskAction {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(visible_aliases = ["yield", "handoff"])]
     Release {
         #[arg(long)]
         task_id: Option<String>,
@@ -2205,6 +2208,10 @@ enum TaskAction {
         reason: Option<String>,
         #[arg(long, value_enum, default_value_t = TaskReleaseStateArg::Open)]
         state: TaskReleaseStateArg,
+        #[arg(long, default_value_t = false)]
+        handoff_ready: bool,
+        #[arg(long, default_value_t = false)]
+        waiting_on_user: bool,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -9326,6 +9333,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 state.tasks[task_index].claimed_by_agent_id = None;
                 state.tasks[task_index].claim_started_at_utc = None;
                 state.tasks[task_index].claim_expires_at_utc = None;
+                clear_task_handoff_state(&mut state.tasks[task_index]);
                 clear_task_blocked_state(&mut state.tasks[task_index]);
                 clear_task_canceled_state(&mut state.tasks[task_index]);
             } else {
@@ -9667,6 +9675,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             agent,
             reason,
             state: release_state,
+            handoff_ready,
+            waiting_on_user,
             json,
         } => {
             let agent_id = agent.unwrap_or_else(default_agent_id);
@@ -9692,6 +9702,12 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 );
             }
             let reason_value = normalize_optional_text(reason, "release reason")?;
+            let effective_handoff_ready = handoff_ready || waiting_on_user;
+            if matches!(release_state, TaskReleaseStateArg::Blocked) && effective_handoff_ready {
+                bail!(
+                    "task release --handoff-ready/--waiting-on-user cannot be combined with --state blocked"
+                );
+            }
             if matches!(release_state, TaskReleaseStateArg::Blocked) {
                 let blocked_reason = reason_value
                     .clone()
@@ -9710,13 +9726,29 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 state.tasks[task_index].claimed_by_agent_id = None;
                 state.tasks[task_index].claim_started_at_utc = None;
                 state.tasks[task_index].claim_expires_at_utc = None;
-                append_transition_reason_note(
-                    &mut state,
-                    &task_id,
-                    &agent_id,
-                    "released",
-                    reason_value.as_deref(),
-                )?;
+                if effective_handoff_ready {
+                    mark_task_handoff_ready(&mut state.tasks[task_index], waiting_on_user);
+                    append_transition_reason_note(
+                        &mut state,
+                        &task_id,
+                        &agent_id,
+                        if waiting_on_user {
+                            "waiting_on_user"
+                        } else {
+                            "yielded"
+                        },
+                        reason_value.as_deref(),
+                    )?;
+                } else {
+                    clear_task_handoff_state(&mut state.tasks[task_index]);
+                    append_transition_reason_note(
+                        &mut state,
+                        &task_id,
+                        &agent_id,
+                        "released",
+                        reason_value.as_deref(),
+                    )?;
+                }
             }
             state.updated_at_utc = now_utc();
             write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
@@ -9727,6 +9759,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 &agent_id,
                 if matches!(release_state, TaskReleaseStateArg::Blocked) {
                     "block"
+                } else if effective_handoff_ready {
+                    "yield"
                 } else {
                     "release"
                 },
@@ -9742,6 +9776,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     "[tasknerve-task] state={} task_id={}",
                     if matches!(release_state, TaskReleaseStateArg::Blocked) {
                         "blocked"
+                    } else if effective_handoff_ready {
+                        "yielded"
                     } else {
                         "released"
                     },
@@ -10516,6 +10552,7 @@ fn task_timeline_summary(
         ("done", _) => format!("task done: {} \"{}\"", task.task_id, title),
         ("reopen", _) => format!("task reopen: {} \"{}\"", task.task_id, title),
         ("remove", _) => format!("task remove: {} \"{}\"", task.task_id, title),
+        ("yield", _) => format!("task yield: {} \"{}\"", task.task_id, title),
         ("release", _) => format!("task release: {} \"{}\"", task.task_id, title),
         (_, _) => format!("task {}: {} \"{}\"", action_label, task.task_id, title),
     }
@@ -13597,7 +13634,7 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
         }),
         json!({
             "name": "tasknerve_task_release",
-            "description": "Release a claimed task back to open status.",
+            "description": "Release a claimed task back to open status, optionally marking it handoff-ready for another agent.",
             "inputSchema": {
                 "type": "object",
                 "required": ["task_id"],
@@ -13605,7 +13642,9 @@ fn mcp_tools_manifest() -> Vec<serde_json::Value> {
                     "task_id": { "type": "string" },
                     "agent": { "type": "string" },
                     "reason": { "type": "string" },
-                    "state": { "type": "string", "enum": ["open", "blocked"] }
+                    "state": { "type": "string", "enum": ["open", "blocked"] },
+                    "handoff_ready": { "type": "boolean" },
+                    "waiting_on_user": { "type": "boolean" }
                 }
             }
         }),
@@ -15441,6 +15480,20 @@ fn mcp_handle_tool_call(repo_root: &Path, params: &serde_json::Value) -> Result<
             if let Some(state) = args.get("state").and_then(serde_json::Value::as_str) {
                 cli_args.push("--state".to_string());
                 cli_args.push(state.to_string());
+            }
+            if args
+                .get("handoff_ready")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--handoff-ready".to_string());
+            }
+            if args
+                .get("waiting_on_user")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                cli_args.push("--waiting-on-user".to_string());
             }
             run_self_cli_json(repo_root, &cli_args)?
         }
@@ -20411,6 +20464,52 @@ fn normalize_string_list(values: Vec<String>) -> Vec<String> {
     dedupe_keep_order(values)
 }
 
+fn ensure_task_tag(task: &mut TaskNerveTask, tag: &str) {
+    if !task.tags.iter().any(|existing| existing == tag) {
+        task.tags.push(tag.to_string());
+    }
+}
+
+fn remove_task_tag(task: &mut TaskNerveTask, tag: &str) {
+    task.tags.retain(|existing| existing != tag);
+}
+
+fn task_is_handoff_ready(task: &TaskNerveTask) -> bool {
+    task.tags.iter().any(|tag| tag == TASK_TAG_HANDOFF_READY)
+}
+
+fn task_is_waiting_on_user(task: &TaskNerveTask) -> bool {
+    task.tags.iter().any(|tag| tag == TASK_TAG_WAITING_ON_USER)
+}
+
+fn mark_task_handoff_ready(task: &mut TaskNerveTask, waiting_on_user: bool) {
+    ensure_task_tag(task, TASK_TAG_HANDOFF_READY);
+    if waiting_on_user {
+        ensure_task_tag(task, TASK_TAG_WAITING_ON_USER);
+    } else {
+        remove_task_tag(task, TASK_TAG_WAITING_ON_USER);
+    }
+}
+
+fn clear_task_handoff_state(task: &mut TaskNerveTask) {
+    remove_task_tag(task, TASK_TAG_HANDOFF_READY);
+    remove_task_tag(task, TASK_TAG_WAITING_ON_USER);
+}
+
+fn task_handoff_reason(task: &TaskNerveTask) -> Option<String> {
+    if !task_is_handoff_ready(task) {
+        return None;
+    }
+    task.progress_entries.iter().rev().find_map(|entry| {
+        entry
+            .note
+            .strip_prefix("waiting_on_user: ")
+            .or_else(|| entry.note.strip_prefix("yielded: "))
+            .map(|reason| reason.trim().to_string())
+            .filter(|reason| !reason.is_empty())
+    })
+}
+
 fn task_is_manually_blocked(task: &TaskNerveTask) -> bool {
     task.blocked_reason
         .as_deref()
@@ -20466,6 +20565,7 @@ fn set_task_blocked_state(task: &mut TaskNerveTask, agent_id: &str, reason: &str
     task.completion_notes.clear();
     task.completion_artifacts.clear();
     task.completion_commands.clear();
+    clear_task_handoff_state(task);
     clear_task_canceled_state(task);
     task.blocked_at_utc = Some(now);
     task.blocked_by_agent_id = Some(agent_id.to_string());
@@ -20851,6 +20951,7 @@ fn reopen_task_in_state(
     state.tasks[task_index].completion_notes = Vec::new();
     state.tasks[task_index].completion_artifacts = Vec::new();
     state.tasks[task_index].completion_commands = Vec::new();
+    clear_task_handoff_state(&mut state.tasks[task_index]);
     clear_task_blocked_state(&mut state.tasks[task_index]);
     clear_task_canceled_state(&mut state.tasks[task_index]);
     state.updated_at_utc = now;
@@ -20898,6 +20999,7 @@ fn cancel_task_in_state(
     state.tasks[task_index].completion_notes = vec![format!("canceled: {}", normalized_reason)];
     state.tasks[task_index].completion_artifacts.clear();
     state.tasks[task_index].completion_commands.clear();
+    clear_task_handoff_state(&mut state.tasks[task_index]);
     clear_task_blocked_state(&mut state.tasks[task_index]);
     state.tasks[task_index].canceled_at_utc = Some(now);
     state.tasks[task_index].canceled_by_agent_id = Some(agent_id.to_string());
@@ -22064,6 +22166,9 @@ fn task_to_json_payload(
         "completion_commands": task.completion_commands,
         "claim_expires_at_utc": task.claim_expires_at_utc,
         "claim_ttl_remaining_seconds": task_claim_ttl_remaining_seconds(task, now),
+        "handoff_ready": task_is_handoff_ready(task),
+        "waiting_on_user": task_is_waiting_on_user(task),
+        "handoff_reason": task_handoff_reason(task),
         "source_key": task.source_key,
         "source_plan": task.source_plan,
         "lifecycle_state": task_lifecycle_state(task),
@@ -25831,6 +25936,7 @@ fn apply_task_claim(
     task.completion_notes.clear();
     task.completion_artifacts.clear();
     task.completion_commands.clear();
+    clear_task_handoff_state(task);
     clear_task_blocked_state(task);
     clear_task_canceled_state(task);
 }
@@ -25879,9 +25985,19 @@ fn sort_task_indices(state: &TaskState, indices: &mut [usize]) {
     indices.sort_by(|lhs, rhs| {
         let left = &state.tasks[*lhs];
         let right = &state.tasks[*rhs];
+        let left_handoff = task_is_handoff_ready(left);
+        let right_handoff = task_is_handoff_ready(right);
         right
             .priority
             .cmp(&left.priority)
+            .then_with(|| right_handoff.cmp(&left_handoff))
+            .then_with(|| {
+                if left_handoff && right_handoff {
+                    compare_timestamp_text(&left.updated_at_utc, &right.updated_at_utc)
+                } else {
+                    Ordering::Equal
+                }
+            })
             .then_with(|| compare_timestamp_text(&left.created_at_utc, &right.created_at_utc))
             .then_with(|| left.task_id.cmp(&right.task_id))
     });
@@ -26679,6 +26795,39 @@ mod tests {
     }
 
     #[test]
+    fn task_payload_reports_handoff_metadata() {
+        let mut task = sample_task("task_handoff", "handoff task", 8, TaskStatus::Open);
+        mark_task_handoff_ready(&mut task, true);
+        task.progress_entries.push(TaskProgressEntry {
+            at_utc: now_utc(),
+            agent_id: "agent.owner".to_string(),
+            note: "waiting_on_user: waiting for product call".to_string(),
+        });
+        let state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![task.clone()],
+        };
+        let payload = task_to_json_payload(&task, &task_status_map(&state));
+        assert_eq!(payload["handoff_ready"], serde_json::Value::Bool(true));
+        assert_eq!(payload["waiting_on_user"], serde_json::Value::Bool(true));
+        assert_eq!(
+            payload["handoff_reason"],
+            serde_json::Value::from("waiting for product call")
+        );
+    }
+
+    #[test]
+    fn apply_task_claim_clears_handoff_tags() {
+        let now = Utc::now();
+        let mut task = sample_task("task_handoff", "handoff task", 5, TaskStatus::Open);
+        mark_task_handoff_ready(&mut task, true);
+        apply_task_claim(&mut task, "agent.worker", 30, now);
+        assert!(!task_is_handoff_ready(&task));
+        assert!(!task_is_waiting_on_user(&task));
+    }
+
+    #[test]
     fn normalize_user_path_collapses_tokens() {
         let raw = "./src//core\\utils/../index.rs";
         let normalized = normalize_user_path(raw);
@@ -27334,6 +27483,43 @@ mod tests {
         let (idx, dispatch_kind) = selected.expect("expected selected task");
         assert_eq!(dispatch_kind, TaskDispatchKind::Open);
         assert_eq!(state.tasks[idx].task_id, "task_priority_ready");
+    }
+
+    #[test]
+    fn task_request_prefers_handoff_ready_tasks_at_same_priority() {
+        let mut normal = sample_task("task_normal", "normal task", 10, TaskStatus::Open);
+        normal.created_at_utc = "2026-03-09T10:00:00Z".to_string();
+        normal.updated_at_utc = "2026-03-09T10:00:00Z".to_string();
+
+        let mut handoff = sample_task("task_handoff", "handoff task", 10, TaskStatus::Open);
+        handoff.created_at_utc = "2026-03-09T10:05:00Z".to_string();
+        handoff.updated_at_utc = "2026-03-09T10:10:00Z".to_string();
+        mark_task_handoff_ready(&mut handoff, false);
+        handoff.progress_entries.push(TaskProgressEntry {
+            at_utc: now_utc(),
+            agent_id: "agent.owner".to_string(),
+            note: "yielded: ready for takeover".to_string(),
+        });
+
+        let state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![normal, handoff],
+        };
+
+        let (idx, dispatch_kind) = select_task_for_agent(
+            &state,
+            "agent.worker",
+            &TaskQueryFilter::default(),
+            true,
+            true,
+            true,
+            90,
+            Utc::now(),
+        )
+        .expect("expected selected task");
+        assert_eq!(dispatch_kind, TaskDispatchKind::Open);
+        assert_eq!(state.tasks[idx].task_id, "task_handoff");
     }
 
     #[test]
