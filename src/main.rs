@@ -23311,7 +23311,9 @@ fn task_queue_doctor_report(repo_root: &Path, state: &TaskState) -> serde_json::
             repo_root.display()
         ));
     }
-    if !duplicate_task_ids.is_empty() || !missing_dependencies.is_empty() || !blank_task_ids.is_empty()
+    if !duplicate_task_ids.is_empty()
+        || !missing_dependencies.is_empty()
+        || !blank_task_ids.is_empty()
     {
         suggested_commands.push(format!(
             "tasknerve --repo-root {} task migrate-store --legacy <legacy_tasks.json> --json",
@@ -23621,7 +23623,11 @@ fn run_runtime_probe(name: &str, command: Vec<String>, timeout: StdDuration) -> 
         name: name.to_string(),
         command,
         available: true,
-        ok: exit_status.as_ref().map(|status| status.success()).unwrap_or(false) && !timed_out,
+        ok: exit_status
+            .as_ref()
+            .map(|status| status.success())
+            .unwrap_or(false)
+            && !timed_out,
         timed_out,
         exit_code: exit_status.and_then(|status| status.code()),
         duration_ms: start.elapsed().as_millis(),
@@ -23728,7 +23734,13 @@ fn normalize_legacy_task_for_migration(
         task.claim_expires_at_utc = None;
     }
     if task.status == TaskStatus::Done {
-        if task.completed_at_utc.as_deref().unwrap_or_default().trim().is_empty() {
+        if task
+            .completed_at_utc
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+        {
             task.completed_at_utc = Some(now.clone());
         }
         if task
@@ -23847,10 +23859,11 @@ fn migrate_legacy_task_state(
         let mut repaired = Vec::<String>::new();
         let mut mapped_dependencies = Vec::<String>::new();
         for dependency in &candidate.original_depends_on {
-            let mapped = id_map
-                .get(dependency)
-                .cloned()
-                .or_else(|| known_existing_ids.contains(dependency.as_str()).then(|| dependency.clone()));
+            let mapped = id_map.get(dependency).cloned().or_else(|| {
+                known_existing_ids
+                    .contains(dependency.as_str())
+                    .then(|| dependency.clone())
+            });
             match mapped {
                 Some(mapped_id) if mapped_id != candidate.task.task_id => {
                     mapped_dependencies.push(mapped_id);
@@ -23864,7 +23877,10 @@ fn migrate_legacy_task_state(
         }
     }
 
-    let imported_tasks = staged.into_iter().map(|candidate| candidate.task).collect::<Vec<_>>();
+    let imported_tasks = staged
+        .into_iter()
+        .map(|candidate| candidate.task)
+        .collect::<Vec<_>>();
     imported.extend(imported_tasks.iter().map(|task| TaskStoreMigrationRecord {
         task_id: task.task_id.clone(),
         title: task.title.clone(),
@@ -23874,11 +23890,7 @@ fn migrate_legacy_task_state(
     next_state.updated_at_utc = now_utc();
 
     let queue_doctor = task_queue_doctor_report(repo_root, &next_state);
-    if queue_doctor["summary"]["pass"]
-        .as_bool()
-        .unwrap_or(false)
-        && !dry_run
-    {
+    if queue_doctor["summary"]["pass"].as_bool().unwrap_or(false) && !dry_run {
         *state = next_state;
     }
 
@@ -28440,7 +28452,12 @@ Prefer evidence-backed tasks.
         assert!(report.removed.is_empty());
         assert_eq!(report.blocked.len(), 1);
         assert!(report.blocked[0].reason.contains("preserved by default"));
-        assert!(state.tasks.iter().any(|task| task.task_id == "task_claimed"));
+        assert!(
+            state
+                .tasks
+                .iter()
+                .any(|task| task.task_id == "task_claimed")
+        );
     }
 
     #[test]
@@ -28487,7 +28504,12 @@ Prefer evidence-backed tasks.
 
         assert_eq!(report.removed.len(), 1);
         assert!(report.blocked.is_empty());
-        assert!(state.tasks.iter().all(|task| task.task_id != "task_claimed"));
+        assert!(
+            state
+                .tasks
+                .iter()
+                .all(|task| task.task_id != "task_claimed")
+        );
     }
 
     #[test]
@@ -28534,9 +28556,11 @@ Prefer evidence-backed tasks.
 
         assert_eq!(report.imported.len(), 2);
         assert_eq!(report.skipped_done.len(), 1);
-        assert!(report.queue_doctor["summary"]["pass"]
-            .as_bool()
-            .unwrap_or(false));
+        assert!(
+            report.queue_doctor["summary"]["pass"]
+                .as_bool()
+                .unwrap_or(false)
+        );
         let parent = state
             .tasks
             .iter()
