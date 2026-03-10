@@ -74,8 +74,10 @@ bash ./install.sh --with-skill --overwrite-skill
 ```
 
 Unix installer behavior:
-- PATH is updated automatically in startup files by default.
-- Use `--no-path-update` to skip automatic PATH edits.
+- a shared shell bootstrap is written to `~/.config/tasknerve/shell/tasknerve-shell.sh` by default,
+- login/interactive startup files source that bootstrap automatically across zsh and bash,
+- PATH is updated through that bootstrap by default,
+- Use `--no-path-update` to skip shell profile edits.
 
 ### 3. Verify
 
@@ -92,6 +94,8 @@ tasknerve skill doctor --json
 `tasknerve version --json` exposes a stable machine-readable envelope with the build fingerprint, git sha, current executable path, and every `tasknerve` binary currently visible on `PATH`.
 
 `tasknerve skill doctor --json` now reports whether the installed Codex skill matches the running CLI, whether the skill references command paths this binary does not support, and whether `PATH` resolves a different `tasknerve` binary than the current executable. If `unsupported_command_paths` is non-empty, `current_executable_shadowed` is `true`, or the installed skill does not match the embedded bundle, reinstall from this repo, run `tasknerve skill install-codex --overwrite`, then `hash -r` or open a new shell if the old binary is still cached.
+
+If your machine has trouble executing script-based launchers directly, opening a new zsh/bash shell after install is enough to pick up the bootstrap and keep `tasknerve` usable through the shell command name.
 
 ## Update Workflow
 

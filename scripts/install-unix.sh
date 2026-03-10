@@ -25,6 +25,9 @@ PATH_UPDATE=1
 WITH_SKILL=0
 OVERWRITE_SKILL=0
 SKIP_RUST_INSTALL=0
+SHELL_BOOTSTRAP_DIR="$HOME/.config/tasknerve/shell"
+SHELL_BOOTSTRAP_FILE="$SHELL_BOOTSTRAP_DIR/tasknerve-shell.sh"
+SHELL_BOOTSTRAP_SOURCE='. "$HOME/.config/tasknerve/shell/tasknerve-shell.sh"'
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -98,6 +101,22 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_NAME="tasknerve"
 GUI_LAUNCHER_NAME="tasknerve-gui"
 
+run_installed_cli() {
+  local bin_path="$1"
+  shift
+  if [[ ! -x "$bin_path" ]]; then
+    echo "[installer] missing executable: $bin_path" >&2
+    return 127
+  fi
+  local prefix
+  prefix="$(LC_ALL=C head -c 2 "$bin_path" 2>/dev/null || true)"
+  if [[ "$prefix" == "#!" ]]; then
+    /bin/bash "$bin_path" "$@"
+  else
+    "$bin_path" "$@"
+  fi
+}
+
 ensure_cargo() {
   if command -v cargo >/dev/null 2>&1; then
     return 0
@@ -142,6 +161,43 @@ install_gui_launcher() {
   fi
   install -m 0755 "$launcher_src" "$INSTALL_DIR/$GUI_LAUNCHER_NAME"
   echo "[installer] installed GUI launcher to: $INSTALL_DIR/$GUI_LAUNCHER_NAME"
+}
+
+install_shell_bootstrap() {
+  mkdir -p "$SHELL_BOOTSTRAP_DIR"
+  cat >"$SHELL_BOOTSTRAP_FILE" <<EOF
+tasknerve_bin_dir="$INSTALL_DIR"
+
+case ":\$PATH:" in
+  *":\$tasknerve_bin_dir:"*) ;;
+  *) export PATH="\$tasknerve_bin_dir:\$PATH" ;;
+esac
+
+tasknerve_run_installed() {
+  local bin="\$1"
+  shift
+  if [[ ! -x "\$bin" ]]; then
+    echo "tasknerve launcher not found: \$bin" >&2
+    return 127
+  fi
+  local prefix
+  prefix="\$(LC_ALL=C head -c 2 "\$bin" 2>/dev/null || true)"
+  if [[ "\$prefix" == "#!" ]]; then
+    /bin/bash "\$bin" "\$@"
+  else
+    "\$bin" "\$@"
+  fi
+}
+
+tasknerve() {
+  tasknerve_run_installed "\$tasknerve_bin_dir/tasknerve" "\$@"
+}
+
+tasknerve-gui() {
+  tasknerve_run_installed "\$tasknerve_bin_dir/tasknerve-gui" "\$@"
+}
+EOF
+  echo "[installer] wrote shell bootstrap to: $SHELL_BOOTSTRAP_FILE"
 }
 
 install_macos_gui_app() {
@@ -212,27 +268,29 @@ install_gui_launcher
 
 echo "[installer] installed $BIN_NAME to: $INSTALL_DIR/$BIN_NAME"
 
-PATH_EXPORT_LINE="export PATH=\"$INSTALL_DIR:\$PATH\""
 if [[ "$PATH_UPDATE" -eq 1 ]]; then
+  install_shell_bootstrap
   PATH_FILES=()
   if [[ "$PLATFORM" == "macos" ]]; then
-    PATH_FILES=("$HOME/.zprofile" "$HOME/.zshrc")
+    PATH_FILES=("$HOME/.zprofile" "$HOME/.zshrc" "$HOME/.bash_profile" "$HOME/.bashrc" "$HOME/.profile")
   else
-    PATH_FILES=("$HOME/.profile" "$HOME/.bashrc")
+    PATH_FILES=("$HOME/.profile" "$HOME/.bash_profile" "$HOME/.bashrc")
   fi
   for path_file in "${PATH_FILES[@]}"; do
     mkdir -p "$(dirname "$path_file")"
     touch "$path_file"
-    if ! grep -Fqs "$PATH_EXPORT_LINE" "$path_file"; then
-      printf '\n%s\n' "$PATH_EXPORT_LINE" >> "$path_file"
-      echo "[installer] added PATH export to $path_file"
+    if ! grep -Fqs "$SHELL_BOOTSTRAP_SOURCE" "$path_file"; then
+      printf '\n%s\n' "$SHELL_BOOTSTRAP_SOURCE" >> "$path_file"
+      echo "[installer] added TaskNerve shell bootstrap to $path_file"
     fi
   done
   export PATH="$INSTALL_DIR:$PATH"
+  # shellcheck source=/dev/null
+  source "$SHELL_BOOTSTRAP_FILE"
 elif [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
   echo
   echo "[installer] PATH auto-update disabled. Add this line manually if needed:"
-  echo "  $PATH_EXPORT_LINE"
+  echo "  $SHELL_BOOTSTRAP_SOURCE"
 fi
 
 case "$PLATFORM" in
@@ -250,12 +308,12 @@ if [[ "$WITH_SKILL" -eq 1 ]]; then
   if [[ "$OVERWRITE_SKILL" -eq 1 ]]; then
     SKILL_ARGS+=(--overwrite)
   fi
-  "$INSTALL_DIR/$BIN_NAME" "${SKILL_ARGS[@]}"
+  run_installed_cli "$INSTALL_DIR/$BIN_NAME" "${SKILL_ARGS[@]}"
 fi
 
 echo
-"$INSTALL_DIR/$BIN_NAME" --help >/dev/null
-INSTALLED_VERSION="$("$INSTALL_DIR/$BIN_NAME" --version 2>/dev/null || true)"
+run_installed_cli "$INSTALL_DIR/$BIN_NAME" --help >/dev/null
+INSTALLED_VERSION="$(run_installed_cli "$INSTALL_DIR/$BIN_NAME" --version 2>/dev/null || true)"
 if [[ -n "$INSTALLED_VERSION" ]]; then
   echo "[installer] installed version: $INSTALLED_VERSION"
 fi
@@ -266,7 +324,7 @@ if command -v which >/dev/null 2>&1; then
     echo "[installer] PATH matches:"
     while IFS= read -r match; do
       [[ -z "$match" ]] && continue
-      MATCH_VERSION="$("$match" --version 2>/dev/null || true)"
+      MATCH_VERSION="$(run_installed_cli "$match" --version 2>/dev/null || true)"
       if [[ -n "$MATCH_VERSION" ]]; then
         echo "  - $match ($MATCH_VERSION)"
       else

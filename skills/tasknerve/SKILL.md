@@ -23,6 +23,7 @@ Use this skill when any of the following are true:
 - `tasknerve version --json`
 - `tasknerve skill doctor --json`
 - `tasknerve update check --json`
+- If the repo was installed via the Unix installer, opening a new zsh/bash shell should load the shared bootstrap at `~/.config/tasknerve/shell/tasknerve-shell.sh` automatically.
 - When built from a git checkout, `tasknerve --version` should include a build fingerprint such as `0.1.0+a5ce333236d7`; that is the fastest way to tell whether two installed binaries are actually the same build.
 - If `current_executable_shadowed` is `true` or `unsupported_command_paths` is non-empty, reinstall tasknerve from the canonical repo and align the local skill with:
 - `tasknerve skill install-codex --overwrite`
