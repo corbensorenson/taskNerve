@@ -170,10 +170,14 @@ After migration, use tasknerve for daily coordination (`task`, `checkpoint`, `lo
 ```bash
 tasknerve --repo-root . task import --file /path/to/tasks.tsv
 tasknerve --repo-root . task sync --plan /path/to/the_final_plan.md
+tasknerve --repo-root . task sync --plan /path/to/the_final_plan.md --allow-drop-claimed
 tasknerve --repo-root . task view save --name compiler-open --status open --tag semantic --title-contains compiler --ready-only --limit 25
 tasknerve --repo-root . task list --view compiler-open
 tasknerve --repo-root . task start --agent agent.worker --view compiler-open --peek-open 3 --json
 tasknerve --repo-root . task sync-comments --json
+tasknerve --repo-root . task doctor queue --json
+tasknerve --repo-root . task doctor runtime --timeout-seconds 5 --json
+tasknerve --repo-root . task migrate-store --legacy /path/to/legacy/tasks.json --json
 tasknerve --repo-root . task search --status open --contains compiler --jsonl --fields task_id,title,priority,tags
 tasknerve --repo-root . task list --format table --limit 10
 tasknerve --repo-root . task start --agent agent.worker
@@ -210,6 +214,10 @@ When an agent already owns a claim, `task request` now returns that owned claim 
 For tighter agent loops, `task request --peek-open N` and `task start --peek-open N` return the next ready open candidates alongside the selected task. JSON `task request`, `task start`, `task current`, and `task show` payloads can also include deterministic plan-derived `context` with source refs, acceptance criteria, and a next recommended substep.
 
 Task lifecycle operations (`add`, `edit`, `claim`, `done`, `reopen`, `release`, `remove`) are mirrored into timeline events.
+
+`task sync` now preserves claimed tasks by default even when a living plan file no longer mentions them. Use `--allow-drop-claimed` only when you intentionally want plan reconciliation to retire already claimed work.
+
+If a queue was previously damaged by raw store edits or a legacy store merge, start with `task doctor queue --json`, then rehydrate through `task migrate-store --legacy <tasks.json>` instead of hand-editing `.tasknerve/tasks.json`.
 
 By default, `task request` also auto-seeds one queue-scout task per known agent when no real work is dispatchable. Use `task policy` to turn this off or require explicit approval before those scout tasks can be claimed.
 
@@ -333,6 +341,12 @@ Reconcile a living plan file with the queue:
 
 ```bash
 tasknerve --repo-root . task sync --plan /path/to/the_final_plan.md --json
+```
+
+If that reconciliation intentionally needs to retire already claimed work, opt in explicitly:
+
+```bash
+tasknerve --repo-root . task sync --plan /path/to/the_final_plan.md --allow-drop-claimed --json
 ```
 
 TSV format (tab-separated):
@@ -465,6 +479,9 @@ Recoverability repair:
 
 ```bash
 tasknerve --repo-root . doctor --fix
+tasknerve --repo-root . task doctor queue --json
+tasknerve --repo-root . task doctor runtime --timeout-seconds 5 --json
+tasknerve --repo-root . task migrate-store --legacy /path/to/legacy/tasks.json --json
 tasknerve --repo-root . checkpoint --summary "..." --preflight --json
 tasknerve --repo-root . checkpoint --summary "..." --repair auto
 tasknerve --repo-root . checkpoint --summary "..." --repair-missing-blobs

@@ -60,6 +60,10 @@ Use this skill when any of the following are true:
 - `tasknerve --repo-root . task import --file /path/to/the_final_plan.md --format markdown`
 - For a living plan file, reconcile queue state directly:
 - `tasknerve --repo-root . task sync --plan /path/to/the_final_plan.md --json`
+- `task sync` preserves claimed tasks by default; only add `--allow-drop-claimed` when you intentionally want plan sync to retire already claimed work.
+- If the queue was previously damaged by a raw store merge or manual edits:
+- `tasknerve --repo-root . task doctor queue --json`
+- `tasknerve --repo-root . task migrate-store --legacy /path/to/legacy/tasks.json --json`
 - For deterministic backlog harvesting from source comments before escalating to advisor work:
 - `tasknerve --repo-root . task sync-comments --json`
 - `tasknerve --repo-root . task sync-comments --marker TODO --marker FIXME --dry-run --json`
@@ -158,6 +162,8 @@ Use this skill when any of the following are true:
 - For compact queue scans:
 - `tasknerve --repo-root . task list --jsonl --fields task_id,title,status`
 - `tasknerve --repo-root . task search --contains compiler --status open --jsonl --fields task_id,title,priority,tags`
+- `tasknerve --repo-root . task doctor queue --json`
+- `tasknerve --repo-root . task doctor runtime --timeout-seconds 5 --json`
 - `tasknerve --repo-root . task view list --json`
 - `tasknerve --repo-root . task view show --name compiler-open --json`
 - `tasknerve --repo-root . task list --status in_progress --json`
@@ -207,6 +213,9 @@ Use this skill when any of the following are true:
 
 Recoverability repair:
 - `tasknerve --repo-root . doctor --fix`
+- `tasknerve --repo-root . task doctor queue --json`
+- `tasknerve --repo-root . task doctor runtime --timeout-seconds 5 --json`
+- `tasknerve --repo-root . task migrate-store --legacy /path/to/legacy/tasks.json --json`
 - `tasknerve --repo-root . checkpoint --summary "..." --repair auto`
 - `tasknerve --repo-root . checkpoint --summary "..." --repair-missing-blobs`
 - `tasknerve --repo-root . checkpoint --summary "..." --allow-baseline-reseed`

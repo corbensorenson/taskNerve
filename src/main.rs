@@ -8,7 +8,8 @@ use std::{
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, ExitCode, Stdio},
-    time::{Instant, UNIX_EPOCH},
+    thread,
+    time::{Duration as StdDuration, Instant, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -181,6 +182,26 @@ struct DoctorArgs {
     json: bool,
     #[arg(long, default_value_t = false)]
     fix: bool,
+}
+
+#[derive(Debug, Parser)]
+struct TaskDoctorArgs {
+    #[command(subcommand)]
+    action: TaskDoctorAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum TaskDoctorAction {
+    Queue {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Runtime {
+        #[arg(long, default_value_t = 5)]
+        timeout_seconds: u64,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Parser)]
@@ -1575,6 +1596,7 @@ struct TaskSyncReport {
     format: String,
     dry_run: bool,
     keep_missing: bool,
+    allow_drop_claimed: bool,
     created: Vec<TaskSyncTaskRecord>,
     updated: Vec<TaskSyncTaskRecord>,
     reopened: Vec<TaskSyncTaskRecord>,
@@ -1582,6 +1604,59 @@ struct TaskSyncReport {
     unchanged: Vec<TaskSyncTaskRecord>,
     matched_by_title: Vec<TaskSyncTaskRecord>,
     blocked: Vec<TaskSyncBlockedTask>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TaskQueueDoctorDependencyIssue {
+    task_id: String,
+    title: String,
+    missing_depends_on: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TaskQueueDoctorDuplicateIssue {
+    task_id: String,
+    count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RuntimeProbeResult {
+    name: String,
+    command: Vec<String>,
+    available: bool,
+    ok: bool,
+    timed_out: bool,
+    exit_code: Option<i32>,
+    duration_ms: u128,
+    stdout: String,
+    stderr: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TaskStoreMigrationRecord {
+    task_id: String,
+    title: String,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TaskStoreMigrationReport {
+    schema_version: String,
+    generated_at_utc: String,
+    legacy_path: String,
+    dry_run: bool,
+    include_done: bool,
+    imported: Vec<TaskStoreMigrationRecord>,
+    skipped_existing: Vec<TaskStoreMigrationRecord>,
+    skipped_done: Vec<TaskStoreMigrationRecord>,
+    dependency_repairs: BTreeMap<String, Vec<String>>,
+    queue_doctor: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+struct TaskStoreMigrationCandidate {
+    original_depends_on: Vec<String>,
+    task: TaskNerveTask,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1882,6 +1957,7 @@ enum TaskAction {
         #[command(subcommand)]
         action: TaskPolicyAction,
     },
+    Doctor(TaskDoctorArgs),
     Sync {
         #[arg(long)]
         plan: PathBuf,
@@ -1893,6 +1969,20 @@ enum TaskAction {
         format: TaskImportFormatArg,
         #[arg(long, default_value_t = false)]
         keep_missing: bool,
+        #[arg(long, default_value_t = false)]
+        allow_drop_claimed: bool,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    MigrateStore {
+        #[arg(long)]
+        legacy: PathBuf,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, default_value_t = false)]
+        include_done: bool,
         #[arg(long, default_value_t = false)]
         dry_run: bool,
         #[arg(long, default_value_t = false)]
@@ -6118,6 +6208,7 @@ fn sync_github_ci_failure_tasks(
         SYSTEM_AGENT_ID,
         config.quality_checks_github_failure_task_priority,
         true,
+        false,
     )?;
     report.generated_at_utc = now_utc();
     report.plan = GITHUB_CI_FAILURE_SOURCE_PLAN.to_string();
@@ -6467,6 +6558,7 @@ fn sync_github_issue_tasks(
         SYSTEM_AGENT_ID,
         60,
         true,
+        false,
     )?;
     report.generated_at_utc = now_utc();
     report.plan = GITHUB_ISSUE_SOURCE_PLAN.to_string();
@@ -8269,12 +8361,80 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 }
             }
         }
+        TaskAction::Doctor(args) => match args.action {
+            TaskDoctorAction::Queue { json } => {
+                if state_changed {
+                    state.updated_at_utc = now_utc();
+                    write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+                }
+                let report = task_queue_doctor_report(repo_root, &state);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    println!(
+                        "[tasknerve-task-doctor] pass={} tasks={} duplicate_ids={} missing_dependencies={} invalid_claims={} stale_claims={} shadowed={}",
+                        report["summary"]["pass"].as_bool().unwrap_or(false),
+                        report["active_store"]["task_count"].as_u64().unwrap_or(0),
+                        report["duplicate_task_ids"]
+                            .as_array()
+                            .map(|rows| rows.len())
+                            .unwrap_or(0),
+                        report["missing_dependencies"]
+                            .as_array()
+                            .map(|rows| rows.len())
+                            .unwrap_or(0),
+                        report["invalid_claims"]
+                            .as_array()
+                            .map(|rows| rows.len())
+                            .unwrap_or(0),
+                        report["stale_claims"]
+                            .as_array()
+                            .map(|rows| rows.len())
+                            .unwrap_or(0),
+                        report["path_resolution"]["current_executable_shadowed"]
+                            .as_bool()
+                            .unwrap_or(false),
+                    );
+                }
+            }
+            TaskDoctorAction::Runtime {
+                timeout_seconds,
+                json,
+            } => {
+                let report = task_runtime_doctor_report(timeout_seconds);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    println!(
+                        "[tasknerve-task-doctor] runtime pass={} system_binary_ok={} ad_hoc_binary_ok={} cargo_ok={} rustc_ok={}",
+                        report["summary"]["pass"].as_bool().unwrap_or(false),
+                        report["summary"]["system_binary_ok"]
+                            .as_bool()
+                            .unwrap_or(false),
+                        report["summary"]["ad_hoc_binary_ok"]
+                            .as_bool()
+                            .unwrap_or(false),
+                        report["summary"]["cargo_ok"].as_bool().unwrap_or(false),
+                        report["summary"]["rustc_ok"].as_bool().unwrap_or(false),
+                    );
+                    for recommendation in report["recommendations"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(serde_json::Value::as_str)
+                    {
+                        println!("[tasknerve-task-doctor] hint: {}", recommendation);
+                    }
+                }
+            }
+        },
         TaskAction::Sync {
             plan,
             agent,
             default_priority,
             format,
             keep_missing,
+            allow_drop_claimed,
             dry_run,
             json,
         } => {
@@ -8297,6 +8457,7 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 &agent_id,
                 default_priority,
                 keep_missing,
+                allow_drop_claimed,
             )?;
             report.generated_at_utc = now_utc();
             report.plan = plan_source.clone();
@@ -8394,6 +8555,62 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                     report.reopened.len(),
                     report.removed.len(),
                     report.blocked.len(),
+                    dry_run
+                );
+            }
+        }
+        TaskAction::MigrateStore {
+            legacy,
+            agent,
+            include_done,
+            dry_run,
+            json,
+        } => {
+            let agent_id = normalize_agent_id(agent);
+            let (legacy_path, legacy_state) = load_legacy_task_state(repo_root, &legacy)?;
+            let report = migrate_legacy_task_state(
+                repo_root,
+                &mut state,
+                &legacy_path,
+                legacy_state,
+                &agent_id,
+                include_done,
+                dry_run,
+            )?;
+            if !dry_run
+                && !report.queue_doctor["summary"]["pass"]
+                    .as_bool()
+                    .unwrap_or(false)
+            {
+                bail!(
+                    "task migrate-store would leave the queue inconsistent; rerun with --json and inspect queue_doctor"
+                );
+            }
+            if !dry_run {
+                write_pretty_json(&timeline_tasks_path(repo_root), &state)?;
+                for task in &state.tasks {
+                    if report
+                        .imported
+                        .iter()
+                        .any(|record| record.task_id == task.task_id)
+                    {
+                        append_task_timeline_event(repo_root, task, &agent_id, "add", None)?;
+                    }
+                }
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "[tasknerve-task] migrate-store legacy={} imported={} skipped_existing={} skipped_done={} dependency_repairs={} queue_pass={} dry_run={}",
+                    report.legacy_path,
+                    report.imported.len(),
+                    report.skipped_existing.len(),
+                    report.skipped_done.len(),
+                    report.dependency_repairs.len(),
+                    report.queue_doctor["summary"]["pass"]
+                        .as_bool()
+                        .unwrap_or(false),
                     dry_run
                 );
             }
@@ -18334,8 +18551,15 @@ fn sync_advisor_generated_tasks(
     let agent_id = advisor_role_agent_id(options.role);
 
     let mut next_state = load_task_state(repo_root)?;
-    let mut report =
-        sync_plan_into_task_state(&mut next_state, rows, &plan_source, &agent_id, 30, false)?;
+    let mut report = sync_plan_into_task_state(
+        &mut next_state,
+        rows,
+        &plan_source,
+        &agent_id,
+        30,
+        false,
+        false,
+    )?;
     report.generated_at_utc = now_utc();
     report.plan = plan_source.clone();
     report.format = "tsv".to_string();
@@ -22704,6 +22928,7 @@ fn build_comment_sync_report(
         agent_id,
         default_priority.unwrap_or(0),
         keep_missing,
+        false,
     )?;
     sync.generated_at_utc = now_utc();
     sync.plan = CODE_COMMENT_SOURCE_PLAN.to_string();
@@ -22987,6 +23212,690 @@ fn task_sync_record(task: &TaskNerveTask) -> TaskSyncTaskRecord {
     }
 }
 
+fn task_queue_doctor_report(repo_root: &Path, state: &TaskState) -> serde_json::Value {
+    let current_executable = std::env::current_exe()
+        .ok()
+        .map(|path| path.display().to_string());
+    let path_candidates = detect_tasknerve_path_candidates();
+    let first_path_match = path_candidates
+        .iter()
+        .find(|candidate| candidate.is_first_path_match)
+        .map(|candidate| candidate.path.clone());
+    let current_shadowed = current_executable
+        .as_deref()
+        .zip(first_path_match.as_deref())
+        .map(|(current, first)| current != first)
+        .unwrap_or(false);
+
+    let mut task_id_counts = BTreeMap::<String, usize>::new();
+    let mut blank_task_ids = Vec::<String>::new();
+    let mut missing_dependencies = Vec::<TaskQueueDoctorDependencyIssue>::new();
+    let mut invalid_claims = Vec::<serde_json::Value>::new();
+    let mut stale_claims = Vec::<serde_json::Value>::new();
+    let known_ids = state
+        .tasks
+        .iter()
+        .map(|task| task.task_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let now = Utc::now();
+
+    for task in &state.tasks {
+        if task.task_id.trim().is_empty() {
+            blank_task_ids.push(task.title.clone());
+        } else {
+            *task_id_counts.entry(task.task_id.clone()).or_default() += 1;
+        }
+
+        let unresolved = task
+            .depends_on
+            .iter()
+            .filter(|dependency| !known_ids.contains(dependency.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !unresolved.is_empty() {
+            missing_dependencies.push(TaskQueueDoctorDependencyIssue {
+                task_id: task.task_id.clone(),
+                title: task.title.clone(),
+                missing_depends_on: unresolved,
+            });
+        }
+
+        if task.status == TaskStatus::Claimed {
+            let owner = task
+                .claimed_by_agent_id
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or_default();
+            if owner.is_empty() {
+                invalid_claims.push(json!({
+                    "task_id": task.task_id,
+                    "title": task.title,
+                    "reason": "claimed task missing claimed_by_agent_id"
+                }));
+            }
+            if task_claim_is_stale(task, now, 90) {
+                stale_claims.push(json!({
+                    "task_id": task.task_id,
+                    "title": task.title,
+                    "claimed_by_agent_id": task.claimed_by_agent_id,
+                    "claim_started_at_utc": task.claim_started_at_utc,
+                    "claim_expires_at_utc": task.claim_expires_at_utc,
+                    "expired": task_claim_is_expired(task, now)
+                }));
+            }
+        } else if task.claimed_by_agent_id.is_some()
+            || task.claim_started_at_utc.is_some()
+            || task.claim_expires_at_utc.is_some()
+        {
+            invalid_claims.push(json!({
+                "task_id": task.task_id,
+                "title": task.title,
+                "reason": "non-claimed task still carries claim metadata"
+            }));
+        }
+    }
+
+    let duplicate_task_ids = task_id_counts
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(task_id, count)| TaskQueueDoctorDuplicateIssue { task_id, count })
+        .collect::<Vec<_>>();
+
+    let mut suggested_commands = Vec::<String>::new();
+    if current_shadowed {
+        suggested_commands.push("tasknerve skill doctor --json".to_string());
+    }
+    if !stale_claims.is_empty() {
+        suggested_commands.push(format!(
+            "tasknerve --repo-root {} task list --status claimed --json",
+            repo_root.display()
+        ));
+    }
+    if !duplicate_task_ids.is_empty() || !missing_dependencies.is_empty() || !blank_task_ids.is_empty()
+    {
+        suggested_commands.push(format!(
+            "tasknerve --repo-root {} task migrate-store --legacy <legacy_tasks.json> --json",
+            repo_root.display()
+        ));
+    }
+
+    let addressable_task_ids = duplicate_task_ids.is_empty() && blank_task_ids.is_empty();
+    json!({
+        "schema_version": "tasknerve.task.doctor.queue.v1",
+        "generated_at_utc": now_utc(),
+        "repo_root": repo_root.display().to_string(),
+        "current_executable": current_executable,
+        "path_resolution": {
+            "first_path_match": first_path_match,
+            "current_executable_shadowed": current_shadowed,
+            "candidates": path_candidates
+        },
+        "active_store": {
+            "path": timeline_tasks_path(repo_root).display().to_string(),
+            "exists": timeline_tasks_path(repo_root).exists(),
+            "task_count": state.tasks.len()
+        },
+        "invariants": {
+            "addressable_task_ids": addressable_task_ids,
+            "all_dependencies_resolved": missing_dependencies.is_empty(),
+            "invalid_claim_metadata": invalid_claims.is_empty(),
+            "stale_claims_present": !stale_claims.is_empty()
+        },
+        "duplicate_task_ids": duplicate_task_ids,
+        "blank_task_id_titles": blank_task_ids,
+        "missing_dependencies": missing_dependencies,
+        "invalid_claims": invalid_claims,
+        "stale_claims": stale_claims,
+        "suggested_commands": suggested_commands,
+        "summary": {
+            "pass": addressable_task_ids
+                && missing_dependencies.is_empty()
+                && invalid_claims.is_empty()
+        }
+    })
+}
+
+fn task_runtime_doctor_report(timeout_seconds: u64) -> serde_json::Value {
+    let timeout = StdDuration::from_secs(timeout_seconds.max(1));
+    let temp_root = std::env::temp_dir().join(format!(
+        "tasknerve-runtime-doctor-{}",
+        Uuid::new_v4().simple()
+    ));
+    let mut probes = Vec::<RuntimeProbeResult>::new();
+
+    probes.push(run_runtime_probe(
+        "system_true",
+        vec!["/usr/bin/true".to_string()],
+        timeout,
+    ));
+
+    let cc_path = find_command_on_path("cc").or_else(|| {
+        let candidate = PathBuf::from("/usr/bin/cc");
+        if candidate.is_file() {
+            Some(candidate)
+        } else {
+            None
+        }
+    });
+    if let Some(cc_path) = cc_path {
+        let source_path = temp_root.join("probe.c");
+        let binary_path = temp_root.join("probe-bin");
+        let _ = fs::create_dir_all(&temp_root);
+        let _ = fs::write(
+            &source_path,
+            "#include <stdio.h>\nint main(void) { puts(\"tasknerve-runtime-ok\"); return 0; }\n",
+        );
+        let compile_probe = run_runtime_probe(
+            "ad_hoc_binary_compile",
+            vec![
+                cc_path.display().to_string(),
+                source_path.display().to_string(),
+                "-o".to_string(),
+                binary_path.display().to_string(),
+            ],
+            timeout,
+        );
+        let compile_ok = compile_probe.ok;
+        probes.push(compile_probe);
+        if compile_ok {
+            probes.push(run_runtime_probe(
+                "ad_hoc_binary_exec",
+                vec![binary_path.display().to_string()],
+                timeout,
+            ));
+        } else {
+            probes.push(RuntimeProbeResult {
+                name: "ad_hoc_binary_exec".to_string(),
+                command: vec![binary_path.display().to_string()],
+                available: binary_path.is_file(),
+                ok: false,
+                timed_out: false,
+                exit_code: None,
+                duration_ms: 0,
+                stdout: String::new(),
+                stderr: "compile step failed; ad-hoc binary was not executed".to_string(),
+            });
+        }
+    } else {
+        probes.push(RuntimeProbeResult {
+            name: "ad_hoc_binary_compile".to_string(),
+            command: vec!["cc".to_string()],
+            available: false,
+            ok: false,
+            timed_out: false,
+            exit_code: None,
+            duration_ms: 0,
+            stdout: String::new(),
+            stderr: "cc not found on PATH".to_string(),
+        });
+        probes.push(RuntimeProbeResult {
+            name: "ad_hoc_binary_exec".to_string(),
+            command: vec!["<compiled-binary>".to_string()],
+            available: false,
+            ok: false,
+            timed_out: false,
+            exit_code: None,
+            duration_ms: 0,
+            stdout: String::new(),
+            stderr: "cc not found on PATH".to_string(),
+        });
+    }
+
+    probes.push(run_runtime_probe(
+        "cargo_version",
+        vec!["cargo".to_string(), "--version".to_string()],
+        timeout,
+    ));
+    probes.push(run_runtime_probe(
+        "rustc_version",
+        vec!["rustc".to_string(), "--version".to_string()],
+        timeout,
+    ));
+
+    let _ = fs::remove_dir_all(&temp_root);
+
+    let system_ok = probes
+        .iter()
+        .find(|probe| probe.name == "system_true")
+        .map(|probe| probe.ok)
+        .unwrap_or(false);
+    let ad_hoc_ok = probes
+        .iter()
+        .find(|probe| probe.name == "ad_hoc_binary_exec")
+        .map(|probe| probe.ok)
+        .unwrap_or(false);
+    let cargo_ok = probes
+        .iter()
+        .find(|probe| probe.name == "cargo_version")
+        .map(|probe| probe.ok)
+        .unwrap_or(false);
+    let rustc_ok = probes
+        .iter()
+        .find(|probe| probe.name == "rustc_version")
+        .map(|probe| probe.ok)
+        .unwrap_or(false);
+
+    let mut recommendations = Vec::<String>::new();
+    if system_ok && !ad_hoc_ok {
+        recommendations.push(
+            "System binaries execute but newly built local binaries do not. Check macOS Gatekeeper/provenance/quarantine policy for locally produced executables.".to_string(),
+        );
+    }
+    if system_ok && (!cargo_ok || !rustc_ok) {
+        recommendations.push(
+            "Rust toolchain probes are failing or hanging. Repair rustup/toolchain installation or prefer GitHub CI until local execution is healthy.".to_string(),
+        );
+    }
+    if probes.iter().any(|probe| probe.timed_out) {
+        recommendations.push(
+            "One or more runtime probes timed out before main(). Capture OS-level diagnostics (for example process samples) before retrying.".to_string(),
+        );
+    }
+
+    json!({
+        "schema_version": "tasknerve.task.doctor.runtime.v1",
+        "generated_at_utc": now_utc(),
+        "timeout_seconds": timeout_seconds.max(1),
+        "probes": probes,
+        "summary": {
+            "pass": system_ok && ad_hoc_ok && cargo_ok && rustc_ok,
+            "system_binary_ok": system_ok,
+            "ad_hoc_binary_ok": ad_hoc_ok,
+            "cargo_ok": cargo_ok,
+            "rustc_ok": rustc_ok
+        },
+        "recommendations": recommendations
+    })
+}
+
+fn run_runtime_probe(name: &str, command: Vec<String>, timeout: StdDuration) -> RuntimeProbeResult {
+    let start = Instant::now();
+    if command.is_empty() {
+        return RuntimeProbeResult {
+            name: name.to_string(),
+            command,
+            available: false,
+            ok: false,
+            timed_out: false,
+            exit_code: None,
+            duration_ms: 0,
+            stdout: String::new(),
+            stderr: "empty command".to_string(),
+        };
+    }
+
+    let executable = &command[0];
+    let available = if executable.contains(std::path::MAIN_SEPARATOR) {
+        Path::new(executable).is_file()
+    } else {
+        find_command_on_path(executable).is_some()
+    };
+    if !available {
+        return RuntimeProbeResult {
+            name: name.to_string(),
+            command,
+            available: false,
+            ok: false,
+            timed_out: false,
+            exit_code: None,
+            duration_ms: start.elapsed().as_millis(),
+            stdout: String::new(),
+            stderr: "command not found".to_string(),
+        };
+    }
+
+    let mut child = match ProcessCommand::new(executable)
+        .args(command.iter().skip(1))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            return RuntimeProbeResult {
+                name: name.to_string(),
+                command,
+                available: true,
+                ok: false,
+                timed_out: false,
+                exit_code: None,
+                duration_ms: start.elapsed().as_millis(),
+                stdout: String::new(),
+                stderr: error.to_string(),
+            };
+        }
+    };
+
+    let mut timed_out = false;
+    let exit_status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    timed_out = true;
+                    let _ = child.kill();
+                    break child.wait().ok();
+                }
+                thread::sleep(StdDuration::from_millis(50));
+            }
+            Err(error) => {
+                let mut stdout = Vec::<u8>::new();
+                if let Some(mut pipe) = child.stdout.take() {
+                    let _ = pipe.read_to_end(&mut stdout);
+                }
+                let mut stderr = Vec::<u8>::new();
+                if let Some(mut pipe) = child.stderr.take() {
+                    let _ = pipe.read_to_end(&mut stderr);
+                }
+                let mut stderr_text = String::from_utf8_lossy(&stderr).trim().to_string();
+                if !stderr_text.is_empty() {
+                    stderr_text.push('\n');
+                }
+                stderr_text.push_str(&error.to_string());
+                return RuntimeProbeResult {
+                    name: name.to_string(),
+                    command,
+                    available: true,
+                    ok: false,
+                    timed_out,
+                    exit_code: None,
+                    duration_ms: start.elapsed().as_millis(),
+                    stdout: String::from_utf8_lossy(&stdout).trim().to_string(),
+                    stderr: stderr_text,
+                };
+            }
+        }
+    };
+
+    let mut stdout = Vec::<u8>::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let _ = pipe.read_to_end(&mut stdout);
+    }
+    let mut stderr = Vec::<u8>::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_end(&mut stderr);
+    }
+
+    RuntimeProbeResult {
+        name: name.to_string(),
+        command,
+        available: true,
+        ok: exit_status.as_ref().map(|status| status.success()).unwrap_or(false) && !timed_out,
+        timed_out,
+        exit_code: exit_status.and_then(|status| status.code()),
+        duration_ms: start.elapsed().as_millis(),
+        stdout: String::from_utf8_lossy(&stdout).trim().to_string(),
+        stderr: String::from_utf8_lossy(&stderr).trim().to_string(),
+    }
+}
+
+fn find_command_on_path(command: &str) -> Option<PathBuf> {
+    let path_env = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_env) {
+        let candidate = dir.join(command);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn resolve_legacy_task_store_path(repo_root: &Path, legacy: &Path) -> Result<PathBuf> {
+    let resolved = resolve_task_plan_path(repo_root, legacy)?;
+    if resolved.is_dir() {
+        let tasks_path = resolved.join("tasks.json");
+        if !tasks_path.is_file() {
+            bail!(
+                "legacy task store directory does not contain tasks.json: {}",
+                resolved.display()
+            );
+        }
+        Ok(tasks_path)
+    } else {
+        Ok(resolved)
+    }
+}
+
+fn load_legacy_task_state(repo_root: &Path, legacy: &Path) -> Result<(PathBuf, TaskState)> {
+    let resolved = resolve_legacy_task_store_path(repo_root, legacy)?;
+    let raw = fs::read_to_string(&resolved)
+        .with_context(|| format!("failed reading legacy task store {}", resolved.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("failed parsing legacy task store {}", resolved.display()))?;
+
+    let mut state = if value.get("tasks").is_some() {
+        serde_json::from_value::<TaskState>(value)?
+    } else if value.is_array() {
+        TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: serde_json::from_value::<Vec<TaskNerveTask>>(value)?,
+        }
+    } else {
+        bail!(
+            "legacy task store must be a task state object or task array: {}",
+            resolved.display()
+        );
+    };
+    if state.schema_version.trim().is_empty() {
+        state.schema_version = SCHEMA_TASKS.to_string();
+    }
+    if state.updated_at_utc.trim().is_empty() {
+        state.updated_at_utc = now_utc();
+    }
+    Ok((resolved, state))
+}
+
+fn normalize_legacy_task_for_migration(
+    mut task: TaskNerveTask,
+    assigned_task_id: String,
+    fallback_agent_id: &str,
+) -> Result<TaskNerveTask> {
+    let now = now_utc();
+    task.task_id = if assigned_task_id.trim().is_empty() {
+        format!("task_{}", Uuid::new_v4().simple())
+    } else {
+        assigned_task_id
+    };
+    task.title = normalize_task_title(&task.title)?;
+    task.detail = normalize_task_detail(task.detail);
+    task.tags = dedupe_keep_order(task.tags);
+    task.depends_on = dedupe_keep_order(task.depends_on);
+    if task.created_by_agent_id.trim().is_empty() {
+        task.created_by_agent_id = fallback_agent_id.to_string();
+    }
+    if task.created_at_utc.trim().is_empty() {
+        task.created_at_utc = now.clone();
+    }
+    if task.updated_at_utc.trim().is_empty() {
+        task.updated_at_utc = now.clone();
+    }
+
+    if task.status == TaskStatus::Claimed
+        && task
+            .claimed_by_agent_id
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+    {
+        task.status = TaskStatus::Open;
+    }
+    if task.status != TaskStatus::Claimed {
+        task.claimed_by_agent_id = None;
+        task.claim_started_at_utc = None;
+        task.claim_expires_at_utc = None;
+    }
+    if task.status == TaskStatus::Done {
+        if task.completed_at_utc.as_deref().unwrap_or_default().trim().is_empty() {
+            task.completed_at_utc = Some(now.clone());
+        }
+        if task
+            .completed_by_agent_id
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+        {
+            task.completed_by_agent_id = Some(task.created_by_agent_id.clone());
+        }
+    } else {
+        task.completed_at_utc = None;
+        task.completed_by_agent_id = None;
+        task.completed_summary = None;
+        task.completion_notes.clear();
+        task.completion_artifacts.clear();
+        task.completion_commands.clear();
+    }
+    Ok(task)
+}
+
+fn tasks_match_for_migration(left: &TaskNerveTask, right: &TaskNerveTask) -> bool {
+    if left.source_plan == right.source_plan
+        && left.source_key.is_some()
+        && left.source_key == right.source_key
+    {
+        return true;
+    }
+    left.title == right.title && left.detail == right.detail
+}
+
+fn migrate_legacy_task_state(
+    repo_root: &Path,
+    state: &mut TaskState,
+    legacy_path: &Path,
+    legacy_state: TaskState,
+    agent_id: &str,
+    include_done: bool,
+    dry_run: bool,
+) -> Result<TaskStoreMigrationReport> {
+    let mut next_state = state.clone();
+    let mut imported = Vec::<TaskStoreMigrationRecord>::new();
+    let mut skipped_existing = Vec::<TaskStoreMigrationRecord>::new();
+    let mut skipped_done = Vec::<TaskStoreMigrationRecord>::new();
+    let mut dependency_repairs = BTreeMap::<String, Vec<String>>::new();
+    let mut existing_ids = next_state
+        .tasks
+        .iter()
+        .map(|task| task.task_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut id_map = BTreeMap::<String, String>::new();
+    let mut staged = Vec::<TaskStoreMigrationCandidate>::new();
+
+    for legacy_task in legacy_state.tasks {
+        if legacy_task.status == TaskStatus::Done && !include_done {
+            skipped_done.push(TaskStoreMigrationRecord {
+                task_id: legacy_task.task_id,
+                title: legacy_task.title,
+                status: "done".to_string(),
+            });
+            continue;
+        }
+
+        if let Some(existing) = next_state
+            .tasks
+            .iter()
+            .find(|candidate| tasks_match_for_migration(candidate, &legacy_task))
+        {
+            skipped_existing.push(TaskStoreMigrationRecord {
+                task_id: existing.task_id.clone(),
+                title: existing.title.clone(),
+                status: task_status_label(&existing.status).to_string(),
+            });
+            id_map.insert(legacy_task.task_id.clone(), existing.task_id.clone());
+            continue;
+        }
+        if let Some(existing) = staged
+            .iter()
+            .find(|candidate| tasks_match_for_migration(&candidate.task, &legacy_task))
+        {
+            skipped_existing.push(TaskStoreMigrationRecord {
+                task_id: existing.task.task_id.clone(),
+                title: existing.task.title.clone(),
+                status: task_status_label(&existing.task.status).to_string(),
+            });
+            id_map.insert(legacy_task.task_id.clone(), existing.task.task_id.clone());
+            continue;
+        }
+
+        let original_depends_on = dedupe_keep_order(legacy_task.depends_on.clone());
+        let legacy_task_id = legacy_task.task_id.clone();
+        let assigned_task_id = if legacy_task.task_id.trim().is_empty()
+            || existing_ids.contains(&legacy_task.task_id)
+        {
+            format!("task_{}", Uuid::new_v4().simple())
+        } else {
+            legacy_task.task_id.clone()
+        };
+        let normalized =
+            normalize_legacy_task_for_migration(legacy_task, assigned_task_id.clone(), agent_id)?;
+        existing_ids.insert(normalized.task_id.clone());
+        id_map.insert(legacy_task_id, normalized.task_id.clone());
+        staged.push(TaskStoreMigrationCandidate {
+            original_depends_on,
+            task: normalized,
+        });
+    }
+
+    let known_existing_ids = next_state
+        .tasks
+        .iter()
+        .map(|task| task.task_id.as_str())
+        .collect::<BTreeSet<_>>();
+    for candidate in &mut staged {
+        let mut repaired = Vec::<String>::new();
+        let mut mapped_dependencies = Vec::<String>::new();
+        for dependency in &candidate.original_depends_on {
+            let mapped = id_map
+                .get(dependency)
+                .cloned()
+                .or_else(|| known_existing_ids.contains(dependency.as_str()).then(|| dependency.clone()));
+            match mapped {
+                Some(mapped_id) if mapped_id != candidate.task.task_id => {
+                    mapped_dependencies.push(mapped_id);
+                }
+                _ => repaired.push(dependency.clone()),
+            }
+        }
+        candidate.task.depends_on = dedupe_keep_order(mapped_dependencies);
+        if !repaired.is_empty() {
+            dependency_repairs.insert(candidate.task.task_id.clone(), repaired);
+        }
+    }
+
+    let imported_tasks = staged.into_iter().map(|candidate| candidate.task).collect::<Vec<_>>();
+    imported.extend(imported_tasks.iter().map(|task| TaskStoreMigrationRecord {
+        task_id: task.task_id.clone(),
+        title: task.title.clone(),
+        status: task_status_label(&task.status).to_string(),
+    }));
+    next_state.tasks.extend(imported_tasks);
+    next_state.updated_at_utc = now_utc();
+
+    let queue_doctor = task_queue_doctor_report(repo_root, &next_state);
+    if queue_doctor["summary"]["pass"]
+        .as_bool()
+        .unwrap_or(false)
+        && !dry_run
+    {
+        *state = next_state;
+    }
+
+    Ok(TaskStoreMigrationReport {
+        schema_version: "tasknerve.task.migrate_store.v1".to_string(),
+        generated_at_utc: now_utc(),
+        legacy_path: legacy_path.display().to_string(),
+        dry_run,
+        include_done,
+        imported,
+        skipped_existing,
+        skipped_done,
+        dependency_repairs,
+        queue_doctor,
+    })
+}
+
 fn find_sync_match_for_row(
     state: &TaskState,
     used_indices: &BTreeSet<usize>,
@@ -23111,6 +24020,7 @@ fn sync_plan_into_task_state(
     agent_id: &str,
     default_priority: i32,
     keep_missing: bool,
+    allow_drop_claimed: bool,
 ) -> Result<TaskSyncReport> {
     let mut known_keys = BTreeSet::<String>::new();
     for row in &rows {
@@ -23144,6 +24054,7 @@ fn sync_plan_into_task_state(
         format: "resolved".to_string(),
         dry_run: false,
         keep_missing,
+        allow_drop_claimed,
         created: Vec::new(),
         updated: Vec::new(),
         reopened: Vec::new(),
@@ -23333,16 +24244,28 @@ fn sync_plan_into_task_state(
                 else {
                     continue;
                 };
-                if let Some(owner) = state.tasks[task_index].claimed_by_agent_id.as_deref()
-                    && owner != agent_id
-                {
-                    report.blocked.push(TaskSyncBlockedTask {
-                        action: "remove".to_string(),
-                        task_id: state.tasks[task_index].task_id.clone(),
-                        title: state.tasks[task_index].title.clone(),
-                        reason: format!("claimed by {}", owner),
-                    });
-                    continue;
+                if let Some(owner) = state.tasks[task_index].claimed_by_agent_id.as_deref() {
+                    if !allow_drop_claimed {
+                        report.blocked.push(TaskSyncBlockedTask {
+                            action: "remove".to_string(),
+                            task_id: state.tasks[task_index].task_id.clone(),
+                            title: state.tasks[task_index].title.clone(),
+                            reason: format!(
+                                "claimed by {} (preserved by default; rerun with --allow-drop-claimed to remove claimed tasks)",
+                                owner
+                            ),
+                        });
+                        continue;
+                    }
+                    if owner != agent_id {
+                        report.blocked.push(TaskSyncBlockedTask {
+                            action: "remove".to_string(),
+                            task_id: state.tasks[task_index].task_id.clone(),
+                            title: state.tasks[task_index].title.clone(),
+                            reason: format!("claimed by {}", owner),
+                        });
+                        continue;
+                    }
                 }
                 match remove_task_from_state(state, &task_id, agent_id) {
                     Ok(task) => {
@@ -27444,6 +28367,7 @@ Prefer evidence-backed tasks.
             "agent.sync",
             0,
             false,
+            false,
         )
         .expect("sync should succeed");
 
@@ -27469,6 +28393,161 @@ Prefer evidence-backed tasks.
         assert_eq!(created.depends_on, vec!["task_a02".to_string()]);
         assert_eq!(created.priority, 5);
         assert_eq!(created.tags, vec!["planning".to_string()]);
+    }
+
+    #[test]
+    fn sync_plan_into_task_state_preserves_claimed_tasks_by_default() {
+        let mut claimed = sample_task("task_claimed", "claimed task", 7, TaskStatus::Claimed);
+        claimed.source_key = Some("A-02".to_string());
+        claimed.source_plan = Some("the_final_plan.md".to_string());
+        claimed.claimed_by_agent_id = Some("agent.sync".to_string());
+        claimed.claim_started_at_utc = Some(now_utc());
+        claimed.claim_expires_at_utc = Some(now_utc());
+        let mut state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![
+                TaskNerveTask {
+                    source_key: Some("A-01".to_string()),
+                    source_plan: Some("the_final_plan.md".to_string()),
+                    ..sample_task("task_open", "open task", 5, TaskStatus::Open)
+                },
+                claimed,
+            ],
+        };
+        let rows = vec![TaskImportRow {
+            key: "A-01".to_string(),
+            source_key: Some("A-01".to_string()),
+            title: "open task".to_string(),
+            detail: None,
+            priority: None,
+            tags: Vec::new(),
+            depends_on_keys: Vec::new(),
+            agent: None,
+        }];
+
+        let report = sync_plan_into_task_state(
+            &mut state,
+            rows,
+            "the_final_plan.md",
+            "agent.sync",
+            0,
+            false,
+            false,
+        )
+        .expect("sync should succeed");
+
+        assert!(report.removed.is_empty());
+        assert_eq!(report.blocked.len(), 1);
+        assert!(report.blocked[0].reason.contains("preserved by default"));
+        assert!(state.tasks.iter().any(|task| task.task_id == "task_claimed"));
+    }
+
+    #[test]
+    fn sync_plan_into_task_state_can_drop_claimed_tasks_when_explicit() {
+        let mut claimed = sample_task("task_claimed", "claimed task", 7, TaskStatus::Claimed);
+        claimed.source_key = Some("A-02".to_string());
+        claimed.source_plan = Some("the_final_plan.md".to_string());
+        claimed.claimed_by_agent_id = Some("agent.sync".to_string());
+        claimed.claim_started_at_utc = Some(now_utc());
+        claimed.claim_expires_at_utc = Some(now_utc());
+        let mut state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![
+                TaskNerveTask {
+                    source_key: Some("A-01".to_string()),
+                    source_plan: Some("the_final_plan.md".to_string()),
+                    ..sample_task("task_open", "open task", 5, TaskStatus::Open)
+                },
+                claimed,
+            ],
+        };
+        let rows = vec![TaskImportRow {
+            key: "A-01".to_string(),
+            source_key: Some("A-01".to_string()),
+            title: "open task".to_string(),
+            detail: None,
+            priority: None,
+            tags: Vec::new(),
+            depends_on_keys: Vec::new(),
+            agent: None,
+        }];
+
+        let report = sync_plan_into_task_state(
+            &mut state,
+            rows,
+            "the_final_plan.md",
+            "agent.sync",
+            0,
+            false,
+            true,
+        )
+        .expect("sync should succeed");
+
+        assert_eq!(report.removed.len(), 1);
+        assert!(report.blocked.is_empty());
+        assert!(state.tasks.iter().all(|task| task.task_id != "task_claimed"));
+    }
+
+    #[test]
+    fn migrate_legacy_task_state_repairs_dependency_links() {
+        let repo = TestRepo::new("task-migrate-store");
+        let mut state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: Vec::new(),
+        };
+        let legacy_state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![
+                TaskNerveTask {
+                    source_key: Some("LEG-01".to_string()),
+                    source_plan: Some("legacy.md".to_string()),
+                    ..sample_task("legacy_parent", "legacy parent", 4, TaskStatus::Open)
+                },
+                TaskNerveTask {
+                    depends_on: vec!["legacy_parent".to_string()],
+                    source_key: Some("LEG-02".to_string()),
+                    source_plan: Some("legacy.md".to_string()),
+                    ..sample_task("legacy_child", "legacy child", 3, TaskStatus::Open)
+                },
+                TaskNerveTask {
+                    completed_at_utc: Some(now_utc()),
+                    completed_by_agent_id: Some("agent.legacy".to_string()),
+                    ..sample_task("legacy_done", "legacy done", 1, TaskStatus::Done)
+                },
+            ],
+        };
+
+        let report = migrate_legacy_task_state(
+            repo.path(),
+            &mut state,
+            Path::new("/tmp/legacy/tasks.json"),
+            legacy_state,
+            "agent.sync",
+            false,
+            false,
+        )
+        .expect("migrate legacy tasks");
+
+        assert_eq!(report.imported.len(), 2);
+        assert_eq!(report.skipped_done.len(), 1);
+        assert!(report.queue_doctor["summary"]["pass"]
+            .as_bool()
+            .unwrap_or(false));
+        let parent = state
+            .tasks
+            .iter()
+            .find(|task| task.title == "legacy parent")
+            .expect("parent imported");
+        let child = state
+            .tasks
+            .iter()
+            .find(|task| task.title == "legacy child")
+            .expect("child imported");
+        assert_eq!(child.depends_on, vec![parent.task_id.clone()]);
     }
 
     #[test]
