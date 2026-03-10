@@ -119,7 +119,7 @@ Use this skill when any of the following are true:
 - `tasknerve --repo-root . task cancel --task-id <task_id> --agent <agent_id> --reason "<why canceled>"`
 - To renew ownership on a long-running claim without re-claim side effects:
 - `tasknerve --repo-root . task claim <task_id> --agent <agent_id> --extend-only --claim-ttl-minutes 60`
-- Default quality gate is on: GitHub-backed repos verify pushed commits through GitHub CI by default, while local/non-GitHub repos keep using registered regression/benchmark checks. Failed GitHub CI runs deterministically create or refresh follow-up tasks without advisor/model help.
+- Default quality gate is GitHub-first: GitHub-backed repos verify pushed commits through GitHub CI by default, and task completion does not require local check registration unless the repo policy explicitly opts into that. Local/non-GitHub repos can still use registered regression/benchmark checks when needed.
 - Low-task GitHub repos also run a deterministic issue monitor by default: safe open issues can be imported into the queue under `.tasknerve:github_issues`, while obviously harmful/non-actionable issues are skipped.
 - Register or retire checks explicitly when needed:
 - `tasknerve --repo-root . check add --kind regression --task-id <task_id> --command "<test command>"`

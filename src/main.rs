@@ -24730,7 +24730,7 @@ fn default_quality_checks_enabled() -> bool {
 }
 
 fn default_quality_checks_require_on_task_done() -> bool {
-    true
+    false
 }
 
 fn default_quality_checks_run_before_sync() -> bool {

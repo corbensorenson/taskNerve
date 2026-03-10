@@ -211,7 +211,7 @@ By default, `task request` also auto-seeds one queue-scout task per known agent 
 
 By default, `task request` respects date gates discovered from tags like `not_before:2026-04-21` or from task text like `2026-04-21 through 2026-06-01`. Use `--ignore-date-gates` only when you intentionally want to bypass that scheduling guard.
 
-By default, tasknerve uses GitHub CI verification when the repo's `origin` points at GitHub, and local registered checks elsewhere. On GitHub-backed repos, `bridge sync-github` waits for the pushed commit's Actions runs, reports the result, and deterministically opens or refreshes CI-failure tasks when verification fails. On non-GitHub or fully local repos, the existing registered regression/benchmark checks stay available through `check add|run|deprecate|policy`.
+By default, tasknerve uses GitHub CI verification when the repo's `origin` points at GitHub, and it does not require local check registration just to complete a task. On GitHub-backed repos, `bridge sync-github` waits for the pushed commit's Actions runs, reports the result, and deterministically opens or refreshes CI-failure tasks when verification fails. On non-GitHub or fully local repos, registered regression/benchmark checks stay available through `check add|run|deprecate|policy` as an explicit opt-in.
 
 By default, low-task requests also run a deterministic GitHub issue monitor on GitHub-backed repos. It fetches open issues, filters out obvious spam/non-actionable/harmful requests, syncs safe issues into the backlog under `.tasknerve:github_issues`, and queues a reviewer pass when a reviewer provider is configured.
 
@@ -451,10 +451,10 @@ tasknerve --repo-root . task reopen --task-id <task_id>
 
 ## CI Verification
 
-- `tasknerve --repo-root . check policy show --json` shows the active verification backend plus GitHub CI timing and failure-task policy.
+- `tasknerve --repo-root . check policy show --json` shows the active verification backend plus GitHub CI timing, failure-task policy, and whether task completion currently requires local check registration.
 - `tasknerve --repo-root . bridge sync-github --remote origin --branch <branch>` now returns only after the active backend has verified the pushed commit, unless you explicitly disable that wait.
 - `tasknerve --repo-root . bridge sync-github --skip-remote-verification` bypasses the GitHub wait for one sync.
-- `tasknerve --repo-root . check run --json` follows the active backend: local registered checks on local repos, or GitHub CI status for the current `HEAD` commit on GitHub-backed repos.
+- `tasknerve --repo-root . check run --json` follows the active backend: local registered checks on local repos when enabled, or GitHub CI status for the current `HEAD` commit on GitHub-backed repos.
 - Failed GitHub CI runs automatically create or refresh deterministic follow-up tasks under the managed source `.tasknerve:github_ci_failures`, without needing advisor/model involvement.
 
 Recoverability repair:

@@ -11,7 +11,7 @@ Use when local resource usage should stay minimal.
 Characteristics:
 - single-worker local scan/object operations,
 - lowest background load,
-- GitHub remotes default to GitHub CI verification while non-GitHub/local remotes stay on local checks,
+- GitHub remotes default to GitHub CI verification, while local check registration stays opt-in for non-GitHub/local remotes,
 - GitHub issue intake stays available for manual sync or low-task replenishment on GitHub-backed repos,
 - best default for laptops/shared dev boxes.
 
