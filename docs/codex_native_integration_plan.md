@@ -10,6 +10,22 @@ Make TaskNerve feel first-class inside Codex:
 
 TaskNerve should own project/task orchestration while Codex continues to own authenticated inference and conversation UX.
 
+## Current State
+
+The current branch is native-first in UX, but not fully native in runtime yet.
+
+Today:
+- the Codex sidebar/panel integration is native
+- Codex-authenticated turns are native
+- the durable task/project engine still runs through the Rust backend
+- the local panel transport still runs over the Rust localhost service
+
+That means Rust is still required for the live product. It should be treated as legacy runtime until the cutover criteria in `docs/codex_native_cutover_audit.md` are satisfied.
+
+The active rewrite target now lives in `codex-native/`. New portable TaskNerve domain logic should land there first. Rust work on this branch should be limited to parity, compatibility, or removal-enabling migrations.
+
+The implementation style target is documented in `docs/codex_native_style_contract.md`: TypeScript-first, Electron-compatible boundaries, zod-backed contracts, Vitest tests, and no steady-state localhost sidecar.
+
 ## Adopted Architecture
 
 ### 1. TaskNerve stays authoritative for project state
@@ -59,6 +75,8 @@ That service is no longer the product surface by itself. Its job is:
 - accept controller/heartbeat requests
 - keep the native overlay lightweight
 
+This transport is temporary. The `codex-native/` workspace is the path to removing the localhost dependency entirely.
+
 ### 5. Patch-and-sync update model
 
 Codex does not currently expose a stable plugin/sidebar extension API for this integration, so TaskNerve treats the desktop integration as a managed patch layer.
@@ -98,3 +116,8 @@ Until then, the right model is:
 - Codex-authenticated inference for controller/advisor turns
 - TaskNerve-owned orchestration and project memory
 - syncable patch layer that can keep up with Codex desktop updates
+
+Near-term migration focus:
+- port queue ordering/filtering and project Codex settings logic into `codex-native/`
+- port controller bootstrap and project-contract generation into `codex-native/`
+- replace localhost-backed panel actions with in-process native state/actions

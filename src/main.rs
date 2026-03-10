@@ -49,6 +49,7 @@ const SCHEMA_CODEX_INTEGRATION: &str = "tasknerve.codex.integration.v2";
 const SCHEMA_CODEX_THREAD_STATE: &str = "tasknerve.codex.thread_state.v1";
 const SCHEMA_CODEX_PROMPT_WORKER_STATE: &str = "tasknerve.codex.prompt_worker_state.v1";
 const SCHEMA_CODEX_PROMPT_WORKER_LOCK: &str = "tasknerve.codex.prompt_worker_lock.v1";
+const SCHEMA_PROJECT_CODEX_SETTINGS: &str = "tasknerve.project_codex_settings.v1";
 const BACKEND_MODE_GIT_BRIDGE: &str = "git_bridge";
 const BACKEND_MODE_TASKNERVE_CLOUD: &str = "tasknerve_cloud";
 const QUALITY_CHECK_BACKEND_LOCAL: &str = "local";
@@ -59,6 +60,8 @@ const GITHUB_ISSUE_SOURCE_PLAN: &str = ".tasknerve:github_issues";
 const CODE_COMMENT_SOURCE_PLAN: &str = ".tasknerve:code_comments";
 const ADVISOR_AUTO_PLAN_FILE: &str = ".tasknerve/advisor/auto_backlog.tsv";
 const ADVISOR_WORKFLOW_FILE: &str = "TASKNERVE_WORKFLOW.md";
+const PROJECT_GOALS_FILE: &str = "project_goals.md";
+const PROJECT_MANIFEST_FILE: &str = "project_manifest.md";
 const SYSTEM_AGENT_ID: &str = "tasknerve.system";
 const AUTO_BRIDGE_SYNC_STALE_MINUTES: i64 = 30;
 const ADVISOR_WORKER_STALE_MINUTES: i64 = 45;
@@ -100,6 +103,8 @@ const DEFAULT_CODEX_THREAD_DISCOVERY_LIMIT: usize = 24;
 const DEFAULT_CODEX_ACTIVE_THREAD_BATCH_LIMIT: usize = 200;
 const DEFAULT_CODEX_CONTINUE_PROMPT_TEMPLATE: &str = "Please continue working on {project_name} project utilizing the taskNerve system. I believe in you, do your absolute best!";
 const CODEX_CONTROLLER_AGENT_ID: &str = "agent.controller";
+const TASK_TAG_INTELLIGENCE_PREFIX: &str = "intelligence:";
+const TASK_TAG_MODEL_PREFIX: &str = "model:";
 const CODEX_PANEL_ASSET_NAME: &str = "tasknerve-codex-panel.js";
 #[cfg(any(test, target_os = "macos"))]
 const CODEX_PANEL_MARKER: &str = "tasknerve-codex-panel.js";
@@ -1656,6 +1661,10 @@ struct AdvisorGeneratedTask {
     tags: Vec<String>,
     #[serde(default)]
     depends_on_keys: Vec<String>,
+    #[serde(default)]
+    suggested_intelligence: Option<String>,
+    #[serde(default)]
+    suggested_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1779,6 +1788,8 @@ struct TaskEditPatch {
     priority: Option<i32>,
     tags: Option<Vec<String>>,
     depends_on: Option<Vec<String>>,
+    suggested_intelligence: TaskTextPatch,
+    suggested_model: TaskTextPatch,
     blocked: TaskTextPatch,
 }
 
@@ -2074,6 +2085,36 @@ struct ProjectRegistry {
     projects: Vec<RegisteredProject>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectCodexSettings {
+    schema_version: String,
+    updated_at_utc: String,
+    #[serde(default = "default_project_codex_heartbeat_message_core")]
+    heartbeat_message_core: String,
+    #[serde(default = "default_project_codex_low_queue_controller_prompt")]
+    low_queue_controller_prompt: String,
+    #[serde(default = "default_true")]
+    low_queue_controller_enabled: bool,
+    #[serde(default = "default_true")]
+    worker_single_message_mode: bool,
+    #[serde(default)]
+    worker_model_routing_enabled: bool,
+    #[serde(default)]
+    worker_default_model: Option<String>,
+    #[serde(default)]
+    controller_default_model: Option<String>,
+    #[serde(default)]
+    low_intelligence_model: Option<String>,
+    #[serde(default)]
+    medium_intelligence_model: Option<String>,
+    #[serde(default)]
+    high_intelligence_model: Option<String>,
+    #[serde(default)]
+    max_intelligence_model: Option<String>,
+    #[serde(default)]
+    git_origin_url: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct TaskGuiProject {
     key: String,
@@ -2086,6 +2127,31 @@ struct TaskGuiProject {
     is_most_recent: bool,
 }
 
+#[derive(Debug, Clone)]
+struct ProjectContractFile {
+    path: PathBuf,
+    seeded: bool,
+    markdown: String,
+}
+
+#[derive(Debug, Clone)]
+struct ProjectContractDocuments {
+    goals: ProjectContractFile,
+    manifest: ProjectContractFile,
+}
+
+#[derive(Debug, Clone)]
+struct ProjectContractSummary {
+    repo_name: String,
+    languages: Vec<String>,
+    toolchains: Vec<String>,
+    libraries: Vec<String>,
+    patterns: Vec<String>,
+    notable_files: Vec<String>,
+    top_level_entries: Vec<String>,
+    suggested_commands: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct TaskGuiCreateRequest {
     title: String,
@@ -2093,6 +2159,8 @@ struct TaskGuiCreateRequest {
     priority: Option<i32>,
     tags: Option<Vec<String>>,
     depends_on: Option<Vec<String>>,
+    suggested_intelligence: Option<String>,
+    suggested_model: Option<String>,
     agent: Option<String>,
 }
 
@@ -2104,6 +2172,8 @@ struct TaskGuiEditRequest {
     priority: Option<i32>,
     tags: Option<Vec<String>>,
     depends_on: Option<Vec<String>>,
+    suggested_intelligence: Option<String>,
+    suggested_model: Option<String>,
     agent: Option<String>,
 }
 
@@ -2132,6 +2202,30 @@ struct TaskGuiAdvisorPolicyRequest {
     reviewer_model: Option<String>,
     task_manager_provider_id: Option<String>,
     task_manager_model: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskGuiProjectCodexSettingsRequest {
+    heartbeat_message_core: Option<String>,
+    low_queue_controller_prompt: Option<String>,
+    low_queue_controller_enabled: Option<bool>,
+    worker_single_message_mode: Option<bool>,
+    worker_model_routing_enabled: Option<bool>,
+    worker_default_model: Option<String>,
+    controller_default_model: Option<String>,
+    low_intelligence_model: Option<String>,
+    medium_intelligence_model: Option<String>,
+    high_intelligence_model: Option<String>,
+    max_intelligence_model: Option<String>,
+    git_origin_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskGuiControllerBootstrapRequest {
+    #[serde(default)]
+    force_new: Option<bool>,
+    #[serde(default)]
+    open_thread: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2199,6 +2293,18 @@ struct TaskGuiCodexHeartbeatActiveRequest {
     heartbeat_message: Option<String>,
     #[serde(default)]
     background: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskGuiTimelineBranchSwitchRequest {
+    branch: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskGuiTimelineBranchCreateRequest {
+    name: String,
+    #[serde(default)]
+    switch: Option<bool>,
 }
 
 #[derive(Debug, Parser)]
@@ -2357,6 +2463,10 @@ enum TaskAction {
         depends_on: Vec<String>,
         #[arg(long = "depends-on-csv")]
         depends_on_csv: Option<String>,
+        #[arg(long)]
+        suggested_intelligence: Option<String>,
+        #[arg(long)]
+        suggested_model: Option<String>,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -2388,6 +2498,14 @@ enum TaskAction {
         depends_on_csv: Option<String>,
         #[arg(long, default_value_t = false)]
         clear_depends_on: bool,
+        #[arg(long)]
+        suggested_intelligence: Option<String>,
+        #[arg(long, default_value_t = false)]
+        clear_suggested_intelligence: bool,
+        #[arg(long)]
+        suggested_model: Option<String>,
+        #[arg(long, default_value_t = false)]
+        clear_suggested_model: bool,
         #[arg(long)]
         blocked_reason: Option<String>,
         #[arg(long, default_value_t = false)]
@@ -4577,8 +4695,34 @@ fn enqueue_codex_prompt_requests(
         bail!("manual prompt injection cannot be combined with --continue-task");
     }
     let cycles = options.cycles.clamp(1, 100);
+    let project_settings = load_project_codex_settings(repo_root)?;
+    let single_message_mode =
+        !codex_is_controller_agent(&options.agent_id) && project_settings.worker_single_message_mode;
+    let running_exists = state.queued_prompts.iter().any(|queued| {
+        queued.agent_id == options.agent_id
+            && matches!(queued.status, CodexPromptRequestStatus::Running)
+    });
+    let replaced_pending_count = state
+        .queued_prompts
+        .iter()
+        .filter(|queued| {
+            queued.agent_id == options.agent_id
+                && matches!(queued.status, CodexPromptRequestStatus::Pending)
+        })
+        .count();
+    if single_message_mode {
+        state.queued_prompts.retain(|queued| {
+            queued.agent_id != options.agent_id
+                || !matches!(queued.status, CodexPromptRequestStatus::Pending)
+        });
+    }
     let now = now_utc();
-    for _ in 0..cycles {
+    let queued_count = if single_message_mode {
+        if running_exists { 0 } else { 1 }
+    } else {
+        cycles
+    };
+    for _ in 0..queued_count {
         state.queued_prompts.push(CodexPromptRequest {
             prompt_id: format!("codex_prompt_{}", Uuid::new_v4().simple()),
             agent_id: options.agent_id.clone(),
@@ -4606,10 +4750,16 @@ fn enqueue_codex_prompt_requests(
     }
     state.updated_at_utc = now;
     write_codex_thread_state(repo_root, &state)?;
-    let worker = if background {
+    let worker = if background && queued_count > 0 {
         queue_codex_prompt_background(repo_root, &options.agent_id)?
-    } else {
+    } else if !background && queued_count > 0 {
         run_codex_prompt_worker(repo_root, &options.agent_id)?;
+        serde_json::to_value(load_codex_prompt_worker_state(
+            repo_root,
+            &options.agent_id,
+        )?)
+        .unwrap_or(serde_json::Value::Null)
+    } else {
         serde_json::to_value(load_codex_prompt_worker_state(
             repo_root,
             &options.agent_id,
@@ -4621,7 +4771,11 @@ fn enqueue_codex_prompt_requests(
         "action": "inject",
         "agent_id": options.agent_id,
         "thread_id": binding.thread_id,
-        "queued_count": cycles,
+        "requested_count": cycles,
+        "queued_count": queued_count,
+        "single_message_mode": single_message_mode,
+        "running_exists": running_exists,
+        "replaced_pending_count": replaced_pending_count,
         "background": background,
         "worker": worker,
         "snapshot": codex_thread_snapshot_payload(repo_root)?
@@ -4808,18 +4962,66 @@ struct CodexPromptExecutionResult {
     result_excerpt: Option<String>,
 }
 
+fn codex_model_for_task_intelligence(
+    settings: &ProjectCodexSettings,
+    suggested_intelligence: Option<&str>,
+) -> Option<String> {
+    match suggested_intelligence.and_then(canonical_task_intelligence_token) {
+        Some("low") => settings.low_intelligence_model.clone(),
+        Some("medium") => settings.medium_intelligence_model.clone(),
+        Some("high") => settings.high_intelligence_model.clone(),
+        Some("max") => settings.max_intelligence_model.clone(),
+        _ => None,
+    }
+}
+
+fn resolve_codex_prompt_model(
+    repo_root: &Path,
+    prompt: &CodexPromptRequest,
+    task_payload: Option<&serde_json::Value>,
+) -> Option<String> {
+    if let Some(model) = prompt.model.clone().filter(|value| !value.trim().is_empty()) {
+        return Some(model);
+    }
+    let settings = load_project_codex_settings(repo_root).ok()?;
+    if codex_is_controller_agent(&prompt.agent_id) {
+        return settings.controller_default_model.clone();
+    }
+    if settings.worker_model_routing_enabled {
+        if let Some(task_payload) = task_payload {
+            if let Some(model) = task_payload
+                .get("suggested_model")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                return Some(model.to_string());
+            }
+            if let Some(model) = codex_model_for_task_intelligence(
+                &settings,
+                task_payload
+                    .get("suggested_intelligence")
+                    .and_then(serde_json::Value::as_str),
+            ) {
+                return Some(model);
+            }
+        }
+    }
+    settings.worker_default_model.clone()
+}
+
 fn execute_codex_prompt_request(
     repo_root: &Path,
     binding: &CodexThreadBinding,
     prompt: &CodexPromptRequest,
 ) -> Result<CodexPromptExecutionResult> {
-    let (task_id, rendered_prompt) = match prompt.kind {
+    let (task_id, rendered_prompt, task_payload) = match prompt.kind {
         CodexPromptRequestKind::Manual => {
             let prompt_text = prompt
                 .prompt
                 .clone()
                 .ok_or_else(|| anyhow!("queued manual codex prompt is empty"))?;
-            (None, prompt_text)
+            (None, prompt_text, None)
         }
         CodexPromptRequestKind::ContinueTask => {
             let task_payload = resolve_codex_continue_task_payload(
@@ -4848,14 +5050,16 @@ fn execute_codex_prompt_request(
                     binding,
                     &task_payload,
                 ),
+                Some(task_payload),
             )
         }
     };
+    let resolved_model = resolve_codex_prompt_model(repo_root, prompt, task_payload.as_ref());
     let output = inject_prompt_into_codex_thread(
         repo_root,
         &binding.thread_id,
         &rendered_prompt,
-        prompt.model.as_deref(),
+        resolved_model.as_deref(),
         prompt.oss,
         prompt.local_provider.as_deref(),
     )?;
@@ -4924,8 +5128,14 @@ fn build_codex_continue_task_prompt(
         .unwrap_or("this");
     let heartbeat_template = binding
         .heartbeat_message
-        .as_deref()
-        .unwrap_or(DEFAULT_CODEX_CONTINUE_PROMPT_TEMPLATE);
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            load_project_codex_settings(repo_root)
+                .ok()
+                .map(|settings| settings.heartbeat_message_core)
+        })
+        .unwrap_or_else(default_project_codex_heartbeat_message_core);
     let task_id = task_payload["task_id"].as_str().unwrap_or("unknown");
     let title = task_payload["title"].as_str().unwrap_or("untitled");
     let detail = task_payload["detail"].as_str().unwrap_or("");
@@ -4985,7 +5195,7 @@ fn build_codex_continue_task_prompt(
         .as_str()
         .unwrap_or("none");
     let heartbeat =
-        render_codex_heartbeat_message(heartbeat_template, project_name, agent_id, task_id, title);
+        render_codex_heartbeat_message(&heartbeat_template, project_name, agent_id, task_id, title);
     format!(
         r#"{heartbeat}
 
@@ -5016,6 +5226,7 @@ Next recommended substep:
 
 Required operating contract:
 - Use TaskNerve as the source of truth for this task.
+- Align your work with the repo-root `project_goals.md` (what the project is trying to achieve) and `project_manifest.md` (the approved technical approach).
 - Start by confirming the claim with `tasknerve --repo-root . task current --agent {agent_id} --include-context --json`.
 - Stay in this repository and make concrete progress.
 - For long-running work, renew the lease with `tasknerve --repo-root . task heartbeat {task_id} --agent {agent_id} --note "<progress>"`.
@@ -9640,6 +9851,8 @@ fn cmd_project(args: ProjectArgs) -> Result<()> {
         } => {
             validate_project_name(&name)?;
             let canonical_root = resolve_repo_root(&repo_root)?;
+            let project_documents = project_contract_documents_payload(&canonical_root)?;
+            let project_codex_settings = project_codex_settings_payload(&canonical_root)?;
             let now = now_utc();
             let normalized_name = name.trim().to_string();
             if let Some(existing) = registry
@@ -9668,13 +9881,27 @@ fn cmd_project(args: ProjectArgs) -> Result<()> {
                 .sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
             registry.updated_at_utc = now;
             write_project_registry(&registry)?;
+            let controller_bootstrap =
+                bootstrap_project_controller_thread(&canonical_root, &normalized_name, false, false)
+                    .unwrap_or_else(|err| {
+                        json!({
+                            "ok": false,
+                            "status": "skipped",
+                            "error": err.to_string(),
+                            "pin_supported": false,
+                            "pinned": false
+                        })
+                    });
             let payload = json!({
                 "schema_version": "tasknerve.project.add.v1",
                 "generated_at_utc": now_utc(),
                 "name": normalized_name,
                 "repo_root": canonical_root.display().to_string(),
                 "set_default": set_default,
-                "default_project": registry.default_project
+                "default_project": registry.default_project,
+                "project_documents": project_documents,
+                "project_codex_settings": project_codex_settings,
+                "controller_bootstrap": controller_bootstrap
             });
             if json {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -9723,13 +9950,16 @@ fn cmd_project(args: ProjectArgs) -> Result<()> {
             if normalized_name.is_empty() {
                 bail!("project name cannot be empty");
             }
-            if !registry
+            let Some(selected_repo_root) = registry
                 .projects
                 .iter()
-                .any(|project| project.name == normalized_name)
-            {
+                .find(|project| project.name == normalized_name)
+                .map(|project| PathBuf::from(&project.repo_root))
+            else {
                 bail!("project not found: {}", normalized_name);
-            }
+            };
+            let project_documents = project_contract_documents_payload(&selected_repo_root)?;
+            let project_codex_settings = project_codex_settings_payload(&selected_repo_root)?;
             let now = now_utc();
             if let Some(project) = registry
                 .projects
@@ -9748,7 +9978,9 @@ fn cmd_project(args: ProjectArgs) -> Result<()> {
             let payload = json!({
                 "schema_version": "tasknerve.project.use.v1",
                 "generated_at_utc": now_utc(),
-                "default_project": registry.default_project
+                "default_project": registry.default_project,
+                "project_documents": project_documents,
+                "project_codex_settings": project_codex_settings
             });
             if json {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -10298,6 +10530,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             tags_csv,
             depends_on,
             depends_on_csv,
+            suggested_intelligence,
+            suggested_model,
             json,
         } => {
             let tags = normalize_cli_csv_or_repeat_list(tags, tags_csv, "tag")?;
@@ -10311,6 +10545,8 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 priority,
                 tags,
                 depends_on,
+                suggested_intelligence,
+                suggested_model,
             )?;
             state.tasks.push(task.clone());
             state.updated_at_utc = task.updated_at_utc.clone();
@@ -10341,6 +10577,10 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
             depends_on,
             depends_on_csv,
             clear_depends_on,
+            suggested_intelligence,
+            clear_suggested_intelligence,
+            suggested_model,
+            clear_suggested_model,
             blocked_reason,
             clear_blocked,
             json,
@@ -10356,6 +10596,14 @@ fn cmd_task(repo_root: &Path, args: TaskArgs) -> Result<()> {
                 priority,
                 tags: resolve_task_list_patch(tags, clear_tags, "tags")?,
                 depends_on: resolve_task_list_patch(depends_on, clear_depends_on, "depends-on")?,
+                suggested_intelligence: resolve_task_text_patch(
+                    suggested_intelligence,
+                    clear_suggested_intelligence,
+                )?,
+                suggested_model: resolve_task_text_patch(
+                    suggested_model,
+                    clear_suggested_model,
+                )?,
                 blocked: resolve_task_text_patch(blocked_reason, clear_blocked)?,
             };
             let outcome = edit_task_in_state(&mut state, &task_id, &agent_id, patch)?;
@@ -13029,6 +13277,50 @@ fn handle_task_gui_connection(
         };
     }
 
+    if path == "/api/timeline/branch/switch" {
+        if method != "POST" {
+            return write_http_json_error(
+                stream,
+                "405 Method Not Allowed",
+                "POST required for /api/timeline/branch/switch",
+            );
+        }
+        if !request_content_type_is_json(&request) {
+            return write_http_json_error(
+                stream,
+                "415 Unsupported Media Type",
+                "application/json body required for /api/timeline/branch/switch",
+            );
+        }
+        let selected_project = query.get("project").map(String::as_str).or(default_project);
+        return match task_gui_switch_timeline_branch(repo_root, selected_project, &request.body) {
+            Ok(payload) => write_http_json(stream, "200 OK", &payload),
+            Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
+        };
+    }
+
+    if path == "/api/timeline/branch/create" {
+        if method != "POST" {
+            return write_http_json_error(
+                stream,
+                "405 Method Not Allowed",
+                "POST required for /api/timeline/branch/create",
+            );
+        }
+        if !request_content_type_is_json(&request) {
+            return write_http_json_error(
+                stream,
+                "415 Unsupported Media Type",
+                "application/json body required for /api/timeline/branch/create",
+            );
+        }
+        let selected_project = query.get("project").map(String::as_str).or(default_project);
+        return match task_gui_create_timeline_branch(repo_root, selected_project, &request.body) {
+            Ok(payload) => write_http_json(stream, "200 OK", &payload),
+            Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
+        };
+    }
+
     if path == "/api/advisor" {
         if method != "GET" {
             return write_http_json_error(
@@ -13061,6 +13353,32 @@ fn handle_task_gui_connection(
         }
         let selected_project = query.get("project").map(String::as_str).or(default_project);
         return match task_gui_update_advisor_policy(repo_root, selected_project, &request.body) {
+            Ok(payload) => write_http_json(stream, "200 OK", &payload),
+            Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
+        };
+    }
+
+    if path == "/api/project/codex-settings" {
+        if method != "POST" {
+            return write_http_json_error(
+                stream,
+                "405 Method Not Allowed",
+                "POST required for /api/project/codex-settings",
+            );
+        }
+        if !request_content_type_is_json(&request) {
+            return write_http_json_error(
+                stream,
+                "415 Unsupported Media Type",
+                "application/json body required for /api/project/codex-settings",
+            );
+        }
+        let selected_project = query.get("project").map(String::as_str).or(default_project);
+        return match task_gui_update_project_codex_settings(
+            repo_root,
+            selected_project,
+            &request.body,
+        ) {
             Ok(payload) => write_http_json(stream, "200 OK", &payload),
             Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
         };
@@ -13137,6 +13455,32 @@ fn handle_task_gui_connection(
         };
     }
 
+    if path == "/api/codex/project-for-thread" {
+        if method != "GET" {
+            return write_http_json_error(
+                stream,
+                "405 Method Not Allowed",
+                "GET required for /api/codex/project-for-thread",
+            );
+        }
+        let Some(thread_id) = query
+            .get("thread_id")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return write_http_json_error(
+                stream,
+                "400 Bad Request",
+                "thread_id query parameter is required for /api/codex/project-for-thread",
+            );
+        };
+        return match task_gui_project_for_codex_thread(repo_root, thread_id) {
+            Ok(payload) => write_http_json(stream, "200 OK", &payload),
+            Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
+        };
+    }
+
     if path == "/api/codex" {
         if method != "GET" {
             return write_http_json_error(
@@ -13169,6 +13513,28 @@ fn handle_task_gui_connection(
         }
         let selected_project = query.get("project").map(String::as_str).or(default_project);
         return match task_gui_bind_codex_thread(repo_root, selected_project, &request.body) {
+            Ok(payload) => write_http_json(stream, "200 OK", &payload),
+            Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
+        };
+    }
+
+    if path == "/api/codex/controller/bootstrap" {
+        if method != "POST" {
+            return write_http_json_error(
+                stream,
+                "405 Method Not Allowed",
+                "POST required for /api/codex/controller/bootstrap",
+            );
+        }
+        if !request_content_type_is_json(&request) {
+            return write_http_json_error(
+                stream,
+                "415 Unsupported Media Type",
+                "application/json body required for /api/codex/controller/bootstrap",
+            );
+        }
+        let selected_project = query.get("project").map(String::as_str).or(default_project);
+        return match task_gui_bootstrap_controller(repo_root, selected_project, &request.body) {
             Ok(payload) => write_http_json(stream, "200 OK", &payload),
             Err(err) => write_http_json_error(stream, "400 Bad Request", &err.to_string()),
         };
@@ -13744,6 +14110,26 @@ fn rewrite_codex_asar_integrity_hash_json(
     Ok(())
 }
 
+fn read_le_u32(bytes: &[u8]) -> Result<u32> {
+    let slice = bytes
+        .get(..4)
+        .ok_or_else(|| anyhow!("expected 4 bytes but only found {}", bytes.len()))?;
+    Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn electron_asar_header_hash_from_pickle(header_pickle: &[u8]) -> Result<String> {
+    let header_len = read_le_u32(
+        header_pickle
+            .get(4..8)
+            .ok_or_else(|| anyhow!("asar header pickle is truncated"))?,
+    )? as usize;
+    let header_bytes = header_pickle
+        .get(8..8 + header_len)
+        .ok_or_else(|| anyhow!("asar header payload is truncated"))?;
+    Ok(format!("{:x}", Sha256::digest(header_bytes)))
+}
+
 fn paths_look_same(left: &Path, right: &Path) -> bool {
     match (fs::canonicalize(left), fs::canonicalize(right)) {
         (Ok(left), Ok(right)) => left == right,
@@ -13948,6 +14334,20 @@ fn update_macos_app_asar_integrity(app_path: &Path, asar_hash: &str) -> Result<(
     write_macos_plist_json(&plist_path, &plist)
 }
 
+#[cfg(target_os = "macos")]
+fn electron_asar_header_hash(asar_path: &Path) -> Result<String> {
+    let mut file = fs::File::open(asar_path)
+        .with_context(|| format!("failed opening {}", asar_path.display()))?;
+    let mut size_pickle = [0u8; 8];
+    file.read_exact(&mut size_pickle)
+        .with_context(|| format!("failed reading {}", asar_path.display()))?;
+    let header_pickle_size = read_le_u32(&size_pickle[4..8])? as usize;
+    let mut header_pickle = vec![0u8; header_pickle_size];
+    file.read_exact(&mut header_pickle)
+        .with_context(|| format!("failed reading {}", asar_path.display()))?;
+    electron_asar_header_hash_from_pickle(&header_pickle)
+}
+
 fn tasknerve_codex_panel_url(host: &str, port: u16) -> String {
     task_gui_url(host, port, None)
 }
@@ -14062,7 +14462,8 @@ fn http_json_request_local(
 
 #[cfg(any(test, target_os = "macos"))]
 fn ensure_csp_directive_origins(csp: &str, directive: &str, origins: &[String]) -> String {
-    let mut parts = csp
+    let normalized = csp.replace("&#39;", "'").replace("&apos;", "'");
+    let mut parts = normalized
         .split(';')
         .map(str::trim)
         .filter(|part| !part.is_empty())
@@ -14070,24 +14471,29 @@ fn ensure_csp_directive_origins(csp: &str, directive: &str, origins: &[String]) 
         .collect::<Vec<_>>();
     let mut found = false;
     for part in &mut parts {
-        if part.starts_with(directive) {
+        let matches_directive = part
+            .strip_prefix(directive)
+            .map(|suffix| suffix.is_empty() || suffix.starts_with(char::is_whitespace))
+            .unwrap_or(false);
+        if matches_directive {
+            let mut tokens = part
+                .split_whitespace()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
             for origin in origins {
-                if !part.contains(origin) {
-                    part.push(' ');
-                    part.push_str(origin);
+                if !tokens.iter().any(|token| token == origin) {
+                    tokens.push(origin.clone());
                 }
             }
+            *part = tokens.join(" ");
             found = true;
             break;
         }
     }
     if !found {
-        let mut part = directive.to_string();
-        for origin in origins {
-            part.push(' ');
-            part.push_str(origin);
-        }
-        parts.push(part);
+        let mut tokens = vec![directive.to_string()];
+        tokens.extend(origins.iter().cloned());
+        parts.push(tokens.join(" "));
     }
     format!("{};", parts.join("; "))
 }
@@ -14255,11 +14661,16 @@ fn patch_codex_main_js(input: &str, bridge_host: &str, bridge_port: u16) -> Resu
 }
 
 #[cfg(any(test, target_os = "macos"))]
-fn render_codex_panel_script(host: &str, port: u16) -> String {
-    DEFAULT_CODEX_PANEL_SCRIPT.replace(
-        "__TASKNERVE_BASE_URL__",
-        &tasknerve_codex_panel_url(host, port),
-    )
+fn render_codex_panel_script(host: &str, port: u16, bridge_host: &str, bridge_port: u16) -> String {
+    DEFAULT_CODEX_PANEL_SCRIPT
+        .replace(
+            "__TASKNERVE_BASE_URL__",
+            &tasknerve_codex_panel_url(host, port),
+        )
+        .replace(
+            "__TASKNERVE_NATIVE_BRIDGE_URL__",
+            &tasknerve_codex_native_bridge_url(bridge_host, bridge_port),
+        )
 }
 
 #[cfg(any(test, target_os = "macos"))]
@@ -14882,8 +15293,7 @@ fn install_codex_integration(
     let tasknerve_executable_sha256 = hash_file(&tasknerve_executable)?;
     let current_asar_sha256 = hash_file(&app_asar_path)?;
     let backup_path = codex_backup_asar_path(&app_path)?;
-    let refresh_backup = force
-        || !backup_path.exists()
+    let refresh_backup = !backup_path.exists()
         || prior_state
             .as_ref()
             .map(|state| {
@@ -14941,7 +15351,10 @@ fn install_codex_integration(
         .join("webview")
         .join("assets")
         .join(CODEX_PANEL_ASSET_NAME);
-    fs::write(&asset_path, render_codex_panel_script(host, port))
+    fs::write(
+        &asset_path,
+        render_codex_panel_script(host, port, bridge_host, bridge_port),
+    )
         .with_context(|| format!("failed writing {}", asset_path.display()))?;
     let packed_asar = work_dir.join("app.patched.asar");
     command_status_checked(
@@ -14961,7 +15374,8 @@ fn install_codex_integration(
         )
     })?;
     let patched_asar_sha256 = hash_file(&app_asar_path)?;
-    update_macos_app_asar_integrity(&app_path, &patched_asar_sha256)?;
+    let patched_asar_integrity_hash = electron_asar_header_hash(&app_asar_path)?;
+    update_macos_app_asar_integrity(&app_path, &patched_asar_integrity_hash)?;
     command_status_checked(
         ProcessCommand::new("codesign")
             .arg("--force")
@@ -15386,8 +15800,8 @@ fn uninstall_codex_integration(app_override: Option<&Path>) -> Result<serde_json
                 app_asar_path.display()
             )
         })?;
-        let restored_asar_sha256 = hash_file(&app_asar_path)?;
-        update_macos_app_asar_integrity(&app_path, &restored_asar_sha256)?;
+        let restored_asar_integrity_hash = electron_asar_header_hash(&app_asar_path)?;
+        update_macos_app_asar_integrity(&app_path, &restored_asar_integrity_hash)?;
         command_status_checked(
             ProcessCommand::new("codesign")
                 .arg("--force")
@@ -15432,6 +15846,8 @@ fn resolve_task_gui_project_selection(
         .cloned()
         .ok_or_else(|| anyhow!("task gui has no available projects"))?;
     let selected_repo = PathBuf::from(selected.repo_root.clone());
+    let _ = ensure_project_contract_documents(&selected_repo)?;
+    let _ = load_project_codex_settings(&selected_repo)?;
     Ok((projects, selected, selected_repo))
 }
 
@@ -15454,6 +15870,8 @@ fn task_gui_add_task(
         request.priority.unwrap_or(0),
         request.tags.unwrap_or_default(),
         request.depends_on.unwrap_or_default(),
+        request.suggested_intelligence,
+        request.suggested_model,
     )?;
     state.tasks.push(task.clone());
     state.updated_at_utc = task.updated_at_utc.clone();
@@ -15503,6 +15921,14 @@ fn task_gui_edit_task(
             priority: request.priority,
             tags: request.tags.map(dedupe_keep_order),
             depends_on: request.depends_on.map(dedupe_keep_order),
+            suggested_intelligence: match request.suggested_intelligence {
+                None => TaskTextPatch::Keep,
+                Some(value) => TaskTextPatch::Set(value),
+            },
+            suggested_model: match request.suggested_model {
+                None => TaskTextPatch::Keep,
+                Some(value) => TaskTextPatch::Set(value),
+            },
             blocked: TaskTextPatch::Keep,
         },
     )?;
@@ -15680,7 +16106,7 @@ fn adopt_active_codex_worker_bindings(
 ) -> Result<serde_json::Value> {
     let discovered =
         discover_codex_threads(repo_root, false, DEFAULT_CODEX_ACTIVE_THREAD_BATCH_LIMIT)?;
-    let heartbeat_message = normalize_optional_text(heartbeat_message, "codex heartbeat message")?;
+    let heartbeat_message = resolve_project_heartbeat_message(repo_root, heartbeat_message)?;
     let mut state = load_codex_thread_state(repo_root)?;
     let controller_thread_id = state
         .bindings
@@ -15756,6 +16182,7 @@ fn queue_heartbeats_for_active_codex_workers(
     heartbeat_message: Option<String>,
     background: bool,
 ) -> Result<serde_json::Value> {
+    let heartbeat_message = resolve_project_heartbeat_message(repo_root, heartbeat_message)?;
     let adopt_result = adopt_active_codex_worker_bindings(repo_root, heartbeat_message)?;
     let snapshot = adopt_result["snapshot"].clone();
     let active_workers = snapshot["active_worker_bindings"]
@@ -15802,6 +16229,56 @@ fn queue_heartbeats_for_active_codex_workers(
     }))
 }
 
+fn task_gui_project_for_codex_thread(repo_root: &Path, thread_id: &str) -> Result<serde_json::Value> {
+    let normalized_thread_id = thread_id.trim();
+    if normalized_thread_id.is_empty() {
+        bail!("thread_id is required");
+    }
+
+    let projects = collect_task_gui_projects(repo_root)?;
+    let codex_home = resolve_codex_home()?;
+    let session_meta = load_codex_session_meta_map(&codex_home).unwrap_or_default();
+    let state_threads = load_codex_state_thread_map(&codex_home).unwrap_or_default();
+    let state_row = state_threads.get(normalized_thread_id);
+    if state_row
+        .and_then(|row| row.archived)
+        .map(|value| value != 0)
+        .unwrap_or(false)
+    {
+        return Ok(json!({
+            "ok": true,
+            "thread_id": normalized_thread_id,
+            "selected_project": serde_json::Value::Null
+        }));
+    }
+    let session_row = session_meta.get(normalized_thread_id);
+    let cwd = state_row
+        .and_then(|row| row.cwd.clone())
+        .or_else(|| session_row.map(|row| row.meta.cwd.clone()))
+        .unwrap_or_default();
+    if cwd.trim().is_empty() {
+        return Ok(json!({
+            "ok": true,
+            "thread_id": normalized_thread_id,
+            "selected_project": serde_json::Value::Null
+        }));
+    }
+
+    let cwd_path = PathBuf::from(&cwd);
+    let matched = resolve_task_gui_project_for_cwd(&projects, &cwd_path);
+    Ok(json!({
+        "ok": true,
+        "thread_id": normalized_thread_id,
+        "cwd": cwd,
+        "cwd_scope": matched.map(|(_, scope)| scope),
+        "selected_project": matched.map(|(project, _)| json!({
+            "key": project.key,
+            "name": project.name,
+            "repo_root": project.repo_root
+        }))
+    }))
+}
+
 fn task_gui_codex_payload(
     repo_root: &Path,
     project_selector: Option<&str>,
@@ -15838,12 +16315,17 @@ fn task_gui_bind_codex_thread(
         &request.thread_id,
         request.controller.unwrap_or(false),
     );
+    let heartbeat_message = if request.controller.unwrap_or(false) {
+        None
+    } else {
+        resolve_project_heartbeat_message(&selected_repo, request.heartbeat_message)?
+    };
     let binding = bind_codex_thread_to_agent(
         &selected_repo,
         &agent_id,
         request.thread_id,
         request.label,
-        request.heartbeat_message,
+        heartbeat_message,
     )?;
     Ok(json!({
         "ok": true,
@@ -16052,6 +16534,386 @@ fn task_gui_update_advisor_policy(
     }))
 }
 
+fn resolve_project_heartbeat_message(
+    repo_root: &Path,
+    heartbeat_message: Option<String>,
+) -> Result<Option<String>> {
+    if heartbeat_message.is_some() {
+        return normalize_optional_text(heartbeat_message, "codex heartbeat message");
+    }
+    let settings = load_project_codex_settings(repo_root)?;
+    normalize_optional_text(
+        Some(settings.heartbeat_message_core),
+        "project heartbeat message core",
+    )
+}
+
+fn task_gui_update_project_codex_settings(
+    repo_root: &Path,
+    project_selector: Option<&str>,
+    body: &[u8],
+) -> Result<serde_json::Value> {
+    let request: TaskGuiProjectCodexSettingsRequest =
+        serde_json::from_slice(body).with_context(|| "invalid project codex settings payload")?;
+    let (_projects, selected, selected_repo) =
+        resolve_task_gui_project_selection(repo_root, project_selector)?;
+    let mut settings = load_project_codex_settings(&selected_repo)?;
+    let mut changed = false;
+    let mut heartbeat_changed = false;
+    let mut git_origin_applied = false;
+
+    if let Some(value) = request.heartbeat_message_core {
+        let next = normalize_optional_text(Some(value), "heartbeat message core")?
+            .unwrap_or_else(default_project_codex_heartbeat_message_core);
+        if settings.heartbeat_message_core != next {
+            settings.heartbeat_message_core = next;
+            heartbeat_changed = true;
+            changed = true;
+        }
+    }
+    if let Some(value) = request.low_queue_controller_prompt {
+        let next = normalize_optional_text(Some(value), "low queue controller prompt")?
+            .unwrap_or_else(default_project_codex_low_queue_controller_prompt);
+        if settings.low_queue_controller_prompt != next {
+            settings.low_queue_controller_prompt = next;
+            changed = true;
+        }
+    }
+    if let Some(value) = request.low_queue_controller_enabled
+        && settings.low_queue_controller_enabled != value
+    {
+        settings.low_queue_controller_enabled = value;
+        changed = true;
+    }
+    if let Some(value) = request.worker_single_message_mode
+        && settings.worker_single_message_mode != value
+    {
+        settings.worker_single_message_mode = value;
+        changed = true;
+    }
+    if let Some(value) = request.worker_model_routing_enabled
+        && settings.worker_model_routing_enabled != value
+    {
+        settings.worker_model_routing_enabled = value;
+        changed = true;
+    }
+    for (current, incoming, label) in [
+        (
+            &mut settings.worker_default_model,
+            request.worker_default_model,
+            "worker default model",
+        ),
+        (
+            &mut settings.controller_default_model,
+            request.controller_default_model,
+            "controller default model",
+        ),
+        (
+            &mut settings.low_intelligence_model,
+            request.low_intelligence_model,
+            "low intelligence model",
+        ),
+        (
+            &mut settings.medium_intelligence_model,
+            request.medium_intelligence_model,
+            "medium intelligence model",
+        ),
+        (
+            &mut settings.high_intelligence_model,
+            request.high_intelligence_model,
+            "high intelligence model",
+        ),
+        (
+            &mut settings.max_intelligence_model,
+            request.max_intelligence_model,
+            "max intelligence model",
+        ),
+    ] {
+        if let Some(value) = incoming {
+            let next = normalize_optional_text(Some(value), label)?;
+            if *current != next {
+                *current = next;
+                changed = true;
+            }
+        }
+    }
+    if let Some(value) = request.git_origin_url {
+        let next = normalize_optional_text(Some(value), "git origin url")?;
+        if settings.git_origin_url != next {
+            settings.git_origin_url = next.clone();
+            changed = true;
+        }
+        if let Some(url) = next.as_deref() {
+            git_origin_applied = set_git_origin_url(&selected_repo, url)?;
+        }
+    }
+
+    if changed {
+        settings.updated_at_utc = now_utc();
+        write_project_codex_settings(&selected_repo, &settings)?;
+    }
+    if heartbeat_changed {
+        let _ = sync_project_codex_worker_heartbeat_messages(
+            &selected_repo,
+            &settings.heartbeat_message_core,
+        )?;
+    }
+    Ok(json!({
+        "ok": true,
+        "action": "project_codex_settings",
+        "selected_project": {
+            "key": selected.key,
+            "name": selected.name,
+            "repo_root": selected.repo_root
+        },
+        "changed": changed,
+        "heartbeat_synced_to_workers": heartbeat_changed,
+        "git_origin_applied": git_origin_applied,
+        "settings": project_codex_settings_payload(&selected_repo)?
+    }))
+}
+
+fn render_project_template_value(template: &str, key: &str, value: &str) -> String {
+    template.replace(&format!("{{{key}}}"), value)
+}
+
+fn build_codex_controller_bootstrap_prompt(
+    repo_root: &Path,
+    project_name: &str,
+) -> Result<String> {
+    let summary = collect_project_contract_summary(repo_root);
+    let project_documents = ensure_project_contract_documents(repo_root)?;
+    let languages = if summary.languages.is_empty() {
+        "unknown".to_string()
+    } else {
+        summary.languages.join(", ")
+    };
+    let toolchains = if summary.toolchains.is_empty() {
+        "unknown".to_string()
+    } else {
+        summary.toolchains.join(", ")
+    };
+    let patterns = if summary.patterns.is_empty() {
+        "- No strong project structure signals detected yet.".to_string()
+    } else {
+        summary
+            .patterns
+            .iter()
+            .map(|line| format!("- {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    Ok(format!(
+        r#"Please familiarize yourself with the `{project_name}` project. You are the TaskNerve controller for this repository.
+
+Controller responsibilities:
+- Understand the current repository state and the project intent.
+- Treat TaskNerve as the source of truth for backlog orchestration and worker coordination.
+- Use the built-in TaskNerve skill when it helps you move faster and stay aligned with the system.
+- Review `project_goals.md` and `project_manifest.md`. If either one is still draft, incomplete, or inconsistent, work with the user to refine and lock it.
+- Once the goals and manifest are solid enough, populate the TaskNerve backlog with concrete work for the project.
+- Keep enough high-leverage tasks in the queue for the worker threads, mixing development tasks with maintenance, cleanup, consolidation, and technical-debt reduction when useful.
+
+Current repository snapshot:
+- repo_root: {repo_root}
+- detected languages: {languages}
+- detected toolchains: {toolchains}
+
+Project structure signals:
+{patterns}
+
+Controller startup sequence:
+1. Familiarize yourself with the repository and summarize what the project currently is.
+2. Read `project_goals.md` and confirm whether the user-facing goals are locked; if not, refine them with the user.
+3. Read `project_manifest.md` and confirm whether the technical contract is locked; if not, refine it with the user.
+4. Once those contracts are good enough, populate TaskNerve with the next best backlog items.
+5. Recommend an appropriate worker-thread count for the project based on the current state of the backlog.
+6. Continue serving as the controller for this project going forward.
+
+Important files:
+- project goals: {project_goals_path}
+- project manifest: {project_manifest_path}
+
+Stay focused on backlog quality, project direction, and keeping TaskNerve useful."#,
+        project_name = project_name,
+        repo_root = repo_root.display(),
+        languages = languages,
+        toolchains = toolchains,
+        patterns = patterns,
+        project_goals_path = project_documents.goals.path.display(),
+        project_manifest_path = project_documents.manifest.path.display(),
+    ))
+}
+
+fn build_low_queue_controller_prompt(
+    repo_root: &Path,
+    state: &TaskState,
+    settings: &ProjectCodexSettings,
+) -> String {
+    let project_name = repo_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("project");
+    let status_map = task_status_map(state);
+    let ready_count = state
+        .tasks
+        .iter()
+        .filter(|task| task_is_ready_for_dispatch(task, &status_map))
+        .count();
+    let open_count = state
+        .tasks
+        .iter()
+        .filter(|task| task.status != TaskStatus::Done)
+        .count();
+    let mut rendered = settings.low_queue_controller_prompt.clone();
+    rendered = render_project_template_value(&rendered, "project_name", project_name);
+    rendered = render_project_template_value(&rendered, "repo_root", &repo_root.display().to_string());
+    rendered = render_project_template_value(&rendered, "ready_count", &ready_count.to_string());
+    render_project_template_value(&rendered, "open_count", &open_count.to_string())
+}
+
+fn start_codex_native_thread(
+    repo_root: &Path,
+    model: Option<&str>,
+) -> Result<serde_json::Value> {
+    let state = ensure_codex_native_bridge_ready()?;
+    http_json_request_local(
+        &state.bridge_host,
+        state.bridge_port,
+        "POST",
+        "/tasknerve/thread/start-thread",
+        Some(&json!({
+            "cwd": repo_root.display().to_string(),
+            "model": model,
+            "sandbox": "workspace-write",
+            "approval_policy": "never"
+        })),
+    )
+}
+
+fn set_codex_native_thread_name(thread_id: &str, title: &str) -> Result<serde_json::Value> {
+    let state = ensure_codex_native_bridge_ready()?;
+    http_json_request_local(
+        &state.bridge_host,
+        state.bridge_port,
+        "POST",
+        "/tasknerve/thread/set-name",
+        Some(&json!({
+            "thread_id": thread_id,
+            "title": title
+        })),
+    )
+}
+
+fn open_codex_native_thread(thread_id: &str) -> Result<serde_json::Value> {
+    let state = ensure_codex_native_bridge_ready()?;
+    http_json_request_local(
+        &state.bridge_host,
+        state.bridge_port,
+        "POST",
+        "/tasknerve/thread/open",
+        Some(&json!({
+            "thread_id": thread_id
+        })),
+    )
+}
+
+fn bootstrap_project_controller_thread(
+    repo_root: &Path,
+    project_name: &str,
+    force_new: bool,
+    open_thread: bool,
+) -> Result<serde_json::Value> {
+    let state = load_codex_thread_state(repo_root)?;
+    if !force_new
+        && let Some(existing) = state
+            .bindings
+            .iter()
+            .find(|binding| codex_is_controller_agent(&binding.agent_id))
+            .cloned()
+    {
+        return Ok(json!({
+            "ok": true,
+            "status": "already_bound",
+            "pin_supported": false,
+            "pinned": false,
+            "binding": existing,
+            "snapshot": codex_thread_snapshot_payload(repo_root)?
+        }));
+    }
+    let settings = load_project_codex_settings(repo_root)?;
+    let thread = start_codex_native_thread(repo_root, settings.controller_default_model.as_deref())?;
+    let thread_id = normalize_required_text(
+        thread["thread_id"]
+            .as_str()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
+        "controller thread id",
+    )?;
+    let title = format!("{}-Controller", project_name.trim());
+    let _ = set_codex_native_thread_name(&thread_id, &title)?;
+    let binding = bind_codex_thread_to_agent(
+        repo_root,
+        codex_controller_agent_id(),
+        thread_id.clone(),
+        Some(title.clone()),
+        None,
+    )?;
+    let prompt = build_codex_controller_bootstrap_prompt(repo_root, project_name)?;
+    let prompt_result = inject_prompt_into_codex_thread(
+        repo_root,
+        &thread_id,
+        &prompt,
+        settings.controller_default_model.as_deref(),
+        false,
+        None,
+    )?;
+    let opened = if open_thread {
+        open_codex_native_thread(&thread_id).is_ok()
+    } else {
+        false
+    };
+    Ok(json!({
+        "ok": true,
+        "status": "created",
+        "pin_supported": false,
+        "pinned": false,
+        "opened": opened,
+        "thread_id": thread_id,
+        "title": title,
+        "binding": binding,
+        "prompt_result": prompt_result,
+        "snapshot": codex_thread_snapshot_payload(repo_root)?
+    }))
+}
+
+fn task_gui_bootstrap_controller(
+    repo_root: &Path,
+    project_selector: Option<&str>,
+    body: &[u8],
+) -> Result<serde_json::Value> {
+    let request: TaskGuiControllerBootstrapRequest =
+        serde_json::from_slice(body).with_context(|| "invalid controller bootstrap payload")?;
+    let (_projects, selected, selected_repo) =
+        resolve_task_gui_project_selection(repo_root, project_selector)?;
+    let payload = bootstrap_project_controller_thread(
+        &selected_repo,
+        &selected.name,
+        request.force_new.unwrap_or(false),
+        request.open_thread.unwrap_or(true),
+    )?;
+    Ok(json!({
+        "ok": true,
+        "action": "controller_bootstrap",
+        "selected_project": {
+            "key": selected.key,
+            "name": selected.name,
+            "repo_root": selected.repo_root
+        },
+        "result": payload
+    }))
+}
+
 fn task_gui_run_advisor(
     repo_root: &Path,
     project_selector: Option<&str>,
@@ -16163,6 +17025,9 @@ fn task_gui_payload(repo_root: &Path, project_selector: Option<&str>) -> Result<
         .into_iter()
         .map(|idx| task_to_json_payload(&state.tasks[idx], &status_map))
         .collect::<Vec<_>>();
+    let project_documents = project_contract_documents_payload(&selected_repo)?;
+    let project_codex_settings = project_codex_settings_payload(&selected_repo)?;
+    let timeline = task_gui_timeline_branch_summary_payload(&selected_repo)?;
     Ok(json!({
         "schema_version": "tasknerve.task.gui.snapshot.v1",
         "generated_at_utc": now_utc(),
@@ -16173,7 +17038,10 @@ fn task_gui_payload(repo_root: &Path, project_selector: Option<&str>) -> Result<
         },
         "projects": projects,
         "timeline_initialized": timeline_is_initialized(&selected_repo),
+        "timeline": timeline,
         "policy": task_policy_payload(&state, &config),
+        "project_documents": project_documents,
+        "project_codex_settings": project_codex_settings,
         "count": tasks.len(),
         "tasks": tasks,
         "codex": codex_thread_snapshot_payload(&selected_repo).unwrap_or_else(|_| json!({
@@ -16183,6 +17051,149 @@ fn task_gui_payload(repo_root: &Path, project_selector: Option<&str>) -> Result<
             "bindings": [],
             "queued_prompts": []
         }))
+    }))
+}
+
+fn task_gui_timeline_branch_summary_payload(repo_root: &Path) -> Result<serde_json::Value> {
+    if !timeline_is_initialized(repo_root) {
+        return Ok(json!({
+            "timeline_initialized": false,
+            "active_branch": serde_json::Value::Null,
+            "branches": [],
+            "git_branch_hint": detect_git_branch(repo_root)
+        }));
+    }
+
+    let (_config, branches_state) = load_initialized_state(repo_root)?;
+    let mut branches = branches_state.branches.keys().cloned().collect::<Vec<_>>();
+    branches.sort();
+    Ok(json!({
+        "timeline_initialized": true,
+        "active_branch": branches_state.active_branch,
+        "branches": branches,
+        "git_branch_hint": detect_git_branch(repo_root)
+    }))
+}
+
+fn task_gui_switch_timeline_branch(
+    repo_root: &Path,
+    project_selector: Option<&str>,
+    body: &[u8],
+) -> Result<serde_json::Value> {
+    let request: TaskGuiTimelineBranchSwitchRequest =
+        serde_json::from_slice(body).with_context(|| "invalid timeline branch switch payload")?;
+    let (_projects, selected, selected_repo) =
+        resolve_task_gui_project_selection(repo_root, project_selector)?;
+    let branch_name = request.branch.trim();
+    if branch_name.is_empty() {
+        bail!("timeline branch cannot be empty");
+    }
+    let (_config, mut branches) = load_initialized_state(&selected_repo)?;
+    if !branches.branches.contains_key(branch_name) {
+        bail!("timeline branch does not exist: {}", branch_name);
+    }
+    branches.active_branch = branch_name.to_string();
+    write_pretty_json(&timeline_branches_path(&selected_repo), &branches)?;
+    Ok(json!({
+        "ok": true,
+        "action": "timeline_branch_switch",
+        "selected_project": {
+            "key": selected.key,
+            "name": selected.name,
+            "repo_root": selected.repo_root
+        },
+        "active_branch": branch_name,
+        "timeline": task_gui_timeline_branch_summary_payload(&selected_repo)?
+    }))
+}
+
+fn task_gui_create_timeline_branch(
+    repo_root: &Path,
+    project_selector: Option<&str>,
+    body: &[u8],
+) -> Result<serde_json::Value> {
+    let request: TaskGuiTimelineBranchCreateRequest =
+        serde_json::from_slice(body).with_context(|| "invalid timeline branch create payload")?;
+    let (_projects, selected, selected_repo) =
+        resolve_task_gui_project_selection(repo_root, project_selector)?;
+    let branch_name = request.name.trim();
+    if branch_name.is_empty() {
+        bail!("timeline branch cannot be empty");
+    }
+    validate_branch_name(branch_name)?;
+    let (_config, mut branches) = load_initialized_state(&selected_repo)?;
+    let active = branches.active_branch.clone();
+    if branches.branches.contains_key(branch_name) {
+        bail!("timeline branch already exists: {}", branch_name);
+    }
+
+    let from_pointer = branches
+        .branches
+        .get(&active)
+        .ok_or_else(|| anyhow!("active branch pointer missing: {}", active))?
+        .clone();
+
+    fs::create_dir_all(timeline_branch_root(&selected_repo, branch_name)).with_context(|| {
+        format!(
+            "failed creating timeline branch root {}",
+            timeline_branch_root(&selected_repo, branch_name).display()
+        )
+    })?;
+
+    let from_events = timeline_branch_events_path(&selected_repo, &active);
+    let to_events = timeline_branch_events_path(&selected_repo, branch_name);
+    if from_events.exists() {
+        fs::copy(&from_events, &to_events).with_context(|| {
+            format!(
+                "failed copying branch events {} -> {}",
+                from_events.display(),
+                to_events.display()
+            )
+        })?;
+    } else {
+        fs::write(&to_events, b"")?;
+    }
+
+    let from_index = timeline_branch_index_path(&selected_repo, &active);
+    let to_index = timeline_branch_index_path(&selected_repo, branch_name);
+    if from_index.exists() {
+        fs::copy(&from_index, &to_index).with_context(|| {
+            format!(
+                "failed copying branch index {} -> {}",
+                from_index.display(),
+                to_index.display()
+            )
+        })?;
+    } else {
+        write_pretty_json(&to_index, &BTreeMap::<String, FileRecord>::new())?;
+    }
+
+    branches.branches.insert(
+        branch_name.to_string(),
+        BranchPointer {
+            name: branch_name.to_string(),
+            head_event_id: from_pointer.head_event_id.clone(),
+            created_at_utc: now_utc(),
+            from_branch: Some(active.clone()),
+            from_event_id: from_pointer.head_event_id,
+        },
+    );
+    if request.switch.unwrap_or(true) {
+        branches.active_branch = branch_name.to_string();
+    }
+    write_pretty_json(&timeline_branches_path(&selected_repo), &branches)?;
+
+    Ok(json!({
+        "ok": true,
+        "action": "timeline_branch_create",
+        "selected_project": {
+            "key": selected.key,
+            "name": selected.name,
+            "repo_root": selected.repo_root
+        },
+        "created_branch": branch_name,
+        "switched": request.switch.unwrap_or(true),
+        "timeline": task_gui_timeline_branch_summary_payload(&selected_repo)?
     }))
 }
 
@@ -16328,37 +17339,74 @@ fn task_gui_html() -> &'static str {
   <title>tasknerve task board</title>
   <style>
     :root {
-      color-scheme: light;
-      --bg: #f6f7fb;
-      --card: #ffffff;
-      --ink: #111827;
-      --muted: #6b7280;
-      --border: #dbe2ef;
-      --open: #065f46;
-      --claimed: #92400e;
-      --done: #1e40af;
-      --blocked: #9f1239;
-      --ready: #15803d;
-      --timeline-task: #0f766e;
-      --timeline-file: #1d4ed8;
-      --danger: #b91c1c;
-      --accent: #0f172a;
+      color-scheme: dark;
+      --bg: #07111f;
+      --bg-accent: #0c1729;
+      --card: rgba(11, 21, 37, 0.94);
+      --card-soft: rgba(15, 25, 44, 0.84);
+      --ink: #e6eef8;
+      --muted: #8ea3bb;
+      --border: rgba(148, 163, 184, 0.18);
+      --open: #6ee7b7;
+      --claimed: #fbbf24;
+      --done: #93c5fd;
+      --blocked: #fb7185;
+      --ready: #4ade80;
+      --timeline-task: #2dd4bf;
+      --timeline-file: #60a5fa;
+      --danger: #fb7185;
+      --accent: #7dd3fc;
+      --accent-strong: #38bdf8;
+      --shadow: 0 20px 60px rgba(2, 6, 23, 0.38);
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: linear-gradient(180deg, #eef2ff 0%, var(--bg) 30%, var(--bg) 100%);
+      font-family: "Avenir Next", "Segoe UI Variable Display", "SF Pro Text", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(56, 189, 248, 0.12), transparent 28%),
+        radial-gradient(circle at top right, rgba(45, 212, 191, 0.08), transparent 24%),
+        linear-gradient(180deg, #08101c 0%, var(--bg) 100%);
       color: var(--ink);
     }
     header {
       padding: 18px 20px;
       border-bottom: 1px solid var(--border);
-      background: rgba(255,255,255,0.85);
-      backdrop-filter: blur(4px);
+      background: rgba(7, 15, 28, 0.84);
+      backdrop-filter: blur(18px);
       position: sticky;
       top: 0;
       z-index: 10;
+    }
+    .workspace-tabs {
+      display: flex;
+      gap: 10px;
+      padding: 14px 16px 0;
+    }
+    .workspace-tab {
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 10px 16px;
+      background: rgba(15, 23, 42, 0.72);
+      color: var(--muted);
+      font: inherit;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      cursor: pointer;
+      transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+    }
+    .workspace-tab.active {
+      color: #06101b;
+      background: linear-gradient(135deg, var(--accent) 0%, #67e8f9 100%);
+      border-color: transparent;
+      box-shadow: 0 10px 28px rgba(56, 189, 248, 0.28);
+    }
+    .workspace-page {
+      display: none;
+    }
+    .workspace-page.active {
+      display: block;
     }
     .head-row {
       display: flex;
@@ -16375,6 +17423,12 @@ fn task_gui_html() -> &'static str {
     }
     h1 { margin: 0; font-size: 20px; }
     .meta { margin-top: 6px; color: var(--muted); font-size: 13px; }
+    .section-title {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+    }
     .project-picker,
     .agent-input,
     .field input,
@@ -16386,7 +17440,7 @@ fn task_gui_html() -> &'static str {
     .editor-actions button {
       border: 1px solid var(--border);
       border-radius: 8px;
-      background: #fff;
+      background: rgba(8, 15, 28, 0.92);
       color: var(--ink);
       font: inherit;
     }
@@ -16401,19 +17455,16 @@ fn task_gui_html() -> &'static str {
     }
     main {
       padding: 16px;
-      display: grid;
+      display: flex;
+      flex-direction: column;
       gap: 16px;
-      grid-template-columns: 1fr;
-    }
-    @media (min-width: 1080px) {
-      main { grid-template-columns: 1.25fr 1fr; }
     }
     .panel {
-      background: rgba(255,255,255,0.82);
+      background: var(--card);
       border: 1px solid var(--border);
-      border-radius: 14px;
-      padding: 12px;
-      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.04);
+      border-radius: 18px;
+      padding: 14px;
+      box-shadow: var(--shadow);
     }
     .panel-top {
       display: flex;
@@ -16441,7 +17492,7 @@ fn task_gui_html() -> &'static str {
       flex-wrap: wrap;
     }
     .pill {
-      background: var(--card);
+      background: rgba(15, 23, 42, 0.72);
       border: 1px solid var(--border);
       border-radius: 999px;
       padding: 6px 10px;
@@ -16457,7 +17508,7 @@ fn task_gui_html() -> &'static str {
     .editor {
       border: 1px solid var(--border);
       border-radius: 12px;
-      background: #f8fafc;
+      background: var(--card-soft);
       padding: 12px;
       margin-bottom: 12px;
     }
@@ -16490,6 +17541,25 @@ fn task_gui_html() -> &'static str {
       min-height: 96px;
       resize: vertical;
     }
+    .task-toolbar {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    .task-filter {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .task-filter input {
+      min-width: 280px;
+      padding: 9px 10px;
+    }
     .field-span {
       grid-column: 1 / -1;
     }
@@ -16510,15 +17580,29 @@ fn task_gui_html() -> &'static str {
     }
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      grid-template-columns: 1fr;
       gap: 12px;
     }
     .card {
-      background: var(--card);
+      background: rgba(10, 18, 31, 0.92);
       border: 1px solid var(--border);
-      border-radius: 12px;
+      border-radius: 16px;
       padding: 12px;
-      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.04);
+      box-shadow: 0 10px 28px rgba(2, 6, 23, 0.22);
+    }
+    .task-card-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+      flex-wrap: wrap;
+    }
+    .task-header-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 0;
+      flex: 1 1 320px;
     }
     .row { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
     .title { margin: 0; font-size: 15px; font-weight: 700; }
@@ -16535,7 +17619,7 @@ fn task_gui_html() -> &'static str {
     .status-open { color: var(--open); background: #d1fae5; }
     .status-claimed { color: var(--claimed); background: #fef3c7; }
     .status-done { color: var(--done); background: #dbeafe; }
-    .detail { margin: 8px 0; font-size: 13px; color: #1f2937; white-space: pre-wrap; }
+    .detail { margin: 8px 0; font-size: 13px; color: #dbe7f5; white-space: pre-wrap; }
     .meta-row { font-size: 12px; color: var(--muted); margin-top: 6px; }
     .tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
     .tag {
@@ -16543,12 +17627,30 @@ fn task_gui_html() -> &'static str {
       border: 1px solid var(--border);
       border-radius: 999px;
       padding: 2px 7px;
-      color: #334155;
-      background: #f8fafc;
+      color: #c3d4e7;
+      background: rgba(15, 23, 42, 0.72);
     }
     .state { margin-top: 8px; font-size: 12px; }
     .ready { color: var(--ready); font-weight: 600; }
     .blocked { color: var(--blocked); font-weight: 600; }
+    .inline-priority {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 12px;
+      justify-content: flex-end;
+    }
+    .inline-priority input {
+      width: 92px;
+      padding: 7px 8px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: rgba(8, 15, 28, 0.92);
+      color: var(--ink);
+      font: inherit;
+    }
     .task-actions {
       display: flex;
       gap: 8px;
@@ -16581,7 +17683,7 @@ fn task_gui_html() -> &'static str {
       padding-right: 4px;
     }
     .timeline-row {
-      background: #fff;
+      background: rgba(10, 18, 31, 0.92);
       border: 1px solid var(--border);
       border-radius: 10px;
       padding: 10px;
@@ -16615,7 +17717,7 @@ fn task_gui_html() -> &'static str {
       border: 1px solid var(--border);
       border-radius: 12px;
       padding: 12px;
-      background: #f8fafc;
+      background: var(--card-soft);
     }
     .advisor-top {
       display: flex;
@@ -16635,7 +17737,7 @@ fn task_gui_html() -> &'static str {
     .advisor-shell button {
       border: 1px solid var(--border);
       border-radius: 8px;
-      background: #fff;
+      background: rgba(8, 15, 28, 0.92);
       color: var(--ink);
       font: inherit;
       padding: 8px 10px;
@@ -16653,7 +17755,7 @@ fn task_gui_html() -> &'static str {
       margin-top: 10px;
     }
     .run-row {
-      background: #fff;
+      background: rgba(10, 18, 31, 0.92);
       border: 1px solid var(--border);
       border-radius: 10px;
       padding: 9px 10px;
@@ -16670,7 +17772,7 @@ fn task_gui_html() -> &'static str {
       border: 1px solid var(--border);
       border-radius: 10px;
       padding: 10px;
-      background: #fff;
+      background: rgba(10, 18, 31, 0.92);
       font-size: 12px;
     }
     .advisor-run-detail pre,
@@ -16679,7 +17781,7 @@ fn task_gui_html() -> &'static str {
       word-break: break-word;
       margin: 8px 0 0;
       font: inherit;
-      color: #334155;
+      color: #dbe7f5;
     }
     .empty {
       margin-top: 20px;
@@ -16688,7 +17790,16 @@ fn task_gui_html() -> &'static str {
       border-radius: 12px;
       color: var(--muted);
       text-align: center;
-      background: var(--card);
+      background: rgba(10, 18, 31, 0.72);
+    }
+    code {
+      font-family: "SF Mono", "IBM Plex Mono", monospace;
+      color: var(--accent);
+    }
+    @media (max-width: 860px) {
+      .task-filter input {
+        min-width: 180px;
+      }
     }
   </style>
 </head>
@@ -16705,14 +17816,28 @@ fn task_gui_html() -> &'static str {
     </div>
     <div class="meta" id="meta">loading...</div>
   </header>
+  <div class="workspace-tabs" role="tablist" aria-label="TaskNerve workspaces">
+    <button id="tasksTab" class="workspace-tab" type="button" data-tab="tasks">task lists</button>
+    <button id="controlsTab" class="workspace-tab" type="button" data-tab="controls">controls</button>
+  </div>
   <main>
-    <section class="panel">
+    <section class="panel workspace-page" id="tasksWorkspace">
       <div class="panel-top">
-        <div class="summary" id="summary"></div>
+        <div>
+          <div class="section-title">task lists</div>
+          <div class="meta">Review, edit, and reprioritize the current project's queue without leaving TaskNerve.</div>
+        </div>
         <div class="panel-actions">
           <button id="newTaskButton" type="button">new task</button>
           <button id="refreshTasks" type="button">refresh</button>
         </div>
+      </div>
+      <div class="task-toolbar">
+        <div class="summary" id="summary"></div>
+        <label class="task-filter">
+          <span>filter</span>
+          <input id="taskSearchInput" type="text" autocomplete="off" placeholder="search by title, id, detail, or tag">
+        </label>
       </div>
       <form id="taskEditor" class="editor" style="display:none;">
         <div class="editor-top">
@@ -16750,6 +17875,7 @@ fn task_gui_html() -> &'static str {
       <div class="grid" id="tasks"></div>
       <div class="empty" id="empty" style="display:none;">No tasks yet. Create one here or import a backlog with <code>tasknerve task import --file /path/to/tasks.tsv</code>.</div>
     </section>
+    <section class="workspace-page" id="controlsWorkspace">
     <section class="panel">
       <div class="panel-stack">
         <section class="advisor-shell">
@@ -16873,20 +17999,24 @@ fn task_gui_html() -> &'static str {
         <div class="empty" id="timelineEmpty" style="display:none;">No timeline events yet for this branch.</div>
       </div>
     </section>
+    </section>
   </main>
   <script>
     const byId = (id) => document.getElementById(id);
     const params = new URLSearchParams(window.location.search);
     let selectedProject = params.get("project") || "";
     let selectedBranch = params.get("branch") || "";
+    let selectedWorkspaceTab = params.get("tab") || localStorage.getItem("tasknerve.task.gui.tab") || "tasks";
     let advisorSelectedRunId = "";
     let codexSnapshotState = { payload: null };
     let timelineOffset = 0;
     let timelineHasMore = false;
     let timelineRows = [];
     let timelineLoading = false;
+    let latestTasks = [];
     const TIMELINE_PAGE_SIZE = 120;
     const EDITOR_STORAGE_KEY = "tasknerve.task.gui.agent";
+    const WORKSPACE_TAB_STORAGE_KEY = "tasknerve.task.gui.tab";
 
     const escapeHtml = (value) => String(value ?? "")
       .replace(/&/g, "&amp;")
@@ -16925,7 +18055,24 @@ fn task_gui_html() -> &'static str {
       } else {
         next.searchParams.delete("branch");
       }
+      if (selectedWorkspaceTab) {
+        next.searchParams.set("tab", selectedWorkspaceTab);
+      } else {
+        next.searchParams.delete("tab");
+      }
       window.history.replaceState({}, "", next.toString());
+    };
+
+    const selectWorkspaceTab = (tab) => {
+      selectedWorkspaceTab = tab === "controls" ? "controls" : "tasks";
+      localStorage.setItem(WORKSPACE_TAB_STORAGE_KEY, selectedWorkspaceTab);
+      byId("tasksTab").classList.toggle("active", selectedWorkspaceTab === "tasks");
+      byId("controlsTab").classList.toggle("active", selectedWorkspaceTab === "controls");
+      byId("tasksWorkspace").classList.toggle("active", selectedWorkspaceTab === "tasks");
+      byId("controlsWorkspace").classList.toggle("active", selectedWorkspaceTab === "controls");
+      byId("tasksTab").setAttribute("aria-selected", selectedWorkspaceTab === "tasks" ? "true" : "false");
+      byId("controlsTab").setAttribute("aria-selected", selectedWorkspaceTab === "controls" ? "true" : "false");
+      syncUrl();
     };
 
     const resetTimeline = () => {
@@ -17470,6 +18617,7 @@ fn task_gui_html() -> &'static str {
     }
 
     const renderTasks = (tasks) => {
+      latestTasks = Array.isArray(tasks) ? tasks.slice() : [];
       const editor = byId("taskEditor");
       if (editor.dataset.mode === "edit" && editor.dataset.taskId) {
         const stillExists = tasks.some((task) => task.task_id === editor.dataset.taskId);
@@ -17477,8 +18625,23 @@ fn task_gui_html() -> &'static str {
           closeEditor();
         }
       }
-      byId("empty").style.display = tasks.length === 0 ? "block" : "none";
-      byId("tasks").innerHTML = tasks.map((task) => {
+      const query = byId("taskSearchInput").value.trim().toLowerCase();
+      const visibleTasks = !query
+        ? tasks
+        : tasks.filter((task) => {
+            const haystack = [
+              task.task_id,
+              task.title,
+              task.detail,
+              ...(task.tags || [])
+            ].filter(Boolean).join(" ").toLowerCase();
+            return haystack.includes(query);
+          });
+      byId("empty").style.display = visibleTasks.length === 0 ? "block" : "none";
+      byId("empty").innerHTML = tasks.length === 0
+        ? `No tasks yet. Create one here or import a backlog with <code>tasknerve task import --file /path/to/tasks.tsv</code>.`
+        : `No tasks match <code>${escapeHtml(query)}</code> in this project.`;
+      byId("tasks").innerHTML = visibleTasks.map((task) => {
         const tags = (task.tags || [])
           .map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`)
           .join("");
@@ -17514,13 +18677,30 @@ fn task_gui_html() -> &'static str {
         const autoReplenishMeta = task.auto_replenish
           ? `<div class="meta-row">auto replenish: ${escapeHtml(task.source_key || "system")}</div>`
           : "";
+        const inlinePriorityInputId = `taskPriorityInline_${task.task_id}`;
+        const priorityControls = task.status === "done"
+          ? `<div class="inline-priority"><span>completed task</span></div>`
+          : `
+              <div class="inline-priority">
+                <span>priority</span>
+                <input id="${escapeHtml(inlinePriorityInputId)}" class="task-priority-input" type="number" step="1" value="${escapeHtml(task.priority)}">
+                <button type="button" class="ghost-button save-task-priority" data-task-id="${escapeHtml(task.task_id)}" data-input-id="${escapeHtml(inlinePriorityInputId)}">save</button>
+                <button type="button" class="ghost-button shift-task-priority" data-task-id="${escapeHtml(task.task_id)}" data-direction="up">earlier</button>
+                <button type="button" class="ghost-button shift-task-priority" data-task-id="${escapeHtml(task.task_id)}" data-direction="down">later</button>
+              </div>
+            `;
         return `
           <article class="card">
-            <div class="row">
-              <h2 class="title">${escapeHtml(task.title || "(untitled)")}</h2>
-              <span class="status ${statusClass(task.status)}">${escapeHtml(task.status)}</span>
+            <div class="task-card-header">
+              <div class="task-header-stack">
+                <div class="row">
+                  <h2 class="title">${escapeHtml(task.title || "(untitled)")}</h2>
+                  <span class="status ${statusClass(task.status)}">${escapeHtml(task.status)}</span>
+                </div>
+                <div class="priority">id: ${escapeHtml(task.task_id)} • priority: ${escapeHtml(task.priority)}</div>
+              </div>
+              ${priorityControls}
             </div>
-            <div class="priority">id: ${escapeHtml(task.task_id)} • priority: ${escapeHtml(task.priority)}</div>
             ${detail}
             <div class="meta-row">claimed by: ${escapeHtml(task.claimed_by_agent_id || "none")}</div>
             <div class="meta-row">depends on: ${escapeHtml(deps || "none")}</div>
@@ -17534,7 +18714,7 @@ fn task_gui_html() -> &'static str {
             <div class="tags">${tags}</div>
             <div class="task-actions">
               ${approveButton}
-              <button type="button" class="ghost-button edit-task" data-task-id="${escapeHtml(task.task_id)}">edit</button>
+              <button type="button" class="ghost-button edit-task" data-task-id="${escapeHtml(task.task_id)}">edit text</button>
               <button type="button" class="ghost-button danger-button remove-task" data-task-id="${escapeHtml(task.task_id)}">remove</button>
             </div>
           </article>
@@ -17598,6 +18778,71 @@ fn task_gui_html() -> &'static str {
           } catch (error) {
             setActionMessage(`approve failed: ${error}`, "error");
           }
+        };
+      });
+
+      const persistPriority = async (task, nextPriority) => {
+        if (!task) return;
+        if (nextPriority == null || nextPriority === "") {
+          setActionMessage("priority update is unavailable for that task", "error");
+          return;
+        }
+        const parsed = Number(nextPriority);
+        if (!Number.isFinite(parsed)) {
+          setActionMessage("priority must be a number", "error");
+          return;
+        }
+        if (parsed === Number(task.priority || 0)) {
+          return;
+        }
+        try {
+          const payload = { task_id: task.task_id, priority: parsed };
+          const agent = currentAgentId();
+          if (agent) payload.agent = agent;
+          const response = await fetch(`/api/tasks/edit${projectQuery()}`, {
+            method: "POST",
+            cache: "no-store",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+          await readJsonResponse(response);
+          setActionMessage(`reprioritized ${task.task_id} to ${parsed}`);
+          await refresh();
+          await refreshTimeline(true);
+        } catch (error) {
+          setActionMessage(`priority update failed: ${error}`, "error");
+        }
+      };
+
+      const shiftedPriority = (task, direction) => {
+        if (!task || task.status === "done") return null;
+        const activeTasks = tasks.filter((candidate) => candidate.status !== "done");
+        const index = activeTasks.findIndex((candidate) => candidate.task_id === task.task_id);
+        if (index === -1) return null;
+        if (direction === "up") {
+          if (index === 0) return Number(task.priority || 0) + 1;
+          return Number(activeTasks[index - 1].priority || 0) + 1;
+        }
+        if (direction === "down") {
+          if (index === activeTasks.length - 1) return Number(task.priority || 0) - 1;
+          return Number(activeTasks[index + 1].priority || 0) - 1;
+        }
+        return null;
+      };
+
+      byId("tasks").querySelectorAll(".save-task-priority").forEach((button) => {
+        button.onclick = async () => {
+          const task = tasks.find((candidate) => candidate.task_id === button.dataset.taskId);
+          const input = byId(button.dataset.inputId || "");
+          await persistPriority(task, input ? input.value : "");
+        };
+      });
+
+      byId("tasks").querySelectorAll(".shift-task-priority").forEach((button) => {
+        button.onclick = async () => {
+          const task = tasks.find((candidate) => candidate.task_id === button.dataset.taskId);
+          const nextPriority = shiftedPriority(task, button.dataset.direction || "");
+          await persistPriority(task, nextPriority);
         };
       });
     };
@@ -17992,6 +19237,17 @@ fn task_gui_html() -> &'static str {
     };
     agentInput.onblur = agentInput.onchange;
 
+    byId("tasksTab").onclick = () => {
+      selectWorkspaceTab("tasks");
+    };
+    byId("controlsTab").onclick = () => {
+      selectWorkspaceTab("controls");
+    };
+    byId("taskSearchInput").oninput = () => {
+      renderTasks(latestTasks);
+    };
+
+    selectWorkspaceTab(selectedWorkspaceTab);
     refresh().then(() => refreshAdvisor()).then(() => refreshTimeline(true));
     setInterval(() => {
       if (!document.hidden) {
@@ -22301,6 +23557,683 @@ fn emit_advisor_provider_payload(provider: &AdvisorProvider, json: bool) -> Resu
     Ok(())
 }
 
+fn project_goals_path(repo_root: &Path) -> PathBuf {
+    repo_root.join(PROJECT_GOALS_FILE)
+}
+
+fn project_manifest_path(repo_root: &Path) -> PathBuf {
+    repo_root.join(PROJECT_MANIFEST_FILE)
+}
+
+fn collect_project_top_level_entries(repo_root: &Path, limit: usize) -> Vec<String> {
+    let mut rows = fs::read_dir(repo_root)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(Result::ok))
+        .filter_map(|entry| entry.file_name().to_str().map(ToString::to_string))
+        .filter(|name| !IGNORE_ROOT_ENTRIES.contains(&name.as_str()))
+        .collect::<Vec<_>>();
+    rows.sort();
+    rows.truncate(limit);
+    rows
+}
+
+fn repo_contains_extension(repo_root: &Path, extensions: &[&str]) -> bool {
+    let targets = extensions
+        .iter()
+        .map(|value| value.trim_start_matches('.').to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    if targets.is_empty() {
+        return false;
+    }
+    let walker = WalkDir::new(repo_root)
+        .max_depth(4)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file());
+    for entry in walker.take(300) {
+        let Some(extension) = entry.path().extension().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if targets.contains(&extension.to_ascii_lowercase()) {
+            return true;
+        }
+    }
+    false
+}
+
+fn package_json_payload(repo_root: &Path) -> Option<serde_json::Value> {
+    let path = repo_root.join("package.json");
+    let bytes = fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn package_json_dependency_names(payload: &serde_json::Value) -> Vec<String> {
+    let mut rows = Vec::<String>::new();
+    for section in ["dependencies", "devDependencies", "peerDependencies"] {
+        if let Some(object) = payload.get(section).and_then(serde_json::Value::as_object) {
+            rows.extend(object.keys().cloned());
+        }
+    }
+    dedupe_keep_order(rows)
+}
+
+fn package_json_script_commands(payload: &serde_json::Value) -> Vec<String> {
+    let Some(object) = payload.get("scripts").and_then(serde_json::Value::as_object) else {
+        return Vec::new();
+    };
+    let mut commands = Vec::<String>::new();
+    for key in ["build", "test", "dev", "start", "lint", "check"] {
+        if object.contains_key(key) {
+            commands.push(format!("npm run {key}"));
+        }
+    }
+    commands
+}
+
+fn cargo_dependency_names(repo_root: &Path) -> Vec<String> {
+    let path = repo_root.join("Cargo.toml");
+    let Ok(raw) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut rows = Vec::<String>::new();
+    let mut in_dependencies = false;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_dependencies = matches!(
+                trimmed,
+                "[dependencies]" | "[dev-dependencies]" | "[workspace.dependencies]"
+            );
+            continue;
+        }
+        if !in_dependencies {
+            continue;
+        }
+        let Some((name, _value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let token = name.trim();
+        if !token.is_empty() && token.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
+            rows.push(token.to_string());
+        }
+    }
+    dedupe_keep_order(rows)
+}
+
+fn detect_project_languages(repo_root: &Path) -> Vec<String> {
+    let mut rows = Vec::<String>::new();
+    if repo_root.join("Cargo.toml").exists() || repo_contains_extension(repo_root, &["rs"]) {
+        rows.push("Rust".to_string());
+    }
+    if repo_root.join("tsconfig.json").exists()
+        || repo_contains_extension(repo_root, &["ts", "tsx", "mts", "cts"])
+    {
+        rows.push("TypeScript".to_string());
+    }
+    if repo_root.join("package.json").exists()
+        || repo_contains_extension(repo_root, &["js", "jsx", "mjs", "cjs"])
+    {
+        rows.push("JavaScript".to_string());
+    }
+    if repo_root.join("pyproject.toml").exists()
+        || repo_root.join("requirements.txt").exists()
+        || repo_contains_extension(repo_root, &["py"])
+    {
+        rows.push("Python".to_string());
+    }
+    if repo_root.join("go.mod").exists() || repo_contains_extension(repo_root, &["go"]) {
+        rows.push("Go".to_string());
+    }
+    if repo_root.join("Gemfile").exists() || repo_contains_extension(repo_root, &["rb"]) {
+        rows.push("Ruby".to_string());
+    }
+    if repo_root.join("Package.swift").exists() || repo_contains_extension(repo_root, &["swift"]) {
+        rows.push("Swift".to_string());
+    }
+    if repo_contains_extension(repo_root, &["java"]) {
+        rows.push("Java".to_string());
+    }
+    dedupe_keep_order(rows)
+}
+
+fn detect_project_toolchains(repo_root: &Path) -> Vec<String> {
+    let mut rows = Vec::<String>::new();
+    if repo_root.join("Cargo.toml").exists() {
+        rows.push("Cargo".to_string());
+    }
+    if repo_root.join("package.json").exists() {
+        rows.push("npm-compatible package.json".to_string());
+    }
+    if repo_root.join("pnpm-lock.yaml").exists() {
+        rows.push("pnpm".to_string());
+    }
+    if repo_root.join("yarn.lock").exists() {
+        rows.push("Yarn".to_string());
+    }
+    if repo_root.join("pyproject.toml").exists() {
+        rows.push("pyproject.toml".to_string());
+    }
+    if repo_root.join("requirements.txt").exists() {
+        rows.push("requirements.txt".to_string());
+    }
+    if repo_root.join("go.mod").exists() {
+        rows.push("Go modules".to_string());
+    }
+    if repo_root.join("Gemfile").exists() {
+        rows.push("Bundler".to_string());
+    }
+    if repo_root.join("Makefile").exists() {
+        rows.push("Makefile".to_string());
+    }
+    dedupe_keep_order(rows)
+}
+
+fn detect_project_libraries(repo_root: &Path) -> Vec<String> {
+    let mut rows = cargo_dependency_names(repo_root);
+    if let Some(payload) = package_json_payload(repo_root) {
+        rows.extend(package_json_dependency_names(&payload));
+    }
+    if rows.len() > 12 {
+        rows.truncate(12);
+    }
+    dedupe_keep_order(rows)
+}
+
+fn detect_project_patterns(repo_root: &Path) -> Vec<String> {
+    let mut rows = Vec::<String>::new();
+    if repo_root.join("src").is_dir() {
+        rows.push("source lives under `src/`".to_string());
+    }
+    if repo_root.join("docs").is_dir() {
+        rows.push("documentation lives alongside code in `docs/`".to_string());
+    }
+    if repo_root.join("templates").is_dir() {
+        rows.push("template-driven assets or generated artifacts".to_string());
+    }
+    if repo_root.join("skills").is_dir() {
+        rows.push("Codex skill or agent integration is shipped from the repo".to_string());
+    }
+    if repo_root.join("tests").is_dir()
+        || repo_root.join("__tests__").is_dir()
+    {
+        rows.push("repository uses dedicated test surfaces".to_string());
+    }
+    if repo_root.join(".github").join("workflows").is_dir() {
+        rows.push("GitHub workflow automation is present".to_string());
+    }
+    if repo_root.join(".tasknerve").exists() {
+        rows.push("TaskNerve timeline state is already initialized".to_string());
+    }
+    if repo_root.join("apps").is_dir() || repo_root.join("packages").is_dir() {
+        rows.push("workspace or multi-package layout".to_string());
+    }
+    dedupe_keep_order(rows)
+}
+
+fn detect_project_suggested_commands(repo_root: &Path) -> Vec<String> {
+    let mut rows = Vec::<String>::new();
+    if repo_root.join("Cargo.toml").exists() {
+        rows.extend([
+            "cargo build".to_string(),
+            "cargo test".to_string(),
+            "cargo run".to_string(),
+        ]);
+    }
+    if let Some(payload) = package_json_payload(repo_root) {
+        rows.extend(package_json_script_commands(&payload));
+    }
+    if repo_root.join("pyproject.toml").exists() || repo_root.join("requirements.txt").exists() {
+        rows.extend([
+            "python -m pytest".to_string(),
+            "python -m pip install -r requirements.txt".to_string(),
+        ]);
+    }
+    if repo_root.join("Makefile").exists() {
+        rows.extend(["make build".to_string(), "make test".to_string()]);
+    }
+    dedupe_keep_order(rows)
+}
+
+fn collect_project_contract_summary(repo_root: &Path) -> ProjectContractSummary {
+    let repo_name = repo_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("project")
+        .to_string();
+    ProjectContractSummary {
+        repo_name,
+        languages: detect_project_languages(repo_root),
+        toolchains: detect_project_toolchains(repo_root),
+        libraries: detect_project_libraries(repo_root),
+        patterns: detect_project_patterns(repo_root),
+        notable_files: collect_advisor_interesting_files(repo_root)
+            .into_iter()
+            .take(12)
+            .collect(),
+        top_level_entries: collect_project_top_level_entries(repo_root, 20),
+        suggested_commands: detect_project_suggested_commands(repo_root),
+    }
+}
+
+fn render_markdown_bullets(items: &[String], fallback: &str) -> String {
+    if items.is_empty() {
+        return format!("- {fallback}");
+    }
+    items
+        .iter()
+        .map(|line| format!("- {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_project_goals_template(repo_root: &Path, summary: &ProjectContractSummary) -> String {
+    format!(
+        r#"# Project Goals
+
+Status: draft
+Managed by: TaskNerve
+Last generated: {generated_at}
+
+This file locks the user-approved outcomes for this project. Update it when goals change. Technical implementation choices belong in `project_manifest.md`.
+
+## Current Project Snapshot
+- Repository: `{repo_name}`
+- Repo root: `{repo_root}`
+
+### Detected languages
+{languages}
+
+### Detected toolchains and package managers
+{toolchains}
+
+### Notable files
+{notable_files}
+
+### Current project structure signals
+{patterns}
+
+## Overarching Goals
+- [ ] Define the primary outcome this project must achieve.
+- [ ] Define the next major milestone that matters most right now.
+- [ ] Define the quality bar that decides when the project is meaningfully "done".
+
+## Non-Goals
+- [ ] Record work that this project should explicitly avoid.
+
+## Constraints
+- [ ] Record hard constraints: platform, compatibility, performance, cost, UX, security, deadline, or legal requirements.
+
+## Open Questions For The User
+- [ ] Which outcome matters most right now?
+- [ ] Which tradeoffs are unacceptable?
+- [ ] Which parts of the current repo are experimental versus locked in?
+- [ ] What would make the project feel complete?
+
+## Lock Status
+- [ ] Mark this file as locked once the user and controller agree the goals are stable.
+"#,
+        generated_at = now_utc(),
+        repo_name = summary.repo_name,
+        repo_root = repo_root.display(),
+        languages = render_markdown_bullets(
+            &summary.languages,
+            "Fill in the primary implementation language once the project is reviewed.",
+        ),
+        toolchains = render_markdown_bullets(
+            &summary.toolchains,
+            "Fill in the intended build and package toolchain.",
+        ),
+        notable_files = render_markdown_bullets(
+            &summary.notable_files,
+            "Add the most important files or directories once they are identified.",
+        ),
+        patterns = render_markdown_bullets(
+            &summary.patterns,
+            "Describe the repo layout and architectural shape after the first review pass.",
+        ),
+    )
+}
+
+fn render_project_manifest_template(
+    repo_root: &Path,
+    summary: &ProjectContractSummary,
+) -> String {
+    format!(
+        r#"# Project Manifest
+
+Status: draft
+Managed by: TaskNerve
+Last generated: {generated_at}
+
+This file locks the technical contract for how `project_goals.md` will be achieved. Use it to record approved languages, libraries, software patterns, commands, and engineering constraints.
+
+## Current Technical Snapshot
+- Repository: `{repo_name}`
+- Repo root: `{repo_root}`
+
+### Languages and runtimes detected
+{languages}
+
+### Toolchains and package managers detected
+{toolchains}
+
+### Likely frameworks and libraries detected
+{libraries}
+
+### Notable files
+{notable_files}
+
+### Current project structure signals
+{patterns}
+
+### Suggested working commands
+{suggested_commands}
+
+### Top-level entries
+{top_level_entries}
+
+## Technical Contract
+
+### Languages and runtimes
+- Primary implementation language(s):
+- Approved secondary language(s):
+- Runtime targets and supported platforms:
+
+### Libraries and frameworks
+- Preferred libraries and frameworks:
+- Libraries that should be avoided unless explicitly approved:
+
+### Architecture and software patterns
+- Module or service boundaries:
+- State and data-flow rules:
+- Error handling and logging expectations:
+- Concurrency, async, or threading model:
+- UI, API, or storage patterns that should be followed:
+
+### Quality gates
+- Required build, lint, test, and verification commands:
+- Required review expectations:
+- Required docs or release notes updates:
+
+### Delivery rules
+- Migration and compatibility strategy:
+- Performance, security, and cost constraints:
+- Rules for introducing new dependencies or patterns:
+
+## Open Questions For The User
+- [ ] Which current stack choices are intentional versus historical accidents?
+- [ ] Which libraries are mandatory versus replaceable?
+- [ ] Which software patterns should never be introduced here?
+- [ ] Which quality gates are non-negotiable before work is considered done?
+
+## Lock Status
+- [ ] Mark this file as locked once the user and controller agree the technical contract is stable.
+"#,
+        generated_at = now_utc(),
+        repo_name = summary.repo_name,
+        repo_root = repo_root.display(),
+        languages = render_markdown_bullets(
+            &summary.languages,
+            "Fill in the intended implementation language and runtime targets.",
+        ),
+        toolchains = render_markdown_bullets(
+            &summary.toolchains,
+            "Fill in the intended toolchain and package manager.",
+        ),
+        libraries = render_markdown_bullets(
+            &summary.libraries,
+            "Fill in the approved core libraries or frameworks after review.",
+        ),
+        notable_files = render_markdown_bullets(
+            &summary.notable_files,
+            "Add the main entrypoints, docs, or config files once identified.",
+        ),
+        patterns = render_markdown_bullets(
+            &summary.patterns,
+            "Describe the architectural patterns the repo should follow.",
+        ),
+        suggested_commands = render_markdown_bullets(
+            &summary.suggested_commands,
+            "Add build, test, run, and lint commands after the first controller pass.",
+        ),
+        top_level_entries = render_markdown_bullets(
+            &summary.top_level_entries,
+            "Record the top-level repo layout after initial review.",
+        ),
+    )
+}
+
+fn ensure_project_contract_file(path: &Path, template: &str) -> Result<ProjectContractFile> {
+    let seeded = match fs::read_to_string(path) {
+        Ok(existing) if !existing.trim().is_empty() => {
+            return Ok(ProjectContractFile {
+                path: path.to_path_buf(),
+                seeded: false,
+                markdown: existing,
+            });
+        }
+        Ok(_) => {
+            fs::write(path, template)
+                .with_context(|| format!("failed writing {}", path.display()))?;
+            true
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            fs::write(path, template)
+                .with_context(|| format!("failed writing {}", path.display()))?;
+            true
+        }
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed reading {}", path.display()));
+        }
+    };
+    let markdown =
+        fs::read_to_string(path).with_context(|| format!("failed reading {}", path.display()))?;
+    Ok(ProjectContractFile {
+        path: path.to_path_buf(),
+        seeded,
+        markdown,
+    })
+}
+
+fn ensure_project_contract_documents(repo_root: &Path) -> Result<ProjectContractDocuments> {
+    let summary = collect_project_contract_summary(repo_root);
+    Ok(ProjectContractDocuments {
+        goals: ensure_project_contract_file(
+            &project_goals_path(repo_root),
+            &render_project_goals_template(repo_root, &summary),
+        )?,
+        manifest: ensure_project_contract_file(
+            &project_manifest_path(repo_root),
+            &render_project_manifest_template(repo_root, &summary),
+        )?,
+    })
+}
+
+fn project_contract_documents_payload(repo_root: &Path) -> Result<serde_json::Value> {
+    let documents = ensure_project_contract_documents(repo_root)?;
+    Ok(json!({
+        "goals": {
+            "path": documents.goals.path.display().to_string(),
+            "seeded": documents.goals.seeded,
+            "markdown": documents.goals.markdown
+        },
+        "manifest": {
+            "path": documents.manifest.path.display().to_string(),
+            "seeded": documents.manifest.seeded,
+            "markdown": documents.manifest.markdown
+        }
+    }))
+}
+
+fn detect_git_origin_url(repo_root: &Path) -> Option<String> {
+    let output = ProcessCommand::new("git")
+        .current_dir(repo_root)
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let token = stdout.trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
+fn repo_has_git_work_tree(repo_root: &Path) -> bool {
+    ProcessCommand::new("git")
+        .current_dir(repo_root)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim() == "true")
+        .unwrap_or(false)
+}
+
+fn set_git_origin_url(repo_root: &Path, url: &str) -> Result<bool> {
+    if !repo_has_git_work_tree(repo_root) {
+        return Ok(false);
+    }
+    let existing = detect_git_origin_url(repo_root);
+    if existing.as_deref() == Some(url) {
+        return Ok(true);
+    }
+    let status = if existing.is_some() {
+        ProcessCommand::new("git")
+            .current_dir(repo_root)
+            .args(["remote", "set-url", "origin", url])
+            .status()
+            .with_context(|| "failed invoking git remote set-url origin")?
+    } else {
+        ProcessCommand::new("git")
+            .current_dir(repo_root)
+            .args(["remote", "add", "origin", url])
+            .status()
+            .with_context(|| "failed invoking git remote add origin")?
+    };
+    if !status.success() {
+        bail!("failed updating git origin url");
+    }
+    Ok(true)
+}
+
+fn default_project_codex_settings(repo_root: &Path) -> ProjectCodexSettings {
+    ProjectCodexSettings {
+        schema_version: SCHEMA_PROJECT_CODEX_SETTINGS.to_string(),
+        updated_at_utc: now_utc(),
+        heartbeat_message_core: default_project_codex_heartbeat_message_core(),
+        low_queue_controller_prompt: default_project_codex_low_queue_controller_prompt(),
+        low_queue_controller_enabled: true,
+        worker_single_message_mode: true,
+        worker_model_routing_enabled: false,
+        worker_default_model: None,
+        controller_default_model: None,
+        low_intelligence_model: None,
+        medium_intelligence_model: None,
+        high_intelligence_model: None,
+        max_intelligence_model: None,
+        git_origin_url: detect_git_origin_url(repo_root),
+    }
+}
+
+fn load_project_codex_settings(repo_root: &Path) -> Result<ProjectCodexSettings> {
+    let path = timeline_project_codex_settings_path(repo_root);
+    let exists = path.exists();
+    let mut state = load_json_optional::<ProjectCodexSettings>(&path)?
+        .unwrap_or_else(|| default_project_codex_settings(repo_root));
+    let mut changed = !exists;
+    if state.schema_version.trim().is_empty() {
+        state.schema_version = SCHEMA_PROJECT_CODEX_SETTINGS.to_string();
+        changed = true;
+    }
+    if state.updated_at_utc.trim().is_empty() {
+        state.updated_at_utc = now_utc();
+        changed = true;
+    }
+    if state.heartbeat_message_core.trim().is_empty() {
+        state.heartbeat_message_core = default_project_codex_heartbeat_message_core();
+        changed = true;
+    }
+    if state.low_queue_controller_prompt.trim().is_empty() {
+        state.low_queue_controller_prompt = default_project_codex_low_queue_controller_prompt();
+        changed = true;
+    }
+    if state.git_origin_url.is_none() {
+        if let Some(origin) = detect_git_origin_url(repo_root) {
+            state.git_origin_url = Some(origin);
+            changed = true;
+        }
+    }
+    if changed {
+        write_pretty_json(&path, &state)?;
+    }
+    Ok(state)
+}
+
+fn write_project_codex_settings(repo_root: &Path, state: &ProjectCodexSettings) -> Result<()> {
+    write_pretty_json(&timeline_project_codex_settings_path(repo_root), state)
+}
+
+fn sync_project_codex_worker_heartbeat_messages(
+    repo_root: &Path,
+    heartbeat_message: &str,
+) -> Result<bool> {
+    let normalized = normalize_optional_text(
+        Some(heartbeat_message.to_string()),
+        "project heartbeat message core",
+    )?;
+    let Some(template) = normalized else {
+        return Ok(false);
+    };
+    let mut state = load_codex_thread_state(repo_root)?;
+    let mut changed = false;
+    for binding in &mut state.bindings {
+        if codex_is_controller_agent(&binding.agent_id) {
+            continue;
+        }
+        if binding.heartbeat_message.as_deref() != Some(template.as_str()) {
+            binding.heartbeat_message = Some(template.clone());
+            binding.updated_at_utc = now_utc();
+            changed = true;
+        }
+    }
+    if changed {
+        state.updated_at_utc = now_utc();
+        write_codex_thread_state(repo_root, &state)?;
+    }
+    Ok(changed)
+}
+
+fn project_codex_settings_payload(repo_root: &Path) -> Result<serde_json::Value> {
+    let settings = load_project_codex_settings(repo_root)?;
+    let actual_git_origin_url = detect_git_origin_url(repo_root);
+    Ok(json!({
+        "schema_version": settings.schema_version,
+        "updated_at_utc": settings.updated_at_utc,
+        "heartbeat_message_core": settings.heartbeat_message_core,
+        "low_queue_controller_prompt": settings.low_queue_controller_prompt,
+        "low_queue_controller_enabled": settings.low_queue_controller_enabled,
+        "worker_single_message_mode": settings.worker_single_message_mode,
+        "worker_model_routing_enabled": settings.worker_model_routing_enabled,
+        "worker_default_model": settings.worker_default_model,
+        "controller_default_model": settings.controller_default_model,
+        "low_intelligence_model": settings.low_intelligence_model,
+        "medium_intelligence_model": settings.medium_intelligence_model,
+        "high_intelligence_model": settings.high_intelligence_model,
+        "max_intelligence_model": settings.max_intelligence_model,
+        "git_origin_url": settings.git_origin_url,
+        "actual_git_origin_url": actual_git_origin_url
+    }))
+}
+
 fn ensure_advisor_state(repo_root: &Path) -> Result<AdvisorState> {
     let path = timeline_advisor_state_path(repo_root);
     let mut state =
@@ -22693,12 +24626,14 @@ fn advisor_snapshot_payload(repo_root: &Path, limit: usize) -> Result<serde_json
     let reviewer_worker = load_advisor_worker_state(repo_root, AdvisorRoleArg::Reviewer, &state)?;
     let task_manager_worker =
         load_advisor_worker_state(repo_root, AdvisorRoleArg::TaskManager, &state)?;
+    let project_documents = project_contract_documents_payload(repo_root)?;
     Ok(json!({
         "schema_version": "tasknerve.advisor.snapshot.v1",
         "generated_at_utc": now_utc(),
         "policy": advisor_policy_payload(&state),
         "providers": advisor_provider_list_payload(&state),
         "assignments": advisor_assignment_payload(&state),
+        "project_documents": project_documents,
         "workflow": inspect_advisor_workflow(repo_root, None),
         "workers": {
             "reviewer": reviewer_worker,
@@ -23127,6 +25062,7 @@ fn execute_advisor_run(repo_root: &Path, options: &AdvisorRunOptions) -> Result<
     if !advisor_state.policy.enabled {
         bail!("advisor policy is disabled");
     }
+    let project_documents = project_contract_documents_payload(repo_root)?;
     let resolved = resolve_advisor_provider(&advisor_state, options)?;
     let (prompt, workflow) = build_advisor_prompt(repo_root, &advisor_state, options)?;
     let effective_goal = effective_advisor_goal(workflow.as_ref(), options);
@@ -23175,6 +25111,7 @@ fn execute_advisor_run(repo_root: &Path, options: &AdvisorRunOptions) -> Result<
         "model": resolved.model,
         "allow_online_research": options.allow_online_research,
         "workflow": inspect_advisor_workflow(repo_root, workflow.as_ref().map(|row| row.path.as_path())),
+        "project_documents": project_documents,
         "execution": {
             "command": execution.command_rendered,
             "sync_suggested_tasks": options.sync_suggested_tasks,
@@ -23276,6 +25213,7 @@ fn build_advisor_prompt(
     advisor_state: &AdvisorState,
     options: &AdvisorRunOptions,
 ) -> Result<(String, Option<AdvisorWorkflowDefinition>)> {
+    let project_documents = ensure_project_contract_documents(repo_root)?;
     let digest = build_advisor_repo_digest(repo_root)?;
     let workflow = load_advisor_workflow_definition(repo_root, None)?;
     let role_config = advisor_workflow_role_config(workflow.as_ref(), options.role);
@@ -23321,6 +25259,8 @@ fn build_advisor_prompt(
             "The tasks you output will be imported into the tasknerve backlog, so avoid duplicates and keep them concrete."
         }
     };
+    let goals_excerpt = truncate_text_excerpt(&project_documents.goals.markdown, 2400);
+    let manifest_excerpt = truncate_text_excerpt(&project_documents.manifest.markdown, 2800);
     Ok((
         format!(
             r#"You are tasknerve's {role}.
@@ -23337,6 +25277,9 @@ Operating rules:
 - {online_policy}
 - {task_import_policy}
 - Prefer deterministic reasoning from the repository state and recent task/timeline context.
+- Treat `project_goals.md` as the durable contract for what the project is trying to achieve.
+- Treat `project_manifest.md` as the durable contract for how the project should achieve those goals.
+- If either contract still looks draft, incomplete, or internally inconsistent, call that out in notes/findings and propose the minimum tasks needed to lock it with the user/controller.
 - If you are unsure, prefer fewer better tasks instead of speculative filler.
 - Return at most {max_findings} findings.
 - Return at most {max_tasks} tasks.
@@ -23346,6 +25289,12 @@ Repository workflow guidance:
 
 Role-specific guidance:
 {role_guidance}
+
+Project goals contract (`{project_goals_path}`; seeded_this_run={goals_seeded}):
+{project_goals_markdown}
+
+Project manifest contract (`{project_manifest_path}`; seeded_this_run={manifest_seeded}):
+{project_manifest_markdown}
 
 Return JSON only with this shape:
 {{
@@ -23359,14 +25308,16 @@ Return JSON only with this shape:
       "evidence_paths": ["relative/path.ext"]
     }}
   ],
-  "tasks": [
+    "tasks": [
     {{
       "key": "optional_stable_key",
       "title": "task title",
       "detail": "optional implementation note",
       "priority": 0,
       "tags": ["advisor"],
-      "depends_on_keys": []
+      "depends_on_keys": [],
+      "suggested_intelligence": "optional low|medium|high|max",
+      "suggested_model": "optional exact model override"
     }}
   ]
 }}
@@ -23384,6 +25335,12 @@ Deterministic repository digest:
             trigger = options.trigger,
             allow_online =
                 options.allow_online_research || advisor_state.policy.allow_online_research,
+            project_goals_path = project_documents.goals.path.display(),
+            goals_seeded = project_documents.goals.seeded,
+            project_goals_markdown = goals_excerpt,
+            project_manifest_path = project_documents.manifest.path.display(),
+            manifest_seeded = project_documents.manifest.seeded,
+            project_manifest_markdown = manifest_excerpt,
             digest = digest
         ),
         workflow,
@@ -23414,14 +25371,7 @@ fn build_advisor_repo_digest(repo_root: &Path) -> Result<String> {
         format!("git status:\n{}", status_lines.join("\n"))
     });
 
-    let top_level = fs::read_dir(repo_root)
-        .ok()
-        .into_iter()
-        .flat_map(|entries| entries.filter_map(Result::ok))
-        .filter_map(|entry| entry.file_name().to_str().map(ToString::to_string))
-        .filter(|name| !IGNORE_ROOT_ENTRIES.contains(&name.as_str()))
-        .take(40)
-        .collect::<Vec<_>>();
+    let top_level = collect_project_top_level_entries(repo_root, 40);
     sections.push(format!("top-level entries: {}", top_level.join(", ")));
 
     let interesting_files = collect_advisor_interesting_files(repo_root);
@@ -23512,6 +25462,8 @@ fn collect_advisor_interesting_files(repo_root: &Path) -> Vec<String> {
         let rel = normalize_relpath(relative);
         let lowercase = rel.to_ascii_lowercase();
         let interesting = lowercase == "readme.md"
+            || lowercase == PROJECT_GOALS_FILE
+            || lowercase == PROJECT_MANIFEST_FILE
             || lowercase.ends_with("/readme.md")
             || lowercase.contains("architecture")
             || lowercase.ends_with("cargo.toml")
@@ -23731,6 +25683,13 @@ fn normalize_advisor_generated_tasks(
                 .chain(std::iter::once("advisor".to_string()))
                 .collect(),
         );
+        task.tags = apply_task_routing_tags(
+            task.tags,
+            task.suggested_intelligence.clone(),
+            task.suggested_model.clone(),
+        )?;
+        task.suggested_intelligence = extract_task_intelligence_tag(&task.tags);
+        task.suggested_model = extract_task_model_tag(&task.tags);
         task.depends_on_keys = dedupe_keep_order(normalize_string_list(task.depends_on_keys));
         task.priority = Some(task.priority.unwrap_or(30).clamp(-100, 100));
         let fallback_key = format!("advisor_{}", index + 1);
@@ -24224,12 +26183,94 @@ fn maybe_queue_auto_advisor_runs(repo_root: &Path, state: &TaskState) -> Result<
         }
     }
 
+    let controller = {
+        let settings = load_project_codex_settings(repo_root)?;
+        if !settings.low_queue_controller_enabled {
+            json!({
+                "enabled": false,
+                "triggered": false,
+                "status": "disabled"
+            })
+        } else {
+            let codex_state = load_codex_thread_state(repo_root)?;
+            if let Some(binding) = codex_state
+                .bindings
+                .iter()
+                .find(|binding| codex_is_controller_agent(&binding.agent_id))
+                .cloned()
+            {
+                if codex_state.queued_prompts.iter().any(|prompt| {
+                    prompt.agent_id == binding.agent_id
+                        && matches!(
+                            prompt.status,
+                            CodexPromptRequestStatus::Pending | CodexPromptRequestStatus::Running
+                        )
+                }) {
+                    json!({
+                        "enabled": true,
+                        "triggered": false,
+                        "status": "controller_prompt_inflight",
+                        "agent_id": binding.agent_id
+                    })
+                } else if binding
+                    .last_injected_at_utc
+                    .as_deref()
+                    .and_then(parse_rfc3339_utc)
+                    .map(|value| {
+                        value + Duration::minutes(advisor_state.policy.auto_trigger_cooldown_minutes)
+                            > Utc::now()
+                    })
+                    .unwrap_or(false)
+                {
+                    json!({
+                        "enabled": true,
+                        "triggered": false,
+                        "status": "cooldown",
+                        "agent_id": binding.agent_id
+                    })
+                } else {
+                    let goal = build_low_queue_controller_prompt(repo_root, state, &settings);
+                    let payload = enqueue_codex_prompt_requests(
+                        repo_root,
+                        &CodexInjectOptions {
+                            agent_id: binding.agent_id.clone(),
+                            prompt: Some(goal),
+                            continue_task: false,
+                            cycles: 1,
+                            claim_ttl_minutes: 30,
+                            steal_after_minutes: 90,
+                            exclude_tags: Vec::new(),
+                            model: settings.controller_default_model.clone(),
+                            oss: false,
+                            local_provider: None,
+                        },
+                        true,
+                    )?;
+                    json!({
+                        "enabled": true,
+                        "triggered": true,
+                        "status": "queued",
+                        "agent_id": binding.agent_id,
+                        "result": payload
+                    })
+                }
+            } else {
+                json!({
+                    "enabled": true,
+                    "triggered": false,
+                    "status": "no_controller_bound"
+                })
+            }
+        }
+    };
+
     Ok(json!({
         "enabled": true,
-        "triggered": !queued.is_empty(),
+        "triggered": !queued.is_empty() || controller["triggered"].as_bool().unwrap_or(false),
         "active_standard_tasks": active_standard_tasks,
         "low_task_threshold": advisor_state.policy.low_task_threshold,
-        "queued": queued
+        "queued": queued,
+        "controller": controller
     }))
 }
 
@@ -25696,6 +27737,120 @@ fn task_dependents(state: &TaskState, task_id: &str) -> Vec<String> {
         .collect()
 }
 
+fn canonical_task_intelligence_token(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "low" | "basic" | "small" | "cheap" => Some("low"),
+        "medium" | "normal" | "standard" | "balanced" => Some("medium"),
+        "high" | "strong" | "advanced" => Some("high"),
+        "max" | "maximum" | "frontier" | "expert" => Some("max"),
+        _ => None,
+    }
+}
+
+fn normalize_task_intelligence(value: Option<String>) -> Result<Option<String>> {
+    let normalized = normalize_optional_text(value, "suggested intelligence")?;
+    match normalized {
+        None => Ok(None),
+        Some(token) => canonical_task_intelligence_token(&token)
+            .map(|value| Some(value.to_string()))
+            .ok_or_else(|| {
+                anyhow!("suggested intelligence must be one of: low, medium, high, max")
+            }),
+    }
+}
+
+fn normalize_task_model(value: Option<String>) -> Result<Option<String>> {
+    normalize_optional_text(value, "suggested model")
+}
+
+fn extract_task_intelligence_tag(tags: &[String]) -> Option<String> {
+    tags.iter().find_map(|tag| {
+        tag.strip_prefix(TASK_TAG_INTELLIGENCE_PREFIX)
+            .and_then(canonical_task_intelligence_token)
+            .map(ToString::to_string)
+    })
+}
+
+fn extract_task_model_tag(tags: &[String]) -> Option<String> {
+    tags.iter().find_map(|tag| {
+        tag.strip_prefix(TASK_TAG_MODEL_PREFIX)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    })
+}
+
+fn compose_task_routing_tags(
+    tags: Vec<String>,
+    suggested_intelligence: Option<String>,
+    suggested_model: Option<String>,
+) -> Vec<String> {
+    let mut out = tags
+        .into_iter()
+        .filter(|tag| {
+            !tag.starts_with(TASK_TAG_INTELLIGENCE_PREFIX) && !tag.starts_with(TASK_TAG_MODEL_PREFIX)
+        })
+        .collect::<Vec<_>>();
+    if let Some(level) = suggested_intelligence {
+        out.push(format!("{TASK_TAG_INTELLIGENCE_PREFIX}{level}"));
+    }
+    if let Some(model) = suggested_model {
+        out.push(format!("{TASK_TAG_MODEL_PREFIX}{model}"));
+    }
+    dedupe_keep_order(out)
+}
+
+fn apply_task_routing_tags(
+    tags: Vec<String>,
+    suggested_intelligence: Option<String>,
+    suggested_model: Option<String>,
+) -> Result<Vec<String>> {
+    let normalized_tags = dedupe_keep_order(tags);
+    let next_intelligence = match suggested_intelligence {
+        Some(_) => normalize_task_intelligence(suggested_intelligence)?,
+        None => extract_task_intelligence_tag(&normalized_tags),
+    };
+    let next_model = match suggested_model {
+        Some(_) => normalize_task_model(suggested_model)?,
+        None => extract_task_model_tag(&normalized_tags),
+    };
+    Ok(compose_task_routing_tags(
+        normalized_tags,
+        next_intelligence,
+        next_model,
+    ))
+}
+
+fn resolve_task_routing_tags_for_edit(
+    current_tags: &[String],
+    tag_patch: Option<Vec<String>>,
+    suggested_intelligence_patch: &TaskTextPatch,
+    suggested_model_patch: &TaskTextPatch,
+) -> Result<Option<Vec<String>>> {
+    if tag_patch.is_none()
+        && matches!(suggested_intelligence_patch, TaskTextPatch::Keep)
+        && matches!(suggested_model_patch, TaskTextPatch::Keep)
+    {
+        return Ok(None);
+    }
+    let base_tags = tag_patch.unwrap_or_else(|| current_tags.to_vec());
+    let suggested_intelligence = match suggested_intelligence_patch {
+        TaskTextPatch::Keep => extract_task_intelligence_tag(current_tags),
+        TaskTextPatch::Clear => None,
+        TaskTextPatch::Set(value) => normalize_task_intelligence(Some(value.clone()))?,
+    };
+    let suggested_model = match suggested_model_patch {
+        TaskTextPatch::Keep => extract_task_model_tag(current_tags),
+        TaskTextPatch::Clear => None,
+        TaskTextPatch::Set(value) => normalize_task_model(Some(value.clone()))?,
+    };
+    Ok(Some(compose_task_routing_tags(
+        dedupe_keep_order(base_tags),
+        suggested_intelligence,
+        suggested_model,
+    )))
+}
+
 fn build_manual_task(
     state: &TaskState,
     title: &str,
@@ -25704,9 +27859,11 @@ fn build_manual_task(
     priority: i32,
     tags: Vec<String>,
     depends_on: Vec<String>,
+    suggested_intelligence: Option<String>,
+    suggested_model: Option<String>,
 ) -> Result<TaskNerveTask> {
     let normalized_title = normalize_task_title(title)?;
-    let normalized_tags = dedupe_keep_order(tags);
+    let normalized_tags = apply_task_routing_tags(tags, suggested_intelligence, suggested_model)?;
     let normalized_depends_on = dedupe_keep_order(depends_on);
     validate_task_dependencies(state, None, &normalized_depends_on)?;
     let now = now_utc();
@@ -25802,8 +27959,12 @@ fn edit_task_in_state(
         changed = true;
     }
 
-    if let Some(tags) = patch.tags
-        && state.tasks[task_index].tags != tags
+    if let Some(tags) = resolve_task_routing_tags_for_edit(
+        &state.tasks[task_index].tags,
+        patch.tags,
+        &patch.suggested_intelligence,
+        &patch.suggested_model,
+    )? && state.tasks[task_index].tags != tags
     {
         state.tasks[task_index].tags = tags;
         changed = true;
@@ -27100,6 +29261,8 @@ fn task_to_json_payload(
 ) -> serde_json::Value {
     let now = Utc::now();
     let today = Utc::now().date_naive();
+    let suggested_intelligence = extract_task_intelligence_tag(&task.tags);
+    let suggested_model = extract_task_model_tag(&task.tags);
     let date_window = task_date_window(task);
     let schedule_state = task_schedule_state(task, today);
     let mut blocked_by = task_blocked_by(task, status_map);
@@ -27124,6 +29287,8 @@ fn task_to_json_payload(
         "priority": task.priority,
         "status": task.status,
         "tags": task.tags,
+        "suggested_intelligence": suggested_intelligence,
+        "suggested_model": suggested_model,
         "depends_on": task.depends_on,
         "blocked_by": blocked_by,
         "ready": ready,
@@ -30537,6 +32702,32 @@ fn resolve_selected_task_gui_project<'a>(
         .or_else(|| projects.first())
 }
 
+fn resolve_task_gui_project_for_cwd<'a>(
+    projects: &'a [TaskGuiProject],
+    cwd: &Path,
+) -> Option<(&'a TaskGuiProject, &'static str)> {
+    let normalized_cwd = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    projects
+        .iter()
+        .filter_map(|project| {
+            let project_root = PathBuf::from(&project.repo_root);
+            let scope = codex_repo_scope_label(&normalized_cwd, &project_root)?;
+            let canonical_len = fs::canonicalize(&project_root)
+                .unwrap_or(project_root)
+                .display()
+                .to_string()
+                .len();
+            Some((project, scope, canonical_len))
+        })
+        .max_by(|left, right| {
+            left.2
+                .cmp(&right.2)
+                .then_with(|| left.0.is_current_repo.cmp(&right.0.is_current_repo))
+                .then_with(|| left.0.name.cmp(&right.0.name))
+        })
+        .map(|(project, scope, _)| (project, scope))
+}
+
 fn prune_expired_task_claims(state: &mut TaskState) -> Result<bool> {
     let mut changed = false;
     if state.schema_version != SCHEMA_TASKS {
@@ -31361,6 +33552,14 @@ fn default_false() -> bool {
     false
 }
 
+fn default_project_codex_heartbeat_message_core() -> String {
+    DEFAULT_CODEX_CONTINUE_PROMPT_TEMPLATE.to_string()
+}
+
+fn default_project_codex_low_queue_controller_prompt() -> String {
+    "The TaskNerve queue for {project_name} is running low. Review the current repository state, `project_goals.md`, `project_manifest.md`, and the existing TaskNerve backlog. Add the next best development and maintenance tasks, consolidate stale work, and keep the active workers fed with concrete, high-leverage tasks.".to_string()
+}
+
 fn default_backend_mode() -> String {
     BACKEND_MODE_GIT_BRIDGE.to_string()
 }
@@ -31566,6 +33765,12 @@ fn timeline_advisor_worker_lock_path(repo_root: &Path, role: AdvisorRoleArg) -> 
     timeline_root(repo_root)
         .join("advisor")
         .join(format!("{}.worker.lock.json", advisor_role_label(role)))
+}
+
+fn timeline_project_codex_settings_path(repo_root: &Path) -> PathBuf {
+    timeline_root(repo_root)
+        .join("codex")
+        .join("project_settings.json")
 }
 
 fn timeline_branch_root(repo_root: &Path, branch: &str) -> PathBuf {
@@ -33449,6 +35654,99 @@ Prefer evidence-backed tasks.
     }
 
     #[test]
+    fn ensure_project_contract_documents_seed_templates_from_repo_state() {
+        let repo = TestRepo::new("project-contract-seed");
+        repo.write_file(
+            "Cargo.toml",
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = "1"
+anyhow = "1"
+"#,
+        );
+        repo.write_file("src/main.rs", "fn main() {}\n");
+
+        let documents =
+            ensure_project_contract_documents(repo.path()).expect("seed project contracts");
+
+        assert!(repo.path().join(PROJECT_GOALS_FILE).exists());
+        assert!(repo.path().join(PROJECT_MANIFEST_FILE).exists());
+        assert!(documents.goals.seeded);
+        assert!(documents.manifest.seeded);
+        assert!(documents.goals.markdown.contains("# Project Goals"));
+        assert!(documents.manifest.markdown.contains("# Project Manifest"));
+        assert!(documents.manifest.markdown.contains("Cargo"));
+        assert!(documents.manifest.markdown.contains("cargo build"));
+        assert!(documents.manifest.markdown.contains("serde"));
+    }
+
+    #[test]
+    fn ensure_project_contract_documents_preserve_existing_content() {
+        let repo = TestRepo::new("project-contract-preserve");
+        repo.write_file(PROJECT_GOALS_FILE, "# Project Goals\n\nKeep the original goals.\n");
+        repo.write_file(
+            PROJECT_MANIFEST_FILE,
+            "# Project Manifest\n\nKeep the original technical contract.\n",
+        );
+
+        let documents =
+            ensure_project_contract_documents(repo.path()).expect("preserve project contracts");
+
+        assert!(!documents.goals.seeded);
+        assert!(!documents.manifest.seeded);
+        assert!(documents.goals.markdown.contains("Keep the original goals."));
+        assert!(
+            documents
+                .manifest
+                .markdown
+                .contains("Keep the original technical contract.")
+        );
+    }
+
+    #[test]
+    fn build_advisor_prompt_includes_project_contract_documents() {
+        let repo = TestRepo::new("advisor-project-contracts");
+        repo.write_file(
+            "Cargo.toml",
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        );
+        repo.write_file("src/lib.rs", "pub fn demo() {}\n");
+        repo.write_file(
+            PROJECT_GOALS_FILE,
+            "# Project Goals\n\nShip a stable native TaskNerve panel.\n",
+        );
+        repo.write_file(
+            PROJECT_MANIFEST_FILE,
+            "# Project Manifest\n\nUse Rust and native Codex integration.\n",
+        );
+
+        let (prompt, _workflow) = build_advisor_prompt(
+            repo.path(),
+            &default_advisor_state(),
+            &AdvisorRunOptions {
+                role: AdvisorRoleArg::TaskManager,
+                goal: None,
+                provider_id_override: None,
+                model_override: None,
+                allow_online_research: false,
+                require_confirmation_override: None,
+                sync_suggested_tasks: true,
+                trigger: "manual".to_string(),
+                plan_mode: AdvisorPlanModeArg::GoalScoped,
+            },
+        )
+        .expect("build advisor prompt");
+
+        assert!(prompt.contains("Project goals contract"));
+        assert!(prompt.contains("Ship a stable native TaskNerve panel."));
+        assert!(prompt.contains("Use Rust and native Codex integration."));
+    }
+
+    #[test]
     fn approve_tasks_in_state_clears_confirmation_gate() {
         let mut state = TaskState {
             schema_version: SCHEMA_TASKS.to_string(),
@@ -34068,15 +36366,22 @@ Prefer evidence-backed tasks.
 "#;
         let output = patch_codex_index_html(input, "127.0.0.1", 7788).expect("patch index");
         assert!(output.contains(CODEX_PANEL_MARKER));
-        assert!(output.contains("http://127.0.0.1:7788"));
-        assert!(output.contains("http://localhost:7788"));
+        assert!(
+            output.contains("frame-src 'self' blob: http://127.0.0.1:7788 http://localhost:7788;")
+        );
+        assert!(output.contains(
+            "connect-src 'self' https://ab.chatgpt.com https://cdn.openai.com http://127.0.0.1:7788 http://localhost:7788;"
+        ));
+        assert!(!output.contains("&#39 http://127.0.0.1:7788"));
     }
 
     #[test]
     fn render_codex_panel_script_embeds_expected_panel_url() {
-        let rendered = render_codex_panel_script("127.0.0.1", 7788);
+        let rendered = render_codex_panel_script("127.0.0.1", 7788, "127.0.0.1", 7791);
         assert!(rendered.contains("http://127.0.0.1:7788"));
+        assert!(rendered.contains("http://127.0.0.1:7791"));
         assert!(!rendered.contains("__TASKNERVE_BASE_URL__"));
+        assert!(!rendered.contains("__TASKNERVE_NATIVE_BRIDGE_URL__"));
     }
 
     #[test]
@@ -34196,6 +36501,34 @@ Prefer evidence-backed tasks.
     }
 
     #[test]
+    fn rewrite_codex_asar_integrity_hash_json_updates_app_asar_digest() {
+        let mut plist = json!({
+            "ElectronAsarIntegrity": {
+                "Resources/app.asar": {
+                    "algorithm": "SHA256",
+                    "hash": "old"
+                }
+            }
+        });
+        rewrite_codex_asar_integrity_hash_json(&mut plist, "newhash").expect("rewrite integrity");
+        assert_eq!(
+            plist["ElectronAsarIntegrity"]["Resources/app.asar"]["hash"],
+            serde_json::Value::from("newhash")
+        );
+    }
+
+    #[test]
+    fn electron_asar_header_hash_from_pickle_uses_raw_header_bytes() {
+        let mut pickle = Vec::<u8>::new();
+        pickle.extend_from_slice(&8u32.to_le_bytes());
+        pickle.extend_from_slice(&3u32.to_le_bytes());
+        pickle.extend_from_slice(b"abc");
+        pickle.push(0);
+        let hash = electron_asar_header_hash_from_pickle(&pickle).expect("header hash");
+        assert_eq!(hash, format!("{:x}", Sha256::digest(b"abc")));
+    }
+
+    #[test]
     fn resolve_selected_task_gui_project_prefers_selector_then_most_recent_then_default() {
         let projects = vec![
             TaskGuiProject {
@@ -34224,6 +36557,39 @@ Prefer evidence-backed tasks.
         assert_eq!(selected.key, "alpha");
         let fallback = resolve_selected_task_gui_project(&projects, None).expect("recent");
         assert_eq!(fallback.key, "alpha");
+    }
+
+    #[test]
+    fn resolve_task_gui_project_for_cwd_prefers_most_specific_repo_match() {
+        let projects = vec![
+            TaskGuiProject {
+                key: "alpha".to_string(),
+                name: "alpha".to_string(),
+                repo_root: "/tmp/tasknerve-alpha".to_string(),
+                is_default: false,
+                is_current_repo: false,
+                last_activity_at_utc: None,
+                last_opened_at_utc: None,
+                is_most_recent: false,
+            },
+            TaskGuiProject {
+                key: "alpha-ui".to_string(),
+                name: "alpha-ui".to_string(),
+                repo_root: "/tmp/tasknerve-alpha/ui".to_string(),
+                is_default: false,
+                is_current_repo: false,
+                last_activity_at_utc: None,
+                last_opened_at_utc: None,
+                is_most_recent: false,
+            },
+        ];
+        let (selected, scope) = resolve_task_gui_project_for_cwd(
+            &projects,
+            Path::new("/tmp/tasknerve-alpha/ui/components"),
+        )
+        .expect("matched project");
+        assert_eq!(selected.key, "alpha-ui");
+        assert_eq!(scope, "child");
     }
 
     #[test]
@@ -34362,9 +36728,37 @@ Prefer evidence-backed tasks.
             5,
             vec![],
             vec!["task_missing".to_string()],
+            None,
+            None,
         )
         .expect_err("expected unknown dependency to fail");
         assert!(err.to_string().contains("task dependency not found"));
+    }
+
+    #[test]
+    fn build_manual_task_exposes_suggested_routing_fields() {
+        let state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![],
+        };
+        let task = build_manual_task(
+            &state,
+            "route work",
+            None,
+            "agent.a".to_string(),
+            3,
+            vec!["ui".to_string()],
+            vec![],
+            Some("high".to_string()),
+            Some("gpt-5".to_string()),
+        )
+        .expect("build task");
+        let payload = task_to_json_payload(&task, &BTreeMap::new());
+        assert_eq!(payload["suggested_intelligence"].as_str(), Some("high"));
+        assert_eq!(payload["suggested_model"].as_str(), Some("gpt-5"));
+        assert!(task.tags.iter().any(|tag| tag == "intelligence:high"));
+        assert!(task.tags.iter().any(|tag| tag == "model:gpt-5"));
     }
 
     #[test]
@@ -34454,6 +36848,8 @@ Prefer evidence-backed tasks.
                 priority: Some(9),
                 tags: Some(vec!["compiler".to_string(), "gui".to_string()]),
                 depends_on: Some(vec!["task_dep".to_string()]),
+                suggested_intelligence: TaskTextPatch::Keep,
+                suggested_model: TaskTextPatch::Keep,
                 blocked: TaskTextPatch::Keep,
             },
         )
@@ -34467,6 +36863,57 @@ Prefer evidence-backed tasks.
             vec!["compiler".to_string(), "gui".to_string()]
         );
         assert_eq!(outcome.task.depends_on, vec!["task_dep".to_string()]);
+    }
+
+    #[test]
+    fn edit_task_in_state_updates_and_clears_routing_tags() {
+        let mut state = TaskState {
+            schema_version: SCHEMA_TASKS.to_string(),
+            updated_at_utc: now_utc(),
+            tasks: vec![TaskNerveTask {
+                tags: vec![
+                    "compiler".to_string(),
+                    "intelligence:medium".to_string(),
+                    "model:gpt-4.1".to_string(),
+                ],
+                ..sample_task("task_route", "route", 4, TaskStatus::Open)
+            }],
+        };
+
+        let outcome = edit_task_in_state(
+            &mut state,
+            "task_route",
+            "agent.editor",
+            TaskEditPatch {
+                suggested_intelligence: TaskTextPatch::Set("max".to_string()),
+                suggested_model: TaskTextPatch::Set("gpt-5".to_string()),
+                ..TaskEditPatch::default()
+            },
+        )
+        .expect("set routing");
+        assert_eq!(
+            extract_task_intelligence_tag(&outcome.task.tags).as_deref(),
+            Some("max")
+        );
+        assert_eq!(
+            extract_task_model_tag(&outcome.task.tags).as_deref(),
+            Some("gpt-5")
+        );
+
+        let outcome = edit_task_in_state(
+            &mut state,
+            "task_route",
+            "agent.editor",
+            TaskEditPatch {
+                suggested_intelligence: TaskTextPatch::Clear,
+                suggested_model: TaskTextPatch::Clear,
+                ..TaskEditPatch::default()
+            },
+        )
+        .expect("clear routing");
+        assert!(extract_task_intelligence_tag(&outcome.task.tags).is_none());
+        assert!(extract_task_model_tag(&outcome.task.tags).is_none());
+        assert_eq!(outcome.task.tags, vec!["compiler".to_string()]);
     }
 
     #[test]
@@ -34490,6 +36937,96 @@ Prefer evidence-backed tasks.
         assert_eq!(outcome.task.task_id, "task_noop");
         assert_eq!(state.tasks[0].updated_at_utc, original_updated);
         assert_eq!(state.updated_at_utc, original_state_updated);
+    }
+
+    #[test]
+    fn enqueue_codex_prompt_requests_single_message_mode_drops_pending_backlog() {
+        let repo = TestRepo::new("codex-single-message");
+        let _ = load_project_codex_settings(repo.path()).expect("project codex settings");
+        bind_codex_thread_to_agent(
+            repo.path(),
+            "agent.worker",
+            "thread_worker".to_string(),
+            Some("worker".to_string()),
+            Some(DEFAULT_CODEX_CONTINUE_PROMPT_TEMPLATE.to_string()),
+        )
+        .expect("bind worker");
+        let mut state = load_codex_thread_state(repo.path()).expect("load codex state");
+        state.queued_prompts.push(CodexPromptRequest {
+            prompt_id: "prompt_pending".to_string(),
+            agent_id: "agent.worker".to_string(),
+            thread_id: "thread_worker".to_string(),
+            kind: CodexPromptRequestKind::ContinueTask,
+            prompt: None,
+            claim_ttl_minutes: 30,
+            steal_after_minutes: 90,
+            exclude_tags: Vec::new(),
+            model: None,
+            oss: false,
+            local_provider: None,
+            status: CodexPromptRequestStatus::Pending,
+            created_at_utc: now_utc(),
+            started_at_utc: None,
+            finished_at_utc: None,
+            task_id: None,
+            result_excerpt: None,
+            error: None,
+        });
+        state.queued_prompts.push(CodexPromptRequest {
+            prompt_id: "prompt_running".to_string(),
+            agent_id: "agent.worker".to_string(),
+            thread_id: "thread_worker".to_string(),
+            kind: CodexPromptRequestKind::ContinueTask,
+            prompt: None,
+            claim_ttl_minutes: 30,
+            steal_after_minutes: 90,
+            exclude_tags: Vec::new(),
+            model: None,
+            oss: false,
+            local_provider: None,
+            status: CodexPromptRequestStatus::Running,
+            created_at_utc: now_utc(),
+            started_at_utc: Some(now_utc()),
+            finished_at_utc: None,
+            task_id: None,
+            result_excerpt: None,
+            error: None,
+        });
+        write_codex_thread_state(repo.path(), &state).expect("write codex state");
+
+        let payload = enqueue_codex_prompt_requests(
+            repo.path(),
+            &CodexInjectOptions {
+                agent_id: "agent.worker".to_string(),
+                prompt: None,
+                continue_task: true,
+                cycles: 5,
+                claim_ttl_minutes: 30,
+                steal_after_minutes: 90,
+                exclude_tags: Vec::new(),
+                model: None,
+                oss: false,
+                local_provider: None,
+            },
+            false,
+        )
+        .expect("enqueue prompt");
+        assert_eq!(payload["queued_count"].as_u64(), Some(0));
+        assert_eq!(payload["replaced_pending_count"].as_u64(), Some(1));
+        assert_eq!(payload["single_message_mode"].as_bool(), Some(true));
+        let state = load_codex_thread_state(repo.path()).expect("reload codex state");
+        assert_eq!(
+            state
+                .queued_prompts
+                .iter()
+                .filter(|prompt| prompt.agent_id == "agent.worker")
+                .count(),
+            1
+        );
+        assert!(matches!(
+            state.queued_prompts[0].status,
+            CodexPromptRequestStatus::Running
+        ));
     }
 
     #[test]
@@ -35066,5 +37603,7 @@ Prefer evidence-backed tasks.
         assert!(prompt.contains("tasknerve --repo-root . task current --agent agent.alpha"));
         assert!(prompt.contains("task advance task_abc"));
         assert!(prompt.contains("Queue continuation prompts"));
+        assert!(prompt.contains("project_goals.md"));
+        assert!(prompt.contains("project_manifest.md"));
     }
 }

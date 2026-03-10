@@ -6,6 +6,12 @@ TaskNerve is an agent-first, timeline-first versioning system. It tracks progres
 
 This started as an internal tool and was made public after Git became a production bottleneck in multi-agent workflows.
 
+## Codex-Native Direction
+
+On branch `codex/codex-native`, the active rewrite target is [codex-native/](/Users/adimus/Documents/taskNerve/codex-native/). That workspace is where portable Codex-native TaskNerve logic now belongs.
+
+The current live product still depends on the Rust runtime, so Rust is legacy runtime, not archived code yet. Do not move `src/main.rs` into `/deprecated` until the cutover criteria in [docs/codex_native_cutover_audit.md](/Users/adimus/Documents/taskNerve/docs/codex_native_cutover_audit.md) are satisfied.
+
 ## Turnkey Setup (Recommended)
 
 You can point an agent at this repository and have it do the full setup.
@@ -294,7 +300,11 @@ Notes:
 ## Repo-Owned Advisor Workflow
 
 TaskNerve now supports a repo-owned advisor contract at `TASKNERVE_WORKFLOW.md`.
-If the repo also has a root `project_goals.md`, advisor prompts and run reports automatically include it so reviewer and task-manager output stays aligned with the project's stated goals.
+TaskNerve also auto-seeds and maintains two root project contract files when a project is added/used through TaskNerve or selected in the GUI:
+- `project_goals.md` locks the user-approved outcomes and non-goals.
+- `project_manifest.md` locks the technical contract for how those goals should be achieved.
+
+Advisor prompts, snapshots, and run reports automatically include both files so reviewer and task-manager output stays aligned with the project's stated goals and approved technical approach.
 
 Bootstrap it:
 
@@ -309,6 +319,7 @@ Use it to version:
 - result-size caps (`max_findings`, `max_tasks`)
 - advisor policy defaults that can be synced into runtime state
 - while keeping durable user-authored project intent in `project_goals.md`
+- while keeping durable user-approved technical implementation rules in `project_manifest.md`
 
 Sync the policy defaults from the file into the live advisor state:
 

@@ -97,6 +97,29 @@
     };
   }
 
+  function tasknerveCurrentWindowRef() {
+    if (
+      typeof TASKNERVE_ENSURE_WINDOW !== "function" ||
+      !TASKNERVE_LOCAL_HOST_CONFIG ||
+      !TASKNERVE_LOCAL_HOST_CONFIG.id
+    ) {
+      return null;
+    }
+    return TASKNERVE_ENSURE_WINDOW(TASKNERVE_LOCAL_HOST_CONFIG.id);
+  }
+
+  function tasknerveThreadIdFromRoutePath(routePath) {
+    const match = String(routePath || "").match(/^\/local\/([^/?#]+)/);
+    if (!match) {
+      return null;
+    }
+    try {
+      return decodeURIComponent(match[1]);
+    } catch (_error) {
+      return match[1];
+    }
+  }
+
   async function tasknerveHandleHealth() {
     const { context } = tasknerveResolveLocalConnection();
     return {
@@ -110,7 +133,38 @@
         "set_thread_name",
         "update_thread_title",
         "open_thread",
+        "host_context",
       ],
+    };
+  }
+
+  async function tasknerveHandleHostContext() {
+    const { context } = tasknerveResolveLocalConnection();
+    const windowRef = await Promise.resolve(tasknerveCurrentWindowRef()).catch(() => null);
+    let windowUrl = null;
+    let routePath = null;
+    if (
+      windowRef &&
+      windowRef.webContents &&
+      typeof windowRef.webContents.getURL === "function"
+    ) {
+      try {
+        windowUrl = windowRef.webContents.getURL() || null;
+        routePath = windowUrl ? new URL(windowUrl).pathname : null;
+      } catch (_error) {
+        windowUrl = null;
+        routePath = null;
+      }
+    }
+    return {
+      ok: true,
+      host_id: context.hostId,
+      host_kind: TASKNERVE_LOCAL_HOST_CONFIG?.kind ?? null,
+      host_display_name: TASKNERVE_LOCAL_HOST_CONFIG?.display_name ?? null,
+      active_thread_id: tasknerveThreadIdFromRoutePath(routePath),
+      route_path: routePath,
+      window_url: windowUrl,
+      transport: "codex_native",
     };
   }
 
@@ -241,6 +295,10 @@
     }
     if (req.method === "GET" && url.pathname === "/tasknerve/health") {
       tasknerveWriteJson(res, 200, await tasknerveHandleHealth());
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/tasknerve/host/context") {
+      tasknerveWriteJson(res, 200, await tasknerveHandleHostContext());
       return;
     }
     if (req.method !== "POST") {

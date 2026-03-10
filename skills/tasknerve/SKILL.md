@@ -40,6 +40,7 @@ Use this skill when any of the following are true:
 - `tasknerve --repo-root . codex inject --agent <agent_id> --continue-task --cycles 5 --background --json`
 - In the TaskNerve panel, prefer the project-level flow: choose the project, mark one active Codex thread as the controller, let TaskNerve adopt the active worker threads, and use project-wide heartbeats. Archiving a Codex conversation removes it from the active worker pool.
 - This native Codex path is currently macOS-only and intentionally patches the local `Codex.app` bundle, installs TaskNerve LaunchAgents for the panel and patch sync loop, and routes controller/worker prompting through Codex's own authenticated desktop inference path instead of a separate provider login.
+- On branch `codex/codex-native`, prefer adding new portable native logic under `/Users/adimus/Documents/taskNerve/codex-native/`. Rust changes on that branch should be limited to compatibility, parity, or removal-enabling migration work until the native cutover is complete.
 
 1. Ensure timeline exists:
 - `tasknerve --repo-root . init --branch trunk`
@@ -224,7 +225,7 @@ Use this skill when any of the following are true:
 - `tasknerve --repo-root . advisor provider add-command --name <name> --executable <cmd> --arg "{role}" --arg "{model}"`
 - Version repo-specific advisor instructions in `TASKNERVE_WORKFLOW.md` and validate them with:
 - `tasknerve --repo-root . advisor workflow validate --json`
-- If the repo has a root `project_goals.md`, advisor prompts and run reports automatically include it so reviewer/task-manager output stays aligned with explicit project goals.
+- Treat the repo-root `project_goals.md` as the durable goals contract and `project_manifest.md` as the durable technical contract. TaskNerve auto-seeds both when a project is added/used or selected in the GUI, and advisor prompts/run reports automatically include both files.
 
 9. Coordinate ownership when multiple agents touch overlapping files:
 - `tasknerve --repo-root . lock add --pattern "src/**" --agent <agent_id> --ttl-minutes 30`
