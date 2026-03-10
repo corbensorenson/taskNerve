@@ -19534,7 +19534,8 @@ fn store_reseeded_old_change_objects(repo_root: &Path, changes: &[ChangeRecord])
         if !matches!(change.kind, ChangeKind::Modified) {
             continue;
         }
-        let (Some(old_hash), Some(new_hash)) = (change.old_hash.as_deref(), change.new_hash.as_deref())
+        let (Some(old_hash), Some(new_hash)) =
+            (change.old_hash.as_deref(), change.new_hash.as_deref())
         else {
             continue;
         };
