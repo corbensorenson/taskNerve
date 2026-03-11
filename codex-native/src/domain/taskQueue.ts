@@ -1,5 +1,12 @@
 import type { PromptQueueRequest, TaskRecord } from "../schemas.js";
 
+const TASK_STATUS_RANK: Record<string, number> = {
+  open: 0,
+  claimed: 1,
+  blocked: 2,
+  done: 3,
+};
+
 function normalizeSearchText(value: unknown): string {
   return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
 }
@@ -11,15 +18,9 @@ export function taskUserTags(task: Partial<TaskRecord>): string[] {
 }
 
 export function sortTasks(tasks: Partial<TaskRecord>[]): Partial<TaskRecord>[] {
-  const statusRank: Record<string, number> = {
-    open: 0,
-    claimed: 1,
-    blocked: 2,
-    done: 3,
-  };
   return [...tasks].sort((left, right) => {
-    const leftRank = statusRank[left.status || ""] ?? 9;
-    const rightRank = statusRank[right.status || ""] ?? 9;
+    const leftRank = TASK_STATUS_RANK[left.status || ""] ?? 9;
+    const rightRank = TASK_STATUS_RANK[right.status || ""] ?? 9;
     if (leftRank !== rightRank) {
       return leftRank - rightRank;
     }
@@ -31,9 +32,13 @@ export function sortTasks(tasks: Partial<TaskRecord>[]): Partial<TaskRecord>[] {
   });
 }
 
-export function filterTasks(tasks: Partial<TaskRecord>[], search = ""): Partial<TaskRecord>[] {
+export function filterTasks(
+  tasks: Partial<TaskRecord>[],
+  search = "",
+  options: { alreadySorted?: boolean } = {},
+): Partial<TaskRecord>[] {
   const normalizedSearch = normalizeSearchText(search);
-  const sorted = sortTasks(tasks);
+  const sorted = options.alreadySorted ? tasks : sortTasks(tasks);
   if (!normalizedSearch) {
     return sorted;
   }
@@ -104,15 +109,21 @@ export function mergePromptQueue(
     };
   }
 
-  const runningInflight = queue.some(
-    (entry) => samePromptTarget(entry, nextRequest) && entry.status === "running",
-  );
-  const replacedPending = queue.some(
-    (entry) => samePromptTarget(entry, nextRequest) && entry.status === "pending",
-  );
-  const preserved = queue.filter(
-    (entry) => !samePromptTarget(entry, nextRequest) || entry.status !== "pending",
-  );
+  let runningInflight = false;
+  let replacedPending = false;
+  const preserved: Partial<PromptQueueRequest>[] = [];
+  for (const entry of queue) {
+    const sameTarget = samePromptTarget(entry, nextRequest);
+    if (sameTarget && entry.status === "running") {
+      runningInflight = true;
+    }
+    if (sameTarget && entry.status === "pending") {
+      replacedPending = true;
+      continue;
+    }
+    preserved.push(entry);
+  }
+
   return {
     queue: [...preserved, nextRequest],
     replaced_pending: replacedPending,

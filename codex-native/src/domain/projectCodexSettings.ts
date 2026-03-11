@@ -91,31 +91,46 @@ export function normalizeProjectCodexSettings(
 }
 
 export function resolveControllerModel(settings: Partial<ProjectCodexSettings>): string | null {
-  return normalizeProjectCodexSettings(settings).controller_default_model ?? null;
+  return resolveControllerModelFromNormalizedSettings(normalizeProjectCodexSettings(settings));
 }
 
-export function resolveWorkerModelForTask(
-  settings: Partial<ProjectCodexSettings>,
+export function resolveControllerModelFromNormalizedSettings(
+  settings: ProjectCodexSettings,
+): string | null {
+  return settings.controller_default_model ?? null;
+}
+
+export function resolveWorkerModelForTaskWithNormalizedSettings(
+  settings: ProjectCodexSettings,
   task: Partial<TaskRecord> = {},
 ): string | null {
-  const normalized = normalizeProjectCodexSettings(settings);
-  if (normalized.worker_model_routing_enabled) {
+  if (settings.worker_model_routing_enabled) {
     const explicitModel = normalizeOptionalText(task.suggested_model);
     if (explicitModel) {
       return explicitModel;
     }
     switch (normalizeIntelligence(task.suggested_intelligence)) {
       case "low":
-        return normalized.low_intelligence_model ?? normalized.worker_default_model ?? null;
+        return settings.low_intelligence_model ?? settings.worker_default_model ?? null;
       case "medium":
-        return normalized.medium_intelligence_model ?? normalized.worker_default_model ?? null;
+        return settings.medium_intelligence_model ?? settings.worker_default_model ?? null;
       case "high":
-        return normalized.high_intelligence_model ?? normalized.worker_default_model ?? null;
+        return settings.high_intelligence_model ?? settings.worker_default_model ?? null;
       case "max":
-        return normalized.max_intelligence_model ?? normalized.worker_default_model ?? null;
+        return settings.max_intelligence_model ?? settings.worker_default_model ?? null;
       default:
         break;
     }
   }
-  return normalized.worker_default_model ?? null;
+  return settings.worker_default_model ?? null;
+}
+
+export function resolveWorkerModelForTask(
+  settings: Partial<ProjectCodexSettings>,
+  task: Partial<TaskRecord> = {},
+): string | null {
+  return resolveWorkerModelForTaskWithNormalizedSettings(
+    normalizeProjectCodexSettings(settings),
+    task,
+  );
 }

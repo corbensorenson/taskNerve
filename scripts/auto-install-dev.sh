@@ -12,7 +12,7 @@ log() {
 }
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
-  log "native Codex TaskNerve auto-sync is macOS-only; skipping"
+  log "TaskNerve skill auto-refresh is macOS-only; skipping"
   exit 0
 fi
 
@@ -54,12 +54,12 @@ if [[ -f "$STAMP_FILE" ]] && [[ "$(cat "$STAMP_FILE")" == "$CURRENT_STAMP" ]]; t
   exit 0
 fi
 
-log "resyncing Codex TaskNerve after ${HOOK_NAME}"
-if bash "$REPO_ROOT/install-macos.sh" --app "/Applications/Codex TaskNerve.app"; then
+log "refreshing local TaskNerve skill after ${HOOK_NAME}"
+if bash "$REPO_ROOT/scripts/install_codex_skill.sh" >/dev/null 2>&1; then
   printf '%s\n' "$CURRENT_STAMP" >"$STAMP_FILE"
-  log "native app sync complete"
+  log "skill refresh complete"
 else
-  log "warning: native app sync failed"
+  log "warning: skill refresh failed"
   if [[ "$STRICT" == "1" ]]; then
     exit 1
   fi

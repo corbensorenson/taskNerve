@@ -8,3 +8,5 @@ export * from "./io/paths.js";
 export * from "./io/projectCodexSettingsStore.js";
 export * from "./io/projectRegistryStore.js";
 export * from "./host/codexHostServices.js";
+export * from "./integration/taskNerveService.js";
+export * from "./integration/codexTaskNerveHostRuntime.js";

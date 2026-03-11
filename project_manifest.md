@@ -2,7 +2,7 @@
 
 Status: draft
 Managed by: TaskNerve
-Last updated: 2026-03-10
+Last updated: 2026-03-11
 
 This file locks the technical contract for how `project_goals.md` will be achieved.
 
@@ -11,9 +11,8 @@ This file locks the technical contract for how `project_goals.md` will be achiev
 - Repo root: `/Users/adimus/Documents/taskNerve`
 
 ### Languages and runtimes
-- TypeScript for portable native domain logic
-- JavaScript for injected main-process and renderer bridge assets
-- Node.js and Electron-compatible runtime boundaries
+- TypeScript for native domain and integration modules
+- Node.js/Electron-compatible runtime boundaries
 
 ### Toolchains and package managers
 - npm
@@ -23,54 +22,53 @@ This file locks the technical contract for how `project_goals.md` will be achiev
 ### Approved core libraries and tooling
 - `zod` for runtime validation
 - Vitest for tests
-- native Codex desktop bundle patching through `codex-native/scripts/sync-codex-tasknerve.mjs`
+- direct integration modules in `codex-native/src/integration`
 
 ### Notable files and directories
-- `codex-native/`
-- `templates/TASKNERVE_CODEX_MAIN_BRIDGE.js`
-- `templates/TASKNERVE_CODEX_PANEL.js`
+- `codex-native/src/integration/`
+- `codex-native/src/domain/`
+- `codex-native/src/io/`
 - `project_goals.md`
 - `project_manifest.md`
 - `contributing ideas.md`
-- `deprecated/rust/` for archived reference only
+- `deprecated/rust/` (archived reference only)
 
 ## Technical Contract
 
 ### Languages and runtimes
-- Primary implementation language(s): TypeScript and JavaScript
+- Primary implementation language(s): TypeScript
 - Archived-only language(s): Rust under `deprecated/`
-- Runtime targets and supported platforms: Electron/Codex desktop, macOS first
+- Runtime targets and supported platforms: Codex desktop host integrations
 
 ### Libraries and frameworks
 - Preferred libraries and frameworks: Node standard library, `zod`, Vitest
-- Libraries or patterns to avoid: new live Rust dependencies, sidecar-first architectures, redundant local HTTP services as the primary product path
+- Libraries or patterns to avoid: new live Rust dependencies, sidecar-first architectures, runtime injection layers, app-bundle patch tooling
 
 ### Architecture and software patterns
-- Module boundaries: portable domain logic in `codex-native/src`, live host patch assets in `templates/`
+- Module boundaries: domain logic in `codex-native/src/domain`, persistence in `codex-native/src/io`, host integration in `codex-native/src/integration`
 - State rules: repo-local `.tasknerve/` plus root project markdown contracts remain the durable source of truth
-- Error handling: fail clearly, prefer deterministic health probes, keep patching reversible
-- Concurrency model: Codex-hosted native services with project-scoped orchestration and lightweight background refresh
-- UI patterns: match Codex styling and chrome; keep TaskNerve settings compact and task work drawer-first
+- Error handling: fail clearly and keep deterministic validation around settings/registry state
+- Concurrency model: Codex-hosted services with project-scoped orchestration helpers
+- UI patterns: TaskNerve UI should be host-rendered using Codex components/styles, not custom DOM overlays
 
 ### Quality gates
 - Required commands:
   - `cd /Users/adimus/Documents/taskNerve/codex-native && npm install`
   - `cd /Users/adimus/Documents/taskNerve/codex-native && npm run typecheck`
   - `cd /Users/adimus/Documents/taskNerve/codex-native && npm test`
-  - `node --check /Users/adimus/Documents/taskNerve/templates/TASKNERVE_CODEX_MAIN_BRIDGE.js`
-  - `node --check /Users/adimus/Documents/taskNerve/templates/TASKNERVE_CODEX_PANEL.js`
-- Required review expectation: native UX changes should be reviewed against how Codex itself behaves
+  - `bash /Users/adimus/Documents/taskNerve/scripts/public-release-check.sh`
+- Required review expectation: maintain Codex-native behavior and keep integration modular
 - Required docs updates: README, skill docs, and project contracts whenever workflow changes materially
 
 ### Delivery rules
-- Migration strategy: keep archived Rust reference-only; do not reintroduce it to the live path
-- Performance, security, and cost constraints: prefer Codex-native inference and efficient multi-agent orchestration
+- Migration strategy: all new work targets direct host integration modules
+- Performance, security, and cost constraints: prefer Codex-native inference and in-process integration boundaries
 - Dependency rule: new dependencies must fit the Codex-native TypeScript direction
 
 ## Open Questions For The User
-- [ ] Which Codex UI surfaces should TaskNerve integrate with next?
-- [ ] Which project settings belong in the compact settings drawer versus a fuller project page?
-- [ ] Which native host hooks should be treated as stable versus patch-layer implementation details?
+- [ ] Which Codex host integration seam should TaskNerve target first for full UI parity?
+- [ ] Which integration API methods are still missing for complete task drawer parity?
+- [ ] Which controller defaults should be opinionated versus configurable?
 
 ## Lock Status
 - [ ] Mark this file as locked once the technical contract is stable.

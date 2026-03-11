@@ -2,14 +2,15 @@
 
 ## Goal
 
-Make TaskNerve feel like a built-in part of Codex:
+Make TaskNerve feel built into Codex through direct host integration:
 - no iframe
 - no second app
 - no second sign-in
 - no user-facing TaskNerve CLI
 - no Rust in the live runtime path
+- no app-bundle patching/injection path
 
-Codex should remain the host for threads, auth, windows, and desktop UX. TaskNerve should remain the orchestration layer for tasks, controller policy, traces, project docs, and task-aware automation.
+Codex remains the host for threads, auth, windows, and desktop UX. TaskNerve remains the orchestration layer for tasks, controller policy, traces, project docs, and task-aware automation.
 
 ## Steady-State Architecture
 
@@ -22,32 +23,34 @@ Codex owns:
 
 TaskNerve owns:
 - project-scoped queue logic
-- task drawer and TaskNerve settings page
-- controller and worker orchestration
+- controller and worker orchestration policy
 - project document lifecycle
-- trace capture and export policy
-- TaskNerve branch state and workflow policy
+- task sorting/filtering/queue semantics
+- repo-local settings and registry state
 
 ## Implementation Direction
 
-Native TaskNerve work should continue to move toward:
-- TypeScript-first domain modules in `codex-native/`
-- renderer and main-process behavior that mirrors Codex's own style
-- in-app routes and host services instead of a second binary interface
-- repo-local persistence as the durable source of truth
+Native TaskNerve work targets:
+- TypeScript-first domain modules in `codex-native/src/domain`
+- persistence modules in `codex-native/src/io`
+- direct host integration modules in `codex-native/src/integration`
+- typed contracts at process and persistence boundaries
+- repo-local persistence as durable source of truth
 
 ## Development Model
 
-The main developer loop is:
-1. edit `codex-native/` or `templates/`
+Main loop:
+1. edit `codex-native/src`
 2. run native checks
-3. resync `Codex TaskNerve.app`
-4. review the result directly inside Codex
+3. validate behavior through direct host integration seams
 
-The supported sync command is:
+Run checks:
 
 ```bash
-bash /Users/adimus/Documents/taskNerve/install-macos.sh --app "/Applications/Codex TaskNerve.app"
+cd /Users/adimus/Documents/taskNerve/codex-native
+npm install
+npm run typecheck
+npm test
 ```
 
 ## Explicit Non-Goals
@@ -56,4 +59,5 @@ The branch should not drift back toward:
 - a standalone TaskNerve CLI as the primary user surface
 - a Rust sidecar
 - a second auth path
-- a browser-only board outside Codex
+- browser-only board workflows
+- any patch/injection-based runtime integration

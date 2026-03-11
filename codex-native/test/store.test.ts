@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -26,6 +26,25 @@ describe("native repo-local stores", () => {
 
     const raw = await readFile(timelineProjectCodexSettingsPath(repoRoot), "utf8");
     expect(raw).toMatch(/gpt-5-codex-controller/);
+  });
+
+  it("does not rewrite project codex settings when nothing changed", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-native-repo-"));
+    await loadProjectCodexSettings({
+      repoRoot,
+      gitOriginUrl: "git@github.com:acme/example.git",
+    });
+    const filePath = timelineProjectCodexSettingsPath(repoRoot);
+    const firstStat = await stat(filePath);
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    await loadProjectCodexSettings({
+      repoRoot,
+      gitOriginUrl: "git@github.com:acme/example.git",
+    });
+    const secondStat = await stat(filePath);
+    expect(secondStat.mtimeMs).toBe(firstStat.mtimeMs);
   });
 
   it("loads and persists the global project registry", async () => {
@@ -62,5 +81,19 @@ describe("native repo-local stores", () => {
 
     const reloaded = await loadProjectRegistry(env);
     expect(reloaded.projects.map((project) => project.name)).toEqual(["alpha", "zeta"]);
+  });
+
+  it("does not rewrite project registry when content is unchanged", async () => {
+    const taskNerveHome = await mkdtemp(path.join(os.tmpdir(), "tasknerve-native-home-"));
+    const env = { ...process.env, TASKNERVE_HOME: taskNerveHome };
+    await loadProjectRegistry(env);
+    const filePath = path.join(taskNerveHome, "projects.json");
+    const firstStat = await stat(filePath);
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    await loadProjectRegistry(env);
+    const secondStat = await stat(filePath);
+    expect(secondStat.mtimeMs).toBe(firstStat.mtimeMs);
   });
 });

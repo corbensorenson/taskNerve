@@ -16,9 +16,26 @@ npm test
 
 cd "$REPO_ROOT"
 
-echo "[release-check] template syntax"
-node --check "$REPO_ROOT/templates/TASKNERVE_CODEX_MAIN_BRIDGE.js"
-node --check "$REPO_ROOT/templates/TASKNERVE_CODEX_PANEL.js"
+echo "[release-check] no patch/injection runtime artifacts"
+test ! -f "$REPO_ROOT/codex-native/scripts/sync-codex-tasknerve.mjs"
+test ! -f "$REPO_ROOT/templates/TASKNERVE_CODEX_MAIN_BRIDGE.js"
+test ! -f "$REPO_ROOT/templates/TASKNERVE_CODEX_PANEL.js"
+test ! -f "$REPO_ROOT/templates/TASKNERVE_CODEX_MAIN_BRIDGE_RUNTIME.cjs"
+test ! -f "$REPO_ROOT/templates/TASKNERVE_CODEX_PANEL_RUNTIME.js"
+
+if rg -n --glob '!deprecated/**' --glob '!**/node_modules/**' \
+  "sync-codex-tasknerve\\.mjs|allow-legacy-patching|legacy:sync:app|TASKNERVE_CODEX_MAIN_BRIDGE|TASKNERVE_CODEX_PANEL" \
+  "$REPO_ROOT/README.md" \
+  "$REPO_ROOT/CONTRIBUTING.md" \
+  "$REPO_ROOT/project_goals.md" \
+  "$REPO_ROOT/project_manifest.md" \
+  "$REPO_ROOT/docs" \
+  "$REPO_ROOT/codex-native/README.md" \
+  "$REPO_ROOT/codex-native/package.json" \
+  "$REPO_ROOT/skills/tasknerve"; then
+  echo "Found disallowed patch/injection references in active files." >&2
+  exit 1
+fi
 
 echo "[release-check] shell syntax"
 bash -n "$REPO_ROOT/install-macos.sh"

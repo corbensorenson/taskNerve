@@ -6,53 +6,31 @@ usage() {
 tasknerve native installer
 
 Usage:
-  bash scripts/install-unix.sh [--platform macos] [native sync args...]
+  bash scripts/install-unix.sh
 
 Notes:
-  - The Rust installer path has been deprecated.
-  - The active install/sync path now patches the local Codex desktop app through the native JS workspace in `codex-native/`.
-  - Linux is not supported by this native cutover script yet.
+  - TaskNerve now uses direct Codex-native integration modules.
+  - App-bundle patching/injection is not supported.
+  - There is no legacy fallback patch path.
 USAGE
 }
 
-PLATFORM=""
-ARGS=()
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --platform)
-      PLATFORM="$2"
-      shift 2
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      ARGS+=("$1")
-      shift
-      ;;
-  esac
-done
-
-if [[ -z "$PLATFORM" ]]; then
-  case "$(uname -s)" in
-    Darwin) PLATFORM="macos" ;;
-    Linux) PLATFORM="linux" ;;
-    *)
-      echo "Unsupported Unix platform: $(uname -s)" >&2
-      exit 1
-      ;;
-  esac
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cat <<MSG
+TaskNerve uses direct Codex-native integration only.
 
-if [[ "$PLATFORM" != "macos" || "$(uname -s)" != "Darwin" ]]; then
-  echo "The native Codex TaskNerve cutover currently supports macOS only." >&2
-  exit 1
-fi
+Integration entrypoints:
+  $REPO_ROOT/codex-native/src/integration/taskNerveService.ts
+  $REPO_ROOT/codex-native/src/integration/codexTaskNerveHostRuntime.ts
 
-cd "$REPO_ROOT/codex-native"
-npm install
-node ./scripts/sync-codex-tasknerve.mjs "${ARGS[@]}"
+Run native checks:
+  cd $REPO_ROOT/codex-native
+  npm install
+  npm run typecheck
+  npm test
+MSG

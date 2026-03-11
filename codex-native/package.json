@@ -8,7 +8,6 @@
     "node": ">=20"
   },
   "scripts": {
-    "sync:app": "node scripts/sync-codex-tasknerve.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:quiet": "vitest run --silent --reporter=dot"

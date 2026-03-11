@@ -1,11 +1,12 @@
 # Deprecated
 
-This directory is reserved for code that has already been removed from the live TaskNerve runtime.
+This directory is reserved for code removed from the live TaskNerve runtime.
 
-The legacy Rust TaskNerve runtime now lives under [deprecated/rust/](/Users/adimus/Documents/taskNerve/deprecated/rust/).
+The legacy Rust runtime lives under [deprecated/rust/](/Users/adimus/Documents/taskNerve/deprecated/rust/).
 
-The live Codex TaskNerve path on `codex/codex-native` is the native JS/TS workspace plus the patched Codex desktop bundle.
+The live TaskNerve path on `codex/codex-native` is direct TypeScript integration from:
+- `/Users/adimus/Documents/taskNerve/codex-native/src/integration/`
 
-Historical cutover context is documented in:
+Historical cutover context:
 - `/Users/adimus/Documents/taskNerve/docs/codex_native_cutover_audit.md`
 - `/Users/adimus/Documents/taskNerve/docs/codex_native_integration_plan.md`

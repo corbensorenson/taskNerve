@@ -22,6 +22,7 @@ export interface CodexHostServices {
   openThread: (threadId: string) => Promise<unknown> | unknown;
   readRepositorySettings: () => Promise<unknown> | unknown;
   writeRepositorySettings: (settings: unknown) => Promise<unknown> | unknown;
+  getCodexStylingContext?: () => Promise<unknown> | unknown;
 }
 
 export function missingCodexHostServiceMethods(host: Partial<CodexHostServices> | null | undefined) {

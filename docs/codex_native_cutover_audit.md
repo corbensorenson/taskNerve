@@ -1,31 +1,33 @@
 # Codex TaskNerve Native Cutover Audit
 
-Date: 2026-03-10
+Date: 2026-03-11
 Branch: `codex/codex-native`
 
 ## Bottom Line
 
-TaskNerve has crossed the cutover.
+TaskNerve now runs as direct Codex-native integration modules.
 
-The live product path is now:
-- native JS/TS patch and sync tooling under `codex-native/`
-- native in-process TaskNerve services inside the patched Codex desktop runtime
-- renderer requests that target the native bridge on `http://127.0.0.1:7791/tasknerve/...`
+Live integration path:
+- TypeScript host integration modules under `codex-native/src/integration`
+- shared domain logic under `codex-native/src/domain`
+- shared persistence under `codex-native/src/io`
 - repo-local TaskNerve state plus root project contract markdown files
 
-The archived Rust runtime lives under [deprecated/rust/](/Users/adimus/Documents/taskNerve/deprecated/rust/) and is not part of the live app path.
+No runtime patching/injection workflow is part of the supported architecture.
+
+The archived Rust runtime under [deprecated/rust/](/Users/adimus/Documents/taskNerve/deprecated/rust/) is not part of the live app path.
 
 ## Live Runtime
 
 Active runtime surfaces:
-- [codex-native/](/Users/adimus/Documents/taskNerve/codex-native/)
-- [templates/TASKNERVE_CODEX_MAIN_BRIDGE.js](/Users/adimus/Documents/taskNerve/templates/TASKNERVE_CODEX_MAIN_BRIDGE.js)
-- [templates/TASKNERVE_CODEX_PANEL.js](/Users/adimus/Documents/taskNerve/templates/TASKNERVE_CODEX_PANEL.js)
+- [codex-native/src/integration/taskNerveService.ts](/Users/adimus/Documents/taskNerve/codex-native/src/integration/taskNerveService.ts)
+- [codex-native/src/integration/codexTaskNerveHostRuntime.ts](/Users/adimus/Documents/taskNerve/codex-native/src/integration/codexTaskNerveHostRuntime.ts)
+- [codex-native/src/domain/](/Users/adimus/Documents/taskNerve/codex-native/src/domain)
+- [codex-native/src/io/](/Users/adimus/Documents/taskNerve/codex-native/src/io)
 
-Active install and sync path:
-- [install-macos.sh](/Users/adimus/Documents/taskNerve/install-macos.sh)
-- [scripts/install-unix.sh](/Users/adimus/Documents/taskNerve/scripts/install-unix.sh)
-- [codex-native/scripts/sync-codex-tasknerve.mjs](/Users/adimus/Documents/taskNerve/codex-native/scripts/sync-codex-tasknerve.mjs)
+Installer behavior:
+- [install-macos.sh](/Users/adimus/Documents/taskNerve/install-macos.sh) no longer performs app patching
+- [scripts/install-unix.sh](/Users/adimus/Documents/taskNerve/scripts/install-unix.sh) no longer performs app patching
 
 ## Archived Runtime
 
@@ -37,22 +39,22 @@ These remain for reference and migration history only.
 
 ## Product Contract
 
-The supported product model on this branch is:
-- one app: Codex TaskNerve
-- one inference path: Codex's built-in signed-in inference
-- one user workflow: native TaskNerve page plus task drawer inside Codex
-- one durable project state model: `.tasknerve/`, `project_goals.md`, `project_manifest.md`, `contributing ideas.md`
+Supported model on this branch:
+- one app: Codex
+- one inference path: Codex built-in signed-in inference
+- one durable state model: `.tasknerve/`, `project_goals.md`, `project_manifest.md`, `contributing ideas.md`
+- one integration direction: direct host integration APIs
 
-Not supported as primary workflows anymore:
+Not supported as primary workflows:
 - user-facing TaskNerve CLI
 - Rust runtime services
-- the old browser task GUI
-- the old localhost `7788` panel sidecar
+- localhost sidecar panel services
+- patch/injection-based runtime overlays
 
 ## Verification Targets
 
-Healthy native state means:
-- `127.0.0.1:7788` is not serving the old panel runtime
-- `127.0.0.1:7791/tasknerve/health` reports healthy
-- the patched app bundle contains the injected native bridge and panel assets
-- TaskNerve task/project actions work from inside Codex without a separate CLI process
+Healthy state means:
+- `codex-native` tests and typecheck pass
+- integration behavior is reachable via direct service methods (no bridge dependency)
+- no active patch/injection runtime scripts exist in supported paths
+- task/project orchestration logic remains fully available from shared integration modules

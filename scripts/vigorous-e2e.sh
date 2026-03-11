@@ -15,15 +15,11 @@ npm test >/dev/null
 
 cd "$REPO_ROOT"
 
-echo "[vigorous-e2e] template syntax"
-node --check "$REPO_ROOT/templates/TASKNERVE_CODEX_MAIN_BRIDGE.js" >/dev/null
-node --check "$REPO_ROOT/templates/TASKNERVE_CODEX_PANEL.js" >/dev/null
-
-echo "[vigorous-e2e] native bridge health"
-if curl -sf "http://127.0.0.1:7791/tasknerve/health" >/dev/null; then
-  echo "[vigorous-e2e] native bridge healthy"
-else
-  echo "[vigorous-e2e] warning: native bridge is not currently serving on 127.0.0.1:7791" >&2
-fi
+echo "[vigorous-e2e] no patch/injection runtime artifacts"
+test ! -f "$REPO_ROOT/codex-native/scripts/sync-codex-tasknerve.mjs"
+test ! -f "$REPO_ROOT/templates/TASKNERVE_CODEX_MAIN_BRIDGE.js"
+test ! -f "$REPO_ROOT/templates/TASKNERVE_CODEX_PANEL.js"
+test ! -f "$REPO_ROOT/templates/TASKNERVE_CODEX_MAIN_BRIDGE_RUNTIME.cjs"
+test ! -f "$REPO_ROOT/templates/TASKNERVE_CODEX_PANEL_RUNTIME.js"
 
 echo "[vigorous-e2e] complete"
