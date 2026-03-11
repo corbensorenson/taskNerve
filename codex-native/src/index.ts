@@ -10,3 +10,4 @@ export * from "./io/projectRegistryStore.js";
 export * from "./host/codexHostServices.js";
 export * from "./integration/taskNerveService.js";
 export * from "./integration/codexTaskNerveHostRuntime.js";
+export * from "./integration/threadDisplay/index.js";

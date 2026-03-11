@@ -31,13 +31,13 @@ This file locks the technical contract for how `project_goals.md` will be achiev
 - `project_goals.md`
 - `project_manifest.md`
 - `contributing ideas.md`
-- `deprecated/rust/` (archived reference only)
+- archived runtime sources (reference only)
 
 ## Technical Contract
 
 ### Languages and runtimes
 - Primary implementation language(s): TypeScript
-- Archived-only language(s): Rust under `deprecated/`
+- Archived-only language(s): Rust (reference-only, outside the live runtime path)
 - Runtime targets and supported platforms: Codex desktop host integrations
 
 ### Libraries and frameworks

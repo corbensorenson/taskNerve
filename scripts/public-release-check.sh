@@ -23,7 +23,7 @@ test ! -f "$REPO_ROOT/templates/TASKNERVE_CODEX_PANEL.js"
 test ! -f "$REPO_ROOT/templates/TASKNERVE_CODEX_MAIN_BRIDGE_RUNTIME.cjs"
 test ! -f "$REPO_ROOT/templates/TASKNERVE_CODEX_PANEL_RUNTIME.js"
 
-if rg -n --glob '!deprecated/**' --glob '!**/node_modules/**' \
+if rg -n --glob '!**/node_modules/**' \
   "sync-codex-tasknerve\\.mjs|allow-legacy-patching|legacy:sync:app|TASKNERVE_CODEX_MAIN_BRIDGE|TASKNERVE_CODEX_PANEL" \
   "$REPO_ROOT/README.md" \
   "$REPO_ROOT/CONTRIBUTING.md" \
@@ -41,6 +41,7 @@ echo "[release-check] shell syntax"
 bash -n "$REPO_ROOT/install-macos.sh"
 bash -n "$REPO_ROOT/scripts/install-unix.sh"
 bash -n "$REPO_ROOT/scripts/auto-install-dev.sh"
+bash -n "$REPO_ROOT/scripts/build-codex-tasknerve-app.sh"
 bash -n "$REPO_ROOT/scripts/install-dev-hooks.sh"
 bash -n "$REPO_ROOT/scripts/install_codex_skill.sh"
 

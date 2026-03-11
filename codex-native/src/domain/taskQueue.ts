@@ -11,6 +11,28 @@ function normalizeSearchText(value: unknown): string {
   return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
+function includesNormalizedSearch(value: unknown, normalizedSearch: string): boolean {
+  if (!normalizedSearch || typeof value !== "string" || value.length === 0) {
+    return false;
+  }
+  return value.toLowerCase().includes(normalizedSearch);
+}
+
+function arrayIncludesNormalizedSearch(
+  values: readonly unknown[] | undefined,
+  normalizedSearch: string,
+): boolean {
+  if (!values || values.length === 0) {
+    return false;
+  }
+  for (const value of values) {
+    if (includesNormalizedSearch(value, normalizedSearch)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function taskUserTags(task: Partial<TaskRecord>): string[] {
   return (task.tags || []).filter((tag) => {
     return !tag.startsWith("intelligence:") && !tag.startsWith("model:");
@@ -43,18 +65,14 @@ export function filterTasks(
     return sorted;
   }
   return sorted.filter((task) => {
-    const haystack = [
-      task.task_id,
-      task.title,
-      task.detail,
-      task.claimed_by_agent_id,
-      ...(task.tags || []),
-      ...(task.depends_on || []),
-    ]
-      .filter(Boolean)
-      .join(" ")
-      .toLowerCase();
-    return haystack.includes(normalizedSearch);
+    return (
+      includesNormalizedSearch(task.task_id, normalizedSearch) ||
+      includesNormalizedSearch(task.title, normalizedSearch) ||
+      includesNormalizedSearch(task.detail, normalizedSearch) ||
+      includesNormalizedSearch(task.claimed_by_agent_id, normalizedSearch) ||
+      arrayIncludesNormalizedSearch(task.tags, normalizedSearch) ||
+      arrayIncludesNormalizedSearch(task.depends_on, normalizedSearch)
+    );
   });
 }
 

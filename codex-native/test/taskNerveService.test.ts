@@ -15,6 +15,7 @@ describe("taskNerve service integration surface", () => {
     expect(health.mode).toBe("codex-native-integration");
     expect(health.capabilities).toContain("project_settings");
     expect(health.capabilities).toContain("task_snapshot");
+    expect(health.capabilities).toContain("thread_display");
   });
 
   it("builds project contracts and task snapshots without HTTP bridge glue", () => {
@@ -66,6 +67,60 @@ describe("taskNerve service integration surface", () => {
 
     expect(queued.replaced_pending).toBe(true);
     expect(queued.queue.map((entry) => entry.prompt_id)).toEqual(["new"]);
+  });
+
+  it("builds thread display snapshots with timestamps, prompt navigation, and non-janky scroll policy", () => {
+    const service = createTaskNerveService();
+    const thread = {
+      conversation: {
+        turns: [
+          {
+            id: "turn-1",
+            created_at: "2026-03-10T15:00:00.000Z",
+            input_items: [{ type: "message", text: "First prompt" }],
+            output_items: [{ type: "message", text: "First answer" }],
+          },
+          {
+            id: "turn-2",
+            created_at: "2026-03-10T15:01:00.000Z",
+            input_items: [{ type: "message", text: "Second prompt" }],
+            output_items: [
+              { type: "tool_call", name: "exec_command", detail: "ls -la" },
+              { type: "message", text: "Second answer" },
+            ],
+          },
+        ],
+      },
+    };
+
+    const snapshot = service.threadDisplaySnapshot({
+      thread,
+      current_turn_key: "assistant:turn-1",
+      previous_entry_count: 2,
+      previous_viewport: {
+        scroll_top_px: 120,
+        scroll_height_px: 1000,
+        viewport_height_px: 500,
+      },
+      viewport: {
+        scroll_top_px: 120,
+        scroll_height_px: 1300,
+        viewport_height_px: 500,
+      },
+    });
+
+    expect(snapshot.entries.length).toBe(5);
+    expect(snapshot.entries.every((entry) => entry.timestamp_label.length > 0)).toBe(true);
+    expect(snapshot.entries.every((entry) => entry.timestamp_tooltip.length > 0)).toBe(true);
+
+    const toolEntry = snapshot.entries.find((entry) => entry.text.includes("exec_command"));
+    expect(toolEntry?.kind).toBe("action");
+
+    expect(snapshot.prompt_navigation.previous_turn_key).toBe(null);
+    expect(snapshot.prompt_navigation.next_turn_key).toBe("user:turn-2");
+
+    expect(snapshot.scroll_decision.mode).toBe("preserve-offset");
+    expect(snapshot.scroll_decision.scroll_top_px).toBe(420);
   });
 
   it("loads and writes project settings and registry through the shared IO stores", async () => {

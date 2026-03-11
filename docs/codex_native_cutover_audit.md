@@ -15,7 +15,7 @@ Live integration path:
 
 No runtime patching/injection workflow is part of the supported architecture.
 
-The archived Rust runtime under [deprecated/rust/](/Users/adimus/Documents/taskNerve/deprecated/rust/) is not part of the live app path.
+The archived Rust runtime is not part of the live app path.
 
 ## Live Runtime
 
@@ -32,8 +32,8 @@ Installer behavior:
 ## Archived Runtime
 
 Archived legacy surfaces:
-- [deprecated/rust/](/Users/adimus/Documents/taskNerve/deprecated/rust/)
-- [deprecated/legacy-ui/](/Users/adimus/Documents/taskNerve/deprecated/legacy-ui/)
+- archived Rust runtime sources
+- archived legacy UI sources
 
 These remain for reference and migration history only.
 

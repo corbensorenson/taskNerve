@@ -19,7 +19,7 @@ Use this skill when any of the following are true:
 ## Runtime Rules
 
 - The live TaskNerve path on `codex/codex-native` is TypeScript inside Codex host runtime seams.
-- The archived Rust runtime under [deprecated/rust/](/Users/adimus/Documents/taskNerve/deprecated/rust/) is reference-only.
+- The archived Rust runtime is reference-only and not part of the live path.
 - Do not steer users toward a TaskNerve CLI workflow on this branch.
 - Do not add app-bundle patching, runtime injection, localhost bridge services, or DOM mutation overlays.
 - If a required host surface is missing, document the host gap and implement through typed Codex host-service contracts.

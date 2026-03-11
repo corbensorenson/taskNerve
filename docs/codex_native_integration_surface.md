@@ -20,10 +20,12 @@ These surfaces let Codex host code call TaskNerve orchestration logic directly w
 - model routing
 - project contract generation
 - controller bootstrap prompt generation
+- thread display snapshots (timestamped entries, prompt-history navigation, virtualization window, scroll decisions)
 
 `createCodexTaskNerveHostRuntime()`:
 - host-integrated snapshots with explicit host-styling contract
 - direct controller-thread bootstrapping through Codex host service methods
+- host-exposed thread display snapshot method for native Codex thread UIs
 
 ## Example
 
@@ -46,6 +48,16 @@ const snapshot = await runtime.snapshot({
 const controller = await runtime.bootstrapControllerThread({
   repoRoot,
   projectName,
+});
+
+const threadDisplay = await runtime.threadDisplaySnapshot({
+  thread: rawThreadPayload,
+  current_turn_key: currentTurnKey,
+  viewport: {
+    scroll_top_px,
+    scroll_height_px,
+    viewport_height_px,
+  },
 });
 ```
 

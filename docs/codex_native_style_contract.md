@@ -45,4 +45,4 @@ TaskNerve is closest to Codex when:
 - orchestration logic lives in TypeScript/JavaScript
 - the active app surface is entirely inside Codex
 - user workflows happen through the TaskNerve page and task drawer
-- archived Rust code remains reference-only under `deprecated/`
+- archived Rust code remains reference-only outside the live runtime path

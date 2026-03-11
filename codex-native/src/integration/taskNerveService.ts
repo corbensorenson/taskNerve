@@ -28,6 +28,11 @@ import type {
 } from "../schemas.js";
 import { loadProjectCodexSettings, writeProjectCodexSettings } from "../io/projectCodexSettingsStore.js";
 import { loadProjectRegistry, writeProjectRegistry } from "../io/projectRegistryStore.js";
+import {
+  buildThreadDisplaySnapshot,
+  type BuildThreadDisplayOptions,
+  type ThreadDisplaySnapshot,
+} from "./threadDisplay/index.js";
 
 export interface TaskNerveServiceHealth {
   ok: true;
@@ -76,6 +81,7 @@ export interface TaskNerveService {
   ) => Promise<ProjectCodexSettings>;
   loadRegistry: (env?: NodeJS.ProcessEnv) => Promise<ProjectRegistry>;
   writeRegistry: (registry: ProjectRegistry, env?: NodeJS.ProcessEnv) => Promise<ProjectRegistry>;
+  threadDisplaySnapshot: (options: BuildThreadDisplayOptions) => ThreadDisplaySnapshot;
 }
 
 function uniqueSorted(values: string[]): string[] {
@@ -96,6 +102,7 @@ export function createTaskNerveService(): TaskNerveService {
         "controller_bootstrap",
         "project_contract_templates",
         "task_snapshot",
+        "thread_display",
         "prompt_queue",
         "model_routing",
       ],
@@ -142,5 +149,7 @@ export function createTaskNerveService(): TaskNerveService {
     loadRegistry: (env = process.env) => loadProjectRegistry(env),
 
     writeRegistry: (registry, env = process.env) => writeProjectRegistry(registry, env),
+
+    threadDisplaySnapshot: (options) => buildThreadDisplaySnapshot(options),
   };
 }

@@ -37,6 +37,14 @@ bash ./scripts/public-release-check.sh
 bash ./scripts/vigorous-e2e.sh
 ```
 
+Build A/B test integration bundle:
+
+```bash
+bash ./install-macos.sh
+```
+
+This produces a timestamped artifact under `target/codex-tasknerve-app-build/` containing compiled integration modules, an npm package tarball, bundled skill files, and a build manifest.
+
 Install/refresh bundled skill in Codex:
 
 ```bash

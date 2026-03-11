@@ -5,6 +5,12 @@ import {
 } from "../host/codexHostServices.js";
 import type { ProjectCodexSettings, TaskRecord } from "../schemas.js";
 import { createTaskNerveService, type TaskNerveService } from "./taskNerveService.js";
+import type {
+  BuildThreadDisplayOptions,
+  ThreadDisplaySnapshot,
+} from "./threadDisplay/index.js";
+
+const HOST_STYLING_CONTEXT_CACHE_TTL_MS = 10_000;
 
 export interface CodexTaskNerveSnapshotOptions {
   repoRoot: string;
@@ -54,6 +60,7 @@ export interface CodexTaskNerveHostRuntime {
   bootstrapControllerThread: (
     options: CodexControllerBootstrapOptions,
   ) => Promise<CodexControllerBootstrapResult>;
+  threadDisplaySnapshot: (options: BuildThreadDisplayOptions) => Promise<ThreadDisplaySnapshot>;
 }
 
 function parseThreadId(value: unknown): string | null {
@@ -89,18 +96,52 @@ export function createCodexTaskNerveHostRuntime(options: {
 }): CodexTaskNerveHostRuntime {
   const host = assertCodexHostServices(options.host);
   const taskNerve = options.taskNerveService ?? createTaskNerveService();
+  let hostStylingContextCache: {
+    value: unknown;
+    fetchedAtMs: number;
+  } | null = null;
+  let hostStylingContextInflight: Promise<unknown> | null = null;
+
+  async function loadHostStylingContext(): Promise<unknown> {
+    if (typeof host.getCodexStylingContext !== "function") {
+      return null;
+    }
+    const now = Date.now();
+    if (
+      hostStylingContextCache &&
+      now - hostStylingContextCache.fetchedAtMs < HOST_STYLING_CONTEXT_CACHE_TTL_MS
+    ) {
+      return hostStylingContextCache.value;
+    }
+    if (hostStylingContextInflight) {
+      return hostStylingContextInflight;
+    }
+    hostStylingContextInflight = Promise.resolve(host.getCodexStylingContext())
+      .then((value) => {
+        hostStylingContextCache = {
+          value,
+          fetchedAtMs: Date.now(),
+        };
+        return value;
+      })
+      .finally(() => {
+        hostStylingContextInflight = null;
+      });
+    return hostStylingContextInflight;
+  }
 
   return {
     snapshot: async (snapshotOptions) => {
-      const settings = await taskNerve.loadProjectSettings({
+      const settingsPromise = taskNerve.loadProjectSettings({
         repoRoot: snapshotOptions.repoRoot,
         gitOriginUrl: snapshotOptions.gitOriginUrl,
       });
+      const hostStylingContextPromise = loadHostStylingContext();
       const taskSnapshot = taskNerve.taskSnapshot(snapshotOptions.tasks, snapshotOptions.search || "");
-      const hostStylingContext =
-        typeof host.getCodexStylingContext === "function"
-          ? await host.getCodexStylingContext()
-          : null;
+      const [settings, hostStylingContext] = await Promise.all([
+        settingsPromise,
+        hostStylingContextPromise,
+      ]);
       return {
         integration_mode: "codex-native-host",
         styling: {
@@ -151,10 +192,11 @@ export function createCodexTaskNerveHostRuntime(options: {
         throw new Error("Codex host startThread did not return a thread identifier");
       }
 
-      await host.setThreadName(threadId, title);
+      const beforeTurnOps: Array<Promise<unknown> | unknown> = [host.setThreadName(threadId, title)];
       if (controllerModel) {
-        await host.setThreadModel(threadId, controllerModel);
+        beforeTurnOps.push(host.setThreadModel(threadId, controllerModel));
       }
+      await Promise.all(beforeTurnOps);
       await host.startTurn({
         thread_id: threadId,
         threadId,
@@ -162,8 +204,7 @@ export function createCodexTaskNerveHostRuntime(options: {
         model: controllerModel || undefined,
         prompt,
       });
-      await host.pinThread(threadId);
-      await host.openThread(threadId);
+      await Promise.all([host.pinThread(threadId), host.openThread(threadId)]);
 
       return {
         integration_mode: "codex-native-host",
@@ -172,6 +213,10 @@ export function createCodexTaskNerveHostRuntime(options: {
         controller_model: controllerModel,
         prompt,
       };
+    },
+
+    threadDisplaySnapshot: async (displayOptions) => {
+      return taskNerve.threadDisplaySnapshot(displayOptions);
     },
   };
 }

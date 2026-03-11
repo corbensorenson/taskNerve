@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -45,6 +45,26 @@ describe("native repo-local stores", () => {
     });
     const secondStat = await stat(filePath);
     expect(secondStat.mtimeMs).toBe(firstStat.mtimeMs);
+  });
+
+  it("reloads project codex settings after external file mutation", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-native-repo-"));
+    await loadProjectCodexSettings({
+      repoRoot,
+      gitOriginUrl: "git@github.com:acme/example.git",
+    });
+    const filePath = timelineProjectCodexSettingsPath(repoRoot);
+    const current = JSON.parse(await readFile(filePath, "utf8"));
+    current.controller_default_model = "gpt-5-codex-controller";
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await writeFile(filePath, `${JSON.stringify(current, null, 2)}\n`, "utf8");
+
+    const reloaded = await loadProjectCodexSettings({
+      repoRoot,
+      gitOriginUrl: "git@github.com:acme/example.git",
+    });
+    expect(reloaded.controller_default_model).toBe("gpt-5-codex-controller");
   });
 
   it("loads and persists the global project registry", async () => {
@@ -95,5 +115,29 @@ describe("native repo-local stores", () => {
     await loadProjectRegistry(env);
     const secondStat = await stat(filePath);
     expect(secondStat.mtimeMs).toBe(firstStat.mtimeMs);
+  });
+
+  it("reloads project registry after external file mutation", async () => {
+    const taskNerveHome = await mkdtemp(path.join(os.tmpdir(), "tasknerve-native-home-"));
+    const env = { ...process.env, TASKNERVE_HOME: taskNerveHome };
+    await loadProjectRegistry(env);
+    const filePath = path.join(taskNerveHome, "projects.json");
+    const current = JSON.parse(await readFile(filePath, "utf8"));
+    current.projects = [
+      {
+        name: "beta",
+        repo_root: "/tmp/beta",
+        added_at_utc: "2026-03-10T00:00:00.000Z",
+        updated_at_utc: "2026-03-10T00:00:00.000Z",
+        last_activity_at_utc: null,
+        last_opened_at_utc: null,
+      },
+    ];
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await writeFile(filePath, `${JSON.stringify(current, null, 2)}\n`, "utf8");
+
+    const reloaded = await loadProjectRegistry(env);
+    expect(reloaded.projects.map((project) => project.name)).toEqual(["beta"]);
   });
 });

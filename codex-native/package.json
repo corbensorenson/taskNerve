@@ -8,6 +8,7 @@
     "node": ">=20"
   },
   "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:quiet": "vitest run --silent --reporter=dot"

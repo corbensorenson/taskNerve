@@ -9,9 +9,8 @@ Usage:
   bash scripts/install-unix.sh
 
 Notes:
-  - TaskNerve now uses direct Codex-native integration modules.
+  - Builds a Codex TaskNerve integration bundle for A/B testing.
   - App-bundle patching/injection is not supported.
-  - There is no legacy fallback patch path.
 USAGE
 }
 
@@ -21,16 +20,4 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cat <<MSG
-TaskNerve uses direct Codex-native integration only.
-
-Integration entrypoints:
-  $REPO_ROOT/codex-native/src/integration/taskNerveService.ts
-  $REPO_ROOT/codex-native/src/integration/codexTaskNerveHostRuntime.ts
-
-Run native checks:
-  cd $REPO_ROOT/codex-native
-  npm install
-  npm run typecheck
-  npm test
-MSG
+bash "$REPO_ROOT/scripts/build-codex-tasknerve-app.sh"

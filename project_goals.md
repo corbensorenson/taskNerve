@@ -14,7 +14,7 @@ This file locks the user-approved outcomes for TaskNerve. Technical implementati
 ### Detected implementation direction
 - TypeScript-first integration through `codex-native/src/integration`
 - Host-facing orchestration logic under `codex-native/src`
-- Archived Rust runtime parked under `deprecated/rust/`
+- Archived Rust runtime retained only as historical reference outside the live path
 
 ## Overarching Goals
 - [ ] Make TaskNerve feel fully built into Codex host workflows.

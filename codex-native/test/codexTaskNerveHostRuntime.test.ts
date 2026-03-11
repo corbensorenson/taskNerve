@@ -46,6 +46,14 @@ describe("codex TaskNerve host runtime", () => {
     });
     expect(snapshot.task_snapshot.visible_tasks).toHaveLength(1);
     expect(snapshot.task_snapshot.visible_tasks[0]?.task_id).toBe("a");
+
+    await runtime.snapshot({
+      repoRoot,
+      projectName: "taskNerve",
+      tasks: [],
+      search: "",
+    });
+    expect(host.getCodexStylingContext).toHaveBeenCalledTimes(1);
   });
 
   it("bootstraps the controller thread directly through Codex host services", async () => {
@@ -70,5 +78,34 @@ describe("codex TaskNerve host runtime", () => {
     expect(host.startTurn).toHaveBeenCalledTimes(1);
     expect(host.pinThread).toHaveBeenCalledWith("thread-controller");
     expect(host.openThread).toHaveBeenCalledWith("thread-controller");
+  });
+
+  it("exposes thread display snapshots through the host runtime integration surface", async () => {
+    const host = mockHostServices();
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+    const thread = {
+      turns: [
+        {
+          id: "turn-1",
+          created_at: "2026-03-10T10:00:00.000Z",
+          input_items: [{ type: "message", text: "hello" }],
+          output_items: [{ type: "message", text: "world" }],
+        },
+      ],
+    };
+
+    const snapshot = await runtime.threadDisplaySnapshot({
+      thread,
+      current_turn_key: "assistant:turn-1",
+      viewport: {
+        scroll_top_px: 0,
+        scroll_height_px: 400,
+        viewport_height_px: 300,
+      },
+    });
+
+    expect(snapshot.integration_mode).toBe("codex-native-host");
+    expect(snapshot.entries).toHaveLength(2);
+    expect(snapshot.prompt_navigation.user_turn_keys).toEqual(["user:turn-1"]);
   });
 });

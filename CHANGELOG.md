@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Completed the Codex-native cutover on `codex/codex-native`: the live runtime is now JS/TS inside the patched Codex desktop app, the Rust runtime is archived under `deprecated/rust/`, and the product is documented as an in-app workflow instead of a user-facing CLI.
+- Completed the Codex-native cutover on `codex/codex-native`: the live runtime is now JS/TS inside native Codex integration modules, the Rust runtime is archived out of the live path, and the product is documented as an in-app workflow instead of a user-facing CLI.
 - Renamed the project to TaskNerve and standardized the CLI/package on `tasknerve`.
 - Added cross-platform installers: macOS, Linux, Windows.
 - Added shared Unix installer engine with optional skill install.
