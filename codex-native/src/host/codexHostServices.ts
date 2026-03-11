@@ -88,6 +88,9 @@ export interface CodexHostServices {
     scrollTopPx: number,
     options?: { behavior?: "auto" | "smooth" },
   ) => Promise<unknown> | unknown;
+  addWorkspaceRootOption?: (
+    options?: { mode?: "import-existing" | "new-project"; root?: string | null },
+  ) => Promise<unknown> | unknown;
 }
 
 export function missingCodexHostServiceMethods(host: Partial<CodexHostServices> | null | undefined) {

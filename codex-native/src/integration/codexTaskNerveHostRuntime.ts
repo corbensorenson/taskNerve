@@ -166,6 +166,8 @@ export interface CodexProjectCiSyncRunResult {
 
 export type CodexConversationChromeAction =
   | { type: "topbar-task-count-click" }
+  | { type: "topbar-import-project-click" }
+  | { type: "topbar-new-project-click" }
   | { type: "footer-terminal-toggle-click" }
   | { type: "footer-branch-switch"; branch: string };
 
@@ -1830,6 +1832,26 @@ export function createCodexTaskNerveHostRuntime(options: {
             integration_mode: "codex-native-host",
             action: action.type,
             task_drawer_open: true,
+          };
+        }
+
+        case "topbar-import-project-click":
+        case "topbar-new-project-click": {
+          if (typeof host.addWorkspaceRootOption !== "function") {
+            return {
+              ok: false,
+              integration_mode: "codex-native-host",
+              action: action.type,
+              error: "Codex host method addWorkspaceRootOption is unavailable",
+            };
+          }
+          await host.addWorkspaceRootOption({
+            mode: action.type === "topbar-import-project-click" ? "import-existing" : "new-project",
+          });
+          return {
+            ok: true,
+            integration_mode: "codex-native-host",
+            action: action.type,
           };
         }
 

@@ -32,6 +32,21 @@ export interface CodexConversationChromeSnapshot {
       opens: "task-drawer";
       action: "topbar-task-count-click";
     };
+    sidebarCollapsedProjectActions: {
+      visible: true;
+      showWhen: "sidebar-collapsed";
+      placement: "top-left";
+      importProjectButton: {
+        visible: true;
+        label: string;
+        action: "topbar-import-project-click";
+      };
+      newProjectButton: {
+        visible: true;
+        label: string;
+        action: "topbar-new-project-click";
+      };
+    };
   };
   footer: {
     terminalToggle: {
@@ -86,6 +101,14 @@ function taskCountLabel(taskCount: number): string {
     return "1 task left";
   }
   return `${taskCount} tasks left`;
+}
+
+function importProjectLabel(): string {
+  return "Import existing project";
+}
+
+function newProjectLabel(): string {
+  return "Add new project";
 }
 
 function normalizeBranchList(currentBranch: string, branches: string[]): string[] {
@@ -179,6 +202,21 @@ export function buildCodexConversationChromeSnapshot(
         label: taskCountLabel(taskCount),
         opens: "task-drawer",
         action: "topbar-task-count-click",
+      },
+      sidebarCollapsedProjectActions: {
+        visible: true,
+        showWhen: "sidebar-collapsed",
+        placement: "top-left",
+        importProjectButton: {
+          visible: true,
+          label: importProjectLabel(),
+          action: "topbar-import-project-click",
+        },
+        newProjectButton: {
+          visible: true,
+          label: newProjectLabel(),
+          action: "topbar-new-project-click",
+        },
       },
     },
     footer: {
