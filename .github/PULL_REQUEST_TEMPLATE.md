@@ -4,6 +4,8 @@
 
 ## Validation
 
+- [ ] `cd codex-native && npm run typecheck`
+- [ ] `cd codex-native && npm test`
 - [ ] `cargo fmt --check`
 - [ ] `cargo clippy --all-targets --all-features -- -D warnings`
 - [ ] `cargo test`

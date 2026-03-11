@@ -5,6 +5,7 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { createCodexTaskNerveHostRuntime } from "../src/integration/codexTaskNerveHostRuntime.js";
+import { createTaskNerveService } from "../src/integration/taskNerveService.js";
 
 function mockHostServices() {
   return {
@@ -189,6 +190,52 @@ describe("codex TaskNerve host runtime", () => {
     expect(result.after.push_tracking.tasks_before_push_history.at(-1)).toBe(4);
   });
 
+  it("auto-switches to preferred branch before git sync when branch policy is configured", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-git-sync-auto-branch-"));
+    const host = mockHostServices();
+    host.readRepositoryGitState = vi
+      .fn()
+      .mockResolvedValueOnce({
+        branch: "feature/perf",
+        remote: "origin",
+        ahead_count: 2,
+        behind_count: 0,
+        changed_file_count: 0,
+        staged_file_count: 0,
+        untracked_file_count: 0,
+        clean: true,
+      })
+      .mockResolvedValue({
+        branch: "tasknerve/main",
+        remote: "origin",
+        ahead_count: 2,
+        behind_count: 0,
+        changed_file_count: 0,
+        staged_file_count: 0,
+        untracked_file_count: 0,
+        clean: true,
+      });
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+    const service = createTaskNerveService();
+    await service.writeProjectSettings(repoRoot, {
+      git_preferred_branch: "tasknerve/main",
+      git_auto_sync_allowed_branches: ["tasknerve/main"],
+      git_tasks_per_push_target: 1,
+      git_done_task_count_at_last_push: 0,
+    });
+
+    const result = await runtime.syncProjectGit({
+      repoRoot,
+      tasks: [{ task_id: "t1", title: "done one", status: "done" }],
+      mode: "smart",
+      nowIsoUtc: "2026-03-11T04:12:00.000Z",
+    });
+
+    expect(host.switchTaskNerveBranch).toHaveBeenCalledWith("tasknerve/main");
+    expect(result.after.repository.branch).toBe("tasknerve/main");
+    expect(result.executed.push).toBe(true);
+  });
+
   it("builds per-project CI sync snapshots with task upsert plans", async () => {
     const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-ci-sync-runtime-"));
     const host = mockHostServices();
@@ -265,6 +312,110 @@ describe("codex TaskNerve host runtime", () => {
       repoRoot,
       limit: 256,
     });
+  });
+
+  it("builds unified production snapshots combining git and CI bottlenecks", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-production-snapshot-"));
+    const host = mockHostServices();
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    const snapshot = await runtime.projectProductionSnapshot({
+      repoRoot,
+      tasks: [],
+      nowIsoUtc: "2026-03-11T04:09:00.000Z",
+    });
+
+    expect(snapshot.integration_mode).toBe("codex-native-host");
+    expect(snapshot.git.repository.branch).toBe("tasknerve/main");
+    expect(snapshot.ci.ci_metrics.unique_failure_count).toBe(1);
+    expect(snapshot.bottlenecks.some((entry) => entry.id === "ci-failures-detected")).toBe(true);
+  });
+
+  it("runs production sync as one native flow for CI tasking and git sync", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-production-sync-"));
+    const host = mockHostServices();
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    const result = await runtime.syncProjectProduction({
+      repoRoot,
+      tasks: [
+        { task_id: "t1", title: "done one", status: "done" },
+        { task_id: "t2", title: "done two", status: "done" },
+        { task_id: "t3", title: "done three", status: "done" },
+        { task_id: "t4", title: "done four", status: "done" },
+      ],
+      mode: "smart",
+      nowIsoUtc: "2026-03-11T04:10:00.000Z",
+    });
+
+    expect(result.integration_mode).toBe("codex-native-host");
+    expect(result.executed.pull).toBe(true);
+    expect(result.executed.push).toBe(true);
+    expect(result.executed.ci_task_upserts).toBe(1);
+    expect(result.executed.ci_dispatch_count).toBe(1);
+    expect(result.timings_ms.total).toBeGreaterThanOrEqual(0);
+    expect(host.upsertTaskNerveProjectTasks).toHaveBeenCalledWith({
+      repoRoot,
+      tasks: expect.any(Array),
+    });
+    expect(host.dispatchTaskNerveTasks).toHaveBeenCalledWith({
+      repoRoot,
+      task_ids: expect.any(Array),
+    });
+    expect(host.pullRepository).toHaveBeenCalledWith({
+      repoRoot,
+      autostash: true,
+    });
+    expect(host.pushRepository).toHaveBeenCalledWith({
+      repoRoot,
+    });
+  });
+
+  it("automates controller project sync with git binding configured from input", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-controller-auto-input-"));
+    const host = mockHostServices();
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    const result = await runtime.controllerProjectAutomation({
+      repoRoot,
+      gitOriginUrl: "git@github.com:acme/tasknerve.git",
+      tasks: [{ task_id: "t1", title: "done one", status: "done" }],
+      nowIsoUtc: "2026-03-11T04:11:00.000Z",
+    });
+
+    expect(result.integration_mode).toBe("codex-native-host");
+    expect(result.tasknerve_managed_git).toBe(true);
+    expect(result.git_binding.configured).toBe(true);
+    expect(result.git_binding.source).toBe("input");
+    expect(result.settings.git_origin_url).toBe("git@github.com:acme/tasknerve.git");
+    expect(result.production_sync.integration_mode).toBe("codex-native-host");
+    expect(host.pullRepository).toHaveBeenCalledWith({
+      repoRoot,
+      autostash: true,
+    });
+  });
+
+  it("hydrates git binding from workspace context when settings are missing", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-controller-auto-ws-"));
+    const host = mockHostServices();
+    host.getActiveWorkspaceContext = vi.fn(async () => ({
+      repoRoot,
+      gitOriginUrl: "https://github.com/acme/tasknerve.git",
+    }));
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    const result = await runtime.controllerProjectAutomation({
+      repoRoot,
+      tasks: [{ task_id: "t1", title: "done one", status: "done" }],
+      nowIsoUtc: "2026-03-11T04:11:30.000Z",
+    });
+
+    expect(result.git_binding.configured).toBe(true);
+    expect(result.git_binding.source).toBe("workspace-context");
+    expect(result.settings.git_origin_url).toBe("https://github.com/acme/tasknerve.git");
+    expect(result.warnings).toEqual(expect.not.arrayContaining([
+      expect.stringContaining("git origin is not configured"),
+    ]));
   });
 
   it("exposes thread display snapshots through the host runtime integration surface", async () => {

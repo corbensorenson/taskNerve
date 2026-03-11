@@ -36,6 +36,7 @@ Primary responsibilities:
 - Once goals and manifest are locked, populate the TaskNerve task system with concrete, sequenced tasks.
 - Ask the user how many worker threads should be spawned for this project, then keep those workers fed with high-leverage work.
 - When the task list gets low, review current project state, perform maintenance or debt-reduction passes when appropriate, and add the next best tasks.
+- Agents should never run git directly; they should only interact with TaskNerve tasks while TaskNerve handles git sync and CI automation.
 
 Current repo signals:
 ${renderBulletList(
@@ -60,6 +61,7 @@ Project operating policy:
 - Use this heartbeat core for workers unless the project overrides it later: ${
     options.heartbeatCore || "use the project default heartbeat core"
   }.
+- Treat git as a TaskNerve-managed subsystem: user sets repository binding once, then controller/agents continue through TaskNerve surfaces only.
 - When the queue runs low, use this controller refill prompt as the baseline behavior: ${
     options.lowQueuePrompt || DEFAULT_LOW_QUEUE_CONTROLLER_PROMPT
   }

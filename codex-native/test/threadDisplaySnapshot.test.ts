@@ -53,6 +53,7 @@ describe("thread display integration", () => {
     const decision = decideThreadScrollBehavior({
       previousEntryCount: 20,
       nextEntryCount: 30,
+      historyPrependedLikely: true,
       previousViewport: {
         scroll_top_px: 32,
         scroll_height_px: 1600,
@@ -67,6 +68,26 @@ describe("thread display integration", () => {
 
     expect(decision.mode).toBe("preserve-offset");
     expect(decision.scroll_top_px).toBe(672);
+  });
+
+  it("does not preserve offset near top when new entries are appended", () => {
+    const decision = decideThreadScrollBehavior({
+      previousEntryCount: 20,
+      nextEntryCount: 30,
+      historyPrependedLikely: false,
+      previousViewport: {
+        scroll_top_px: 32,
+        scroll_height_px: 1600,
+        viewport_height_px: 640,
+      },
+      nextViewport: {
+        scroll_top_px: 32,
+        scroll_height_px: 2240,
+        viewport_height_px: 640,
+      },
+    });
+
+    expect(decision.mode).toBe("no-op");
   });
 
   it("builds a bounded virtualization window for large threads", () => {
@@ -303,6 +324,74 @@ describe("thread display integration", () => {
     expect(second).toBe(first);
   });
 
+  it("reuses extracted entries when wrapper objects change but turn mapping stays stable", () => {
+    const turnMapping = {
+      turn_1: {
+        turn: {
+          id: "t1",
+          created_at: "2026-03-10T09:00:00.000Z",
+          input_items: [{ type: "message", text: "one" }],
+          output_items: [{ type: "message", text: "a" }],
+        },
+      },
+      turn_2: {
+        turn: {
+          id: "t2",
+          created_at: "2026-03-10T09:01:00.000Z",
+          input_items: [{ type: "message", text: "two" }],
+          output_items: [{ type: "message", text: "b" }],
+        },
+      },
+    };
+
+    const first = extractThreadDisplayEntries(
+      {
+        conversation: {
+          turn_mapping: turnMapping,
+        },
+      },
+      "2026-03-10T09:05:00.000Z",
+    );
+    const second = extractThreadDisplayEntries(
+      {
+        turn_mapping: turnMapping,
+      },
+      "2026-03-10T09:05:00.000Z",
+    );
+
+    expect(second).toBe(first);
+  });
+
+  it("reuses display snapshots when wrapper objects share the same turn collection", () => {
+    const turns = [
+      {
+        id: "t1",
+        created_at: "2026-03-10T09:00:00.000Z",
+        input_items: [{ type: "message", text: "one" }],
+        output_items: [{ type: "message", text: "a" }],
+      },
+    ];
+
+    const first = buildThreadDisplaySnapshot({
+      thread: {
+        conversation: {
+          turns,
+        },
+      },
+      current_turn_key: "assistant:t1",
+    });
+    const second = buildThreadDisplaySnapshot({
+      thread: {
+        thread: {
+          turns,
+        },
+      },
+      current_turn_key: "assistant:t1",
+    });
+
+    expect(second).toBe(first);
+  });
+
   it("reuses per-thread snapshots across interleaved thread rendering", () => {
     const threadA = {
       conversation: {
@@ -346,5 +435,59 @@ describe("thread display integration", () => {
     });
 
     expect(secondA).toBe(firstA);
+  });
+
+  it("avoids downward scroll jumps when appending new turns while near top", () => {
+    const thread = {
+      conversation: {
+        turns: [
+          {
+            id: "t1",
+            created_at: "2026-03-10T09:00:00.000Z",
+            input_items: [{ type: "message", text: "one" }],
+            output_items: [{ type: "message", text: "a" }],
+          },
+          {
+            id: "t2",
+            created_at: "2026-03-10T09:01:00.000Z",
+            input_items: [{ type: "message", text: "two" }],
+            output_items: [{ type: "message", text: "b" }],
+          },
+        ],
+      },
+    };
+
+    const first = buildThreadDisplaySnapshot({
+      thread,
+      generated_at_utc: "2026-03-10T09:05:00.000Z",
+      viewport: {
+        scroll_top_px: 32,
+        scroll_height_px: 1600,
+        viewport_height_px: 640,
+      },
+    });
+    thread.conversation.turns.push({
+      id: "t3",
+      created_at: "2026-03-10T09:02:00.000Z",
+      input_items: [{ type: "message", text: "three" }],
+      output_items: [{ type: "message", text: "c" }],
+    });
+    const second = buildThreadDisplaySnapshot({
+      thread,
+      generated_at_utc: "2026-03-10T09:05:00.000Z",
+      previous_entry_count: first.entries.length,
+      previous_viewport: {
+        scroll_top_px: 32,
+        scroll_height_px: 1600,
+        viewport_height_px: 640,
+      },
+      viewport: {
+        scroll_top_px: 32,
+        scroll_height_px: 2240,
+        viewport_height_px: 640,
+      },
+    });
+
+    expect(second.scroll_decision.mode).toBe("no-op");
   });
 });

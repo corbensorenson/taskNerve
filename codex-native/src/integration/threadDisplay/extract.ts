@@ -39,6 +39,7 @@ interface ThreadExtractionCacheEntry {
 
 const threadExtractionCache = new WeakMap<object, ThreadExtractionCacheEntry>();
 const turnArrayExtractionCache = new WeakMap<unknown[], ThreadExtractionCacheEntry>();
+const turnMappingExtractionCache = new WeakMap<Record<string, unknown>, ThreadExtractionCacheEntry>();
 
 function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
@@ -472,6 +473,10 @@ const CACHEABLE_TURN_ARRAY_PATHS: ReadonlyArray<ReadonlyArray<string>> = [
   ["turns"],
   ["messages"],
 ];
+const CACHEABLE_TURN_MAPPING_PATHS: ReadonlyArray<ReadonlyArray<string>> = [
+  ["conversation", "turn_mapping"],
+  ["turn_mapping"],
+];
 
 function cacheableTurnArray(thread: unknown): unknown[] | null {
   for (const path of CACHEABLE_TURN_ARRAY_PATHS) {
@@ -481,6 +486,17 @@ function cacheableTurnArray(thread: unknown): unknown[] | null {
     }
   }
   return Array.isArray(thread) ? thread : null;
+}
+
+function cacheableTurnMapping(thread: unknown): Record<string, unknown> | null {
+  for (const path of CACHEABLE_TURN_MAPPING_PATHS) {
+    const value = readPath(thread, path);
+    const record = asRecord(value);
+    if (record) {
+      return record;
+    }
+  }
+  return null;
 }
 
 function fastTurnMarker(value: unknown): string {
@@ -505,21 +521,48 @@ function fastTurnMarker(value: unknown): string {
   return `${id}:${timestamp}:${inputCount}:${outputCount}`;
 }
 
+function mappingTurnValue(value: unknown): unknown {
+  const record = asRecord(value);
+  if (record && "turn" in record) {
+    return record.turn;
+  }
+  return value;
+}
+
 function entriesCacheMarker(thread: unknown, generatedAtUtc: string): string | null {
   const turns = cacheableTurnArray(thread);
-  if (!turns) {
+  const generated = parseTimestampUtc(generatedAtUtc) || generatedAtUtc.trim() || "generated";
+  if (turns) {
+    if (turns.length === 0) {
+      return `0:${generated}`;
+    }
+    const middleIndex = Math.floor((turns.length - 1) / 2);
+    return [
+      String(turns.length),
+      fastTurnMarker(turns[0]),
+      fastTurnMarker(turns[middleIndex]),
+      fastTurnMarker(turns[turns.length - 1]),
+      generated,
+    ].join("|");
+  }
+
+  const mapping = cacheableTurnMapping(thread);
+  if (!mapping) {
     return null;
   }
-  const generated = parseTimestampUtc(generatedAtUtc) || generatedAtUtc.trim() || "generated";
-  if (turns.length === 0) {
-    return `0:${generated}`;
+  const keys = Object.keys(mapping);
+  if (keys.length === 0) {
+    return `m0:${generated}`;
   }
-  const middleIndex = Math.floor((turns.length - 1) / 2);
+  const middleIndex = Math.floor((keys.length - 1) / 2);
+  const firstKey = keys[0]!;
+  const middleKey = keys[middleIndex]!;
+  const lastKey = keys[keys.length - 1]!;
   return [
-    String(turns.length),
-    fastTurnMarker(turns[0]),
-    fastTurnMarker(turns[middleIndex]),
-    fastTurnMarker(turns[turns.length - 1]),
+    `m${keys.length}`,
+    `${firstKey}:${fastTurnMarker(mappingTurnValue(mapping[firstKey]))}`,
+    `${middleKey}:${fastTurnMarker(mappingTurnValue(mapping[middleKey]))}`,
+    `${lastKey}:${fastTurnMarker(mappingTurnValue(mapping[lastKey]))}`,
     generated,
   ].join("|");
 }
@@ -530,6 +573,7 @@ export function extractThreadDisplayEntries(
 ): ThreadDisplayEntry[] {
   const marker = entriesCacheMarker(thread, generatedAtUtc);
   const turnArray = marker ? cacheableTurnArray(thread) : null;
+  const turnMapping = marker && !turnArray ? cacheableTurnMapping(thread) : null;
   if (thread && typeof thread === "object" && marker) {
     const cached = threadExtractionCache.get(thread);
     if (cached && cached.marker === marker) {
@@ -538,6 +582,15 @@ export function extractThreadDisplayEntries(
   }
   if (turnArray && marker) {
     const cached = turnArrayExtractionCache.get(turnArray);
+    if (cached && cached.marker === marker) {
+      if (thread && typeof thread === "object") {
+        threadExtractionCache.set(thread, cached);
+      }
+      return cached.entries;
+    }
+  }
+  if (turnMapping && marker) {
+    const cached = turnMappingExtractionCache.get(turnMapping);
     if (cached && cached.marker === marker) {
       if (thread && typeof thread === "object") {
         threadExtractionCache.set(thread, cached);
@@ -558,6 +611,8 @@ export function extractThreadDisplayEntries(
     threadExtractionCache.set(thread, cacheEntry);
     if (turnArray) {
       turnArrayExtractionCache.set(turnArray, cacheEntry);
+    } else if (turnMapping) {
+      turnMappingExtractionCache.set(turnMapping, cacheEntry);
     }
   }
 

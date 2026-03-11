@@ -20,6 +20,7 @@ describe("taskNerve service integration surface", () => {
     expect(health.capabilities).toContain("conversation_interaction");
     expect(health.capabilities).toContain("project_git_sync");
     expect(health.capabilities).toContain("project_ci_sync");
+    expect(health.capabilities).toContain("project_production");
     expect(health.capabilities).toContain("thread_display");
   });
 
@@ -430,6 +431,50 @@ describe("taskNerve service integration surface", () => {
     expect(plan.failures).toEqual([]);
     expect(plan.task_upserts).toEqual([]);
     expect(plan.dispatch_task_ids).toEqual([]);
+  });
+
+  it("builds unified production snapshots from git and CI plans", () => {
+    const service = createTaskNerveService();
+    const git = service.projectGitSyncSnapshot({
+      settings: {
+        git_auto_sync_enabled: true,
+        git_tasks_per_push_target: 2,
+      },
+      tasks: [{ task_id: "t1", title: "done", status: "done" }],
+      git_state: {
+        branch: "tasknerve/main",
+        remote: "origin",
+        ahead_count: 1,
+        clean: true,
+      },
+      now_iso: "2026-03-11T05:15:00.000Z",
+    });
+    const ci = service.projectCiTaskSyncPlan({
+      settings: {
+        ci_auto_task_enabled: true,
+      },
+      failures: [
+        {
+          provider: "github",
+          pipeline: "build",
+          job: "unit",
+          branch: "tasknerve/main",
+          status: "failed",
+        },
+      ],
+      tasks: [],
+      now_iso: "2026-03-11T05:15:00.000Z",
+    });
+
+    const snapshot = service.projectProductionSnapshot({
+      git,
+      ci,
+      generated_at_utc: "2026-03-11T05:15:00.000Z",
+    });
+
+    expect(snapshot.integration_mode).toBe("codex-native-host");
+    expect(snapshot.generated_at_utc).toBe("2026-03-11T05:15:00.000Z");
+    expect(snapshot.bottlenecks.some((entry) => entry.id === "ci-failures-detected")).toBe(true);
   });
 
   it("loads and writes project settings and registry through the shared IO stores", async () => {

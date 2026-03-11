@@ -24,6 +24,14 @@ interface SnapshotMemo {
 
 let lastSnapshotMemo: SnapshotMemo | null = null;
 const snapshotMemoByThread = new WeakMap<object, SnapshotMemo>();
+const TURN_COLLECTION_PATHS: ReadonlyArray<ReadonlyArray<string>> = [
+  ["conversation", "turns"],
+  ["thread", "turns"],
+  ["turns"],
+  ["messages"],
+  ["conversation", "turn_mapping"],
+  ["turn_mapping"],
+];
 
 function memoForThread(thread: unknown): SnapshotMemo | null {
   if (!thread || typeof thread !== "object") {
@@ -49,6 +57,39 @@ function normalizeGeneratedAtUtc(value: string | null | undefined): string | nul
   return normalized || null;
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function readPath(root: unknown, path: ReadonlyArray<string>): unknown {
+  let current: unknown = root;
+  for (const segment of path) {
+    const record = asRecord(current);
+    if (!record || !(segment in record)) {
+      return null;
+    }
+    current = record[segment];
+  }
+  return current;
+}
+
+function turnCollectionReference(thread: unknown): unknown {
+  for (const path of TURN_COLLECTION_PATHS) {
+    const value = readPath(thread, path);
+    if (Array.isArray(value) || asRecord(value)) {
+      return value;
+    }
+  }
+  return Array.isArray(thread) ? thread : null;
+}
+
+function sameTurnCollectionReference(left: unknown, right: unknown): boolean {
+  const leftReference = turnCollectionReference(left);
+  return Boolean(leftReference) && leftReference === turnCollectionReference(right);
+}
+
 function sameViewport(
   left: BuildThreadDisplayOptions["viewport"] | BuildThreadDisplayOptions["previous_viewport"],
   right: BuildThreadDisplayOptions["viewport"] | BuildThreadDisplayOptions["previous_viewport"],
@@ -66,6 +107,38 @@ function sameViewport(
   );
 }
 
+function likelyHistoryPrepended(
+  previousEntries: ThreadDisplaySnapshot["entries"],
+  nextEntries: ThreadDisplaySnapshot["entries"],
+): boolean {
+  if (previousEntries.length === 0 || nextEntries.length <= previousEntries.length) {
+    return false;
+  }
+
+  const previousFirst = previousEntries[0]?.entry_id;
+  if (!previousFirst) {
+    return false;
+  }
+  if (nextEntries[0]?.entry_id === previousFirst) {
+    return false;
+  }
+
+  // Fast path: prepended history usually shifts the old first entry by delta.
+  const delta = nextEntries.length - previousEntries.length;
+  if (delta > 0 && nextEntries[delta]?.entry_id === previousFirst) {
+    return true;
+  }
+
+  // Guarded fallback search for reshuffled wrappers without scanning huge arrays.
+  const maxProbe = Math.min(nextEntries.length - 1, 64);
+  for (let index = 1; index <= maxProbe; index += 1) {
+    if (nextEntries[index]?.entry_id === previousFirst) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function buildThreadDisplaySnapshot(
   options: BuildThreadDisplayOptions,
 ): ThreadDisplaySnapshot {
@@ -76,16 +149,17 @@ export function buildThreadDisplaySnapshot(
     ? Number(options.previous_entry_count)
     : 0;
   const previousMemo = memoForThread(options.thread) ?? lastSnapshotMemo;
+  const canReuseGeneratedAt =
+    previousMemo &&
+    (previousMemo.thread === options.thread ||
+      sameTurnCollectionReference(previousMemo.thread, options.thread));
   const effectiveGeneratedAtUtc =
     generatedAtUtc ||
-    (previousMemo && previousMemo.thread === options.thread
-      ? previousMemo.generatedAtUtc
-      : new Date().toISOString());
+    (canReuseGeneratedAt ? previousMemo.generatedAtUtc : new Date().toISOString());
   const entries = extractThreadDisplayEntries(options.thread, effectiveGeneratedAtUtc);
   if (
     previousMemo &&
     previousMemo.generatedAtUtc === effectiveGeneratedAtUtc &&
-    previousMemo.thread === options.thread &&
     previousMemo.entries === entries &&
     previousMemo.currentTurnKey === currentTurnKey &&
     previousMemo.focusTurnKey === focusTurnKey &&
@@ -121,6 +195,10 @@ export function buildThreadDisplaySnapshot(
           measuredHeightsPx: options.measured_heights_px,
           defaultRowHeightPx: options.default_row_height_px,
         });
+  const historyPrependedLikely =
+    previousMemo && previousMemo.entries !== entries
+      ? likelyHistoryPrepended(previousMemo.entries, entries)
+      : false;
   const scrollDecision =
     previousMemo &&
     previousMemo.entries === entries &&
@@ -135,6 +213,7 @@ export function buildThreadDisplaySnapshot(
           previousEntryCount,
           nextEntryCount: entries.length,
           focusTurnKey,
+          historyPrependedLikely,
         });
 
   const snapshot: ThreadDisplaySnapshot = {

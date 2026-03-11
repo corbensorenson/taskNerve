@@ -22,6 +22,7 @@ export function decideThreadScrollBehavior(options: {
   previousEntryCount?: number;
   nextEntryCount?: number;
   focusTurnKey?: string | null;
+  historyPrependedLikely?: boolean;
 }): ThreadScrollDecision {
   const focusTurnKey = options.focusTurnKey?.trim();
   if (focusTurnKey) {
@@ -59,6 +60,10 @@ export function decideThreadScrollBehavior(options: {
   // While users are reading history away from both edges, keep their manual position stable.
   // Preserve offset only when older history is likely prepended near the top.
   if (!nearTop(previousViewport)) {
+    return { mode: "no-op" };
+  }
+
+  if (options.historyPrependedLikely === false) {
     return { mode: "no-op" };
   }
 

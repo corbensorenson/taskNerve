@@ -25,11 +25,34 @@ import {
 } from "./codexProjectGitSync.js";
 import type { ProjectGitSyncSnapshot } from "../domain/projectGitSync.js";
 import type { ProjectCiTaskSyncPlan } from "../domain/projectCiSync.js";
+import type { CodexProjectProductionSnapshot } from "./codexProjectProduction.js";
+import {
+  loadCodexProjectProductionContext,
+  syncCodexProjectProduction,
+  type CodexProjectProductionRunOptions,
+  type CodexProjectProductionRunResult,
+  type CodexProjectProductionSnapshotOptions,
+} from "./codexProjectProductionRuntime.js";
+import {
+  runCodexControllerProjectAutomation,
+  type CodexControllerProjectAutomationOptions,
+  type CodexControllerProjectAutomationResult,
+} from "./codexControllerProjectAutomation.js";
 import { createTaskNerveService, type TaskNerveService } from "./taskNerveService.js";
 import type {
   BuildThreadDisplayOptions,
   ThreadDisplaySnapshot,
 } from "./threadDisplay/index.js";
+
+export type {
+  CodexProjectProductionRunOptions,
+  CodexProjectProductionRunResult,
+  CodexProjectProductionSnapshotOptions,
+} from "./codexProjectProductionRuntime.js";
+export type {
+  CodexControllerProjectAutomationOptions,
+  CodexControllerProjectAutomationResult,
+} from "./codexControllerProjectAutomation.js";
 
 const HOST_STYLING_CONTEXT_CACHE_TTL_MS = 10_000;
 const CONVERSATION_CHROME_CACHE_TTL_MS = 250;
@@ -97,6 +120,7 @@ export interface CodexProjectGitSyncRunOptions {
   mode?: "smart" | "pull" | "push";
   autostash?: boolean;
   force?: boolean;
+  autoSwitchPreferredBranch?: boolean;
   nowIsoUtc?: string | null;
 }
 
@@ -201,6 +225,15 @@ export interface CodexTaskNerveHostRuntime {
     options: CodexProjectCiSyncSnapshotOptions,
   ) => Promise<ProjectCiTaskSyncPlan>;
   syncProjectCi: (options: CodexProjectCiSyncRunOptions) => Promise<CodexProjectCiSyncRunResult>;
+  projectProductionSnapshot: (
+    options: CodexProjectProductionSnapshotOptions,
+  ) => Promise<CodexProjectProductionSnapshot>;
+  syncProjectProduction: (
+    options: CodexProjectProductionRunOptions,
+  ) => Promise<CodexProjectProductionRunResult>;
+  controllerProjectAutomation: (
+    options: CodexControllerProjectAutomationOptions,
+  ) => Promise<CodexControllerProjectAutomationResult>;
   conversationDisplaySnapshot: (
     options: CodexConversationDisplayOptions,
   ) => Promise<CodexConversationDisplaySnapshot>;
@@ -1045,6 +1078,35 @@ export function createCodexTaskNerveHostRuntime(options: {
     };
   }
 
+  async function loadProjectCiAgentIds(overrides?: unknown): Promise<string[]> {
+    let availableAgentIds = parseStringArray(overrides);
+    if (availableAgentIds.length > 0 || typeof host.listTaskNerveAgents !== "function") {
+      return availableAgentIds;
+    }
+
+    const now = Date.now();
+    if (projectCiAgentCache && now - projectCiAgentCache.fetchedAtMs < PROJECT_CI_AGENT_CACHE_TTL_MS) {
+      return projectCiAgentCache.value;
+    }
+
+    if (!projectCiAgentInflight) {
+      projectCiAgentInflight = Promise.resolve(host.listTaskNerveAgents())
+        .then((value) => {
+          const parsed = parseAgentIds(value);
+          projectCiAgentCache = {
+            value: parsed,
+            fetchedAtMs: Date.now(),
+          };
+          return parsed;
+        })
+        .finally(() => {
+          projectCiAgentInflight = null;
+        });
+    }
+    availableAgentIds = await projectCiAgentInflight;
+    return availableAgentIds;
+  }
+
   function invalidateProjectCiFailureCache(repoRoot?: string | null) {
     const key = typeof repoRoot === "string" ? repoRoot.trim() : "";
     if (key) {
@@ -1117,35 +1179,13 @@ export function createCodexTaskNerveHostRuntime(options: {
   }): Promise<{
     settings: ProjectCodexSettings;
     snapshot: ProjectCiTaskSyncPlan;
+    ciFailures: unknown;
+    availableAgentIds: string[];
   }> {
     const settings = await taskNerve.loadProjectSettings({
       repoRoot: options.repoRoot,
     });
-
-    let availableAgentIds = parseStringArray(options.availableAgentIds);
-    if (availableAgentIds.length === 0 && typeof host.listTaskNerveAgents === "function") {
-      const now = Date.now();
-      if (projectCiAgentCache && now - projectCiAgentCache.fetchedAtMs < PROJECT_CI_AGENT_CACHE_TTL_MS) {
-        availableAgentIds = projectCiAgentCache.value;
-      } else {
-        if (!projectCiAgentInflight) {
-          projectCiAgentInflight = Promise.resolve(host.listTaskNerveAgents())
-            .then((value) => {
-              const parsed = parseAgentIds(value);
-              projectCiAgentCache = {
-                value: parsed,
-                fetchedAtMs: Date.now(),
-              };
-              return parsed;
-            })
-            .finally(() => {
-              projectCiAgentInflight = null;
-            });
-        }
-        availableAgentIds = await projectCiAgentInflight;
-      }
-    }
-
+    const availableAgentIds = await loadProjectCiAgentIds(options.availableAgentIds);
     const ciFailures = await loadProjectCiFailures(options.repoRoot, options.ciFailures);
     const snapshot = taskNerve.projectCiTaskSyncPlan({
       settings,
@@ -1157,6 +1197,8 @@ export function createCodexTaskNerveHostRuntime(options: {
     return {
       settings,
       snapshot,
+      ciFailures,
+      availableAgentIds,
     };
   }
 
@@ -1423,14 +1465,43 @@ export function createCodexTaskNerveHostRuntime(options: {
         tasks: syncOptions.tasks,
         nowIsoUtc: syncOptions.nowIsoUtc,
       });
-      const plan = planCodexProjectGitSync({
-        mode: syncOptions.mode,
-        snapshot: context.snapshot,
-      });
       const warnings: string[] = [];
       let pulled = false;
       let pushed = false;
       let effectiveSettings = context.settings;
+      let effectiveSnapshot = context.snapshot;
+
+      const preferredBranch = effectiveSnapshot.push_policy.preferred_branch;
+      if (
+        syncOptions.autoSwitchPreferredBranch !== false &&
+        typeof preferredBranch === "string" &&
+        preferredBranch.trim() &&
+        effectiveSnapshot.branch_status.current_branch !== preferredBranch &&
+        typeof host.switchTaskNerveBranch === "function"
+      ) {
+        await host.switchTaskNerveBranch(preferredBranch);
+        invalidateProjectGitStateCache(syncOptions.repoRoot);
+        const refreshedGitState = await loadProjectGitState(syncOptions.repoRoot);
+        effectiveSnapshot = taskNerve.projectGitSyncSnapshot({
+          settings: effectiveSettings,
+          tasks: syncOptions.tasks,
+          git_state: refreshedGitState,
+          now_iso: syncOptions.nowIsoUtc ?? undefined,
+        });
+      } else if (
+        syncOptions.autoSwitchPreferredBranch !== false &&
+        typeof preferredBranch === "string" &&
+        preferredBranch.trim() &&
+        effectiveSnapshot.branch_status.current_branch !== preferredBranch &&
+        typeof host.switchTaskNerveBranch !== "function"
+      ) {
+        warnings.push("Codex host method switchTaskNerveBranch is unavailable");
+      }
+
+      const plan = planCodexProjectGitSync({
+        mode: syncOptions.mode,
+        snapshot: effectiveSnapshot,
+      });
 
       if (plan.should_pull) {
         if (typeof host.pullRepository !== "function") {
@@ -1442,10 +1513,17 @@ export function createCodexTaskNerveHostRuntime(options: {
           });
           pulled = true;
           invalidateProjectGitStateCache(syncOptions.repoRoot);
+          const refreshedGitState = await loadProjectGitState(syncOptions.repoRoot);
+          effectiveSnapshot = taskNerve.projectGitSyncSnapshot({
+            settings: effectiveSettings,
+            tasks: syncOptions.tasks,
+            git_state: refreshedGitState,
+            now_iso: syncOptions.nowIsoUtc ?? undefined,
+          });
         }
       }
 
-      const pushBlockedReason = context.snapshot.recommendation.push_blocked_reason;
+      const pushBlockedReason = effectiveSnapshot.recommendation.push_blocked_reason;
       const ignoreInsufficientVolumeBlock =
         plan.mode !== "smart" && pushBlockedReason === "insufficient-task-volume";
       const hardBlockedByPolicy =
@@ -1572,6 +1650,49 @@ export function createCodexTaskNerveHostRuntime(options: {
         dispatched_task_ids: dispatchedTaskIds,
         warnings,
       };
+    },
+
+    projectProductionSnapshot: async (projectOptions) => {
+      const context = await loadCodexProjectProductionContext(
+        {
+          taskNerve,
+          loadProjectGitState,
+          loadProjectCiFailures,
+          loadProjectCiAgentIds,
+        },
+        projectOptions,
+      );
+      return context.snapshot;
+    },
+
+    syncProjectProduction: async (syncOptions) => {
+      return syncCodexProjectProduction(
+        {
+          host,
+          taskNerve,
+          loadProjectGitState,
+          loadProjectCiFailures,
+          loadProjectCiAgentIds,
+          invalidateProjectGitStateCache,
+          invalidateProjectCiFailureCache,
+        },
+        syncOptions,
+      );
+    },
+
+    controllerProjectAutomation: async (automationOptions) => {
+      return runCodexControllerProjectAutomation(
+        {
+          host,
+          taskNerve,
+          loadProjectGitState,
+          loadProjectCiFailures,
+          loadProjectCiAgentIds,
+          invalidateProjectGitStateCache,
+          invalidateProjectCiFailureCache,
+        },
+        automationOptions,
+      );
     },
 
     bootstrapControllerThread: async (bootstrapOptions) => {

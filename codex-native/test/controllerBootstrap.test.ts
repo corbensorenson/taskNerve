@@ -16,5 +16,7 @@ describe("controller bootstrap prompt", () => {
     expect(prompt).toMatch(/project_manifest\.md/);
     expect(prompt).toMatch(/Ask the user how many worker threads should be spawned/);
     expect(prompt).toMatch(/built-in TaskNerve skill/);
+    expect(prompt).toMatch(/Agents should never run git directly/);
+    expect(prompt).toMatch(/TaskNerve-managed subsystem/);
   });
 });

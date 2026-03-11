@@ -52,6 +52,10 @@ import {
   buildProjectSettingsAfterCodexCiSync,
 } from "./codexProjectCiSync.js";
 import type { ProjectCiTaskSyncPlan } from "../domain/projectCiSync.js";
+import {
+  buildCodexProjectProductionSnapshot,
+  type CodexProjectProductionSnapshot,
+} from "./codexProjectProduction.js";
 
 export interface TaskNerveServiceHealth {
   ok: true;
@@ -125,6 +129,11 @@ export interface TaskNerveService {
     available_agent_ids?: string[];
     now_iso?: string;
   }) => ProjectCiTaskSyncPlan;
+  projectProductionSnapshot: (options: {
+    git: ProjectGitSyncSnapshot;
+    ci: ProjectCiTaskSyncPlan;
+    generated_at_utc?: string | null;
+  }) => CodexProjectProductionSnapshot;
   projectSettingsAfterCiSync: (options: {
     settings: Partial<ProjectCodexSettings>;
     failed_job_count: number;
@@ -301,6 +310,7 @@ export function createTaskNerveService(): TaskNerveService {
         "conversation_interaction",
         "project_git_sync",
         "project_ci_sync",
+        "project_production",
         "thread_display",
         "prompt_queue",
         "model_routing",
@@ -452,6 +462,8 @@ export function createTaskNerveService(): TaskNerveService {
     projectSettingsAfterGitPush: (options) => buildProjectSettingsAfterCodexGitPush(options),
 
     projectCiTaskSyncPlan: (options) => buildCodexProjectCiTaskSyncPlan(options),
+
+    projectProductionSnapshot: (options) => buildCodexProjectProductionSnapshot(options),
 
     projectSettingsAfterCiSync: (options) => buildProjectSettingsAfterCodexCiSync(options),
 
