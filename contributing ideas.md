@@ -24,3 +24,4 @@ Use this file to capture links, patterns, and product ideas the controller shoul
 ## Notes For The Controller
 - Favor solutions that make TaskNerve disappear into Codex rather than stand beside it.
 - Keep visual clutter low and daily task interaction fast.
+- In human-controlled sessions, prioritize fast native iteration and avoid dual-track workflow overhead; autonomous sessions can run stricter validation loops.

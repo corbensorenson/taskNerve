@@ -53,10 +53,14 @@ This file locks the technical contract for how `project_goals.md` will be achiev
 
 ### Quality gates
 - Required commands:
-  - `cd /Users/adimus/Documents/taskNerve/codex-native && npm install`
-  - `cd /Users/adimus/Documents/taskNerve/codex-native && npm run typecheck`
-  - `cd /Users/adimus/Documents/taskNerve/codex-native && npm test`
-  - `bash /Users/adimus/Documents/taskNerve/scripts/public-release-check.sh`
+  - Human-controlled fast path:
+    - `cd /Users/adimus/Documents/taskNerve/codex-native && npm install` (when dependencies change)
+    - targeted checks for touched modules (typecheck and focused tests)
+    - avoid redundant dual-track src/test branch workflows for user-steered native edits
+  - Autonomous/hardening path:
+    - `cd /Users/adimus/Documents/taskNerve/codex-native && npm run typecheck`
+    - `cd /Users/adimus/Documents/taskNerve/codex-native && npm test`
+    - `bash /Users/adimus/Documents/taskNerve/scripts/public-release-check.sh`
 - Required review expectation: maintain Codex-native behavior and keep integration modular
 - Required docs updates: README, skill docs, and project contracts whenever workflow changes materially
 
@@ -64,6 +68,7 @@ This file locks the technical contract for how `project_goals.md` will be achiev
 - Migration strategy: all new work targets direct host integration modules
 - Performance, security, and cost constraints: prefer Codex-native inference and in-process integration boundaries
 - Dependency rule: new dependencies must fit the Codex-native TypeScript direction
+- Human-controlled workflow rule: optimize for throughput and direct native integration, not duplicate branch/process ceremony.
 
 ## Open Questions For The User
 - [ ] Which Codex host integration seam should TaskNerve target first for full UI parity?

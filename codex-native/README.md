@@ -15,6 +15,11 @@ TaskNerve is integrated directly into Codex host runtime surfaces via:
 
 No app-bundle patching or runtime script injection is part of the supported architecture.
 
+Single implementation policy:
+- `src/` is the implementation path.
+- `test/` validates behavior and performance regressions; it is not a parallel runtime target.
+- Treat generated bundle extracts as disposable build/runtime artifacts, not editable source.
+
 ## Workspace Layout
 
 - `src/domain`: orchestration/domain logic

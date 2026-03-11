@@ -22,6 +22,9 @@ test ! -f "$REPO_ROOT/templates/TASKNERVE_CODEX_MAIN_BRIDGE.js"
 test ! -f "$REPO_ROOT/templates/TASKNERVE_CODEX_PANEL.js"
 test ! -f "$REPO_ROOT/templates/TASKNERVE_CODEX_MAIN_BRIDGE_RUNTIME.cjs"
 test ! -f "$REPO_ROOT/templates/TASKNERVE_CODEX_PANEL_RUNTIME.js"
+test ! -f "$REPO_ROOT/index-CMu6BCpo.js"
+test ! -f "$REPO_ROOT/codex-native/index-CMu6BCpo.js"
+test ! -f "$REPO_ROOT/codex-native/tasknerve-settings-native.js"
 
 if rg -n --glob '!**/node_modules/**' \
   "sync-codex-tasknerve\\.mjs|allow-legacy-patching|legacy:sync:app|TASKNERVE_CODEX_MAIN_BRIDGE|TASKNERVE_CODEX_PANEL" \

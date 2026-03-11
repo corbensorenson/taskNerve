@@ -32,6 +32,8 @@ This file locks the user-approved outcomes for TaskNerve. Technical implementati
 - [ ] Keep the active runtime TypeScript-first.
 - [ ] Keep integration seams explicit, typed, and test-covered.
 - [ ] Keep multi-project workflows fast, low-friction, and visually coherent.
+- [ ] Human-controlled fast path: avoid dual-track workflow overhead (for example separate src/test branch maintenance) for direct user-steered native changes.
+- [ ] Autonomous agent path may keep stricter validation/test expansion than the human-controlled fast path.
 
 ## Open Questions For The User
 - [ ] Which Codex UI surfaces should TaskNerve integrate with first (settings page, drawer, project tree, all)?

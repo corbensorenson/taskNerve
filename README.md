@@ -11,6 +11,11 @@ On branch `codex/codex-native`, the live product path is:
 
 No app-bundle patching, script injection, or localhost bridge runtime is supported.
 
+Single development target:
+- `codex-native/src` is the only implementation path.
+- `codex-native/test` is verification coverage, not a second runtime branch.
+- Generated/extracted bundle artifacts are not maintained as source-of-truth code.
+
 ## Integration Surface
 
 Primary entrypoints:
@@ -35,6 +40,12 @@ Run repo checks:
 ```bash
 bash ./scripts/public-release-check.sh
 bash ./scripts/vigorous-e2e.sh
+```
+
+If local runtime extracts exist under `target/`, collapse duplicate extract trees to one canonical live tree:
+
+```bash
+bash ./scripts/enforce-single-runtime-extract.sh
 ```
 
 Build A/B test integration bundle:
