@@ -55,6 +55,24 @@ function mockHostServices() {
     })),
     pullRepository: vi.fn(async () => ({ ok: true })),
     pushRepository: vi.fn(async () => ({ ok: true })),
+    readRepositoryCiFailures: vi.fn(async () => ({
+      runs: [
+        {
+          provider: "github",
+          workflow_name: "build",
+          job_name: "unit",
+          conclusion: "failure",
+          ref: "refs/heads/tasknerve/main",
+          head_sha: "abc123",
+          html_url: "https://ci.example/runs/1",
+          id: "1",
+          completed_at: "2026-03-11T04:00:00.000Z",
+        },
+      ],
+    })),
+    upsertTaskNerveProjectTasks: vi.fn(async () => ({ ok: true })),
+    dispatchTaskNerveTasks: vi.fn(async () => ({ ok: true })),
+    listTaskNerveAgents: vi.fn(async () => ({ agent_ids: ["agent.ci", "agent.beta"] })),
     setConversationCurrentTurnKey: vi.fn(async () => ({ ok: true })),
     scrollConversationToTurn: vi.fn(async () => ({ ok: true })),
     scrollConversationToTop: vi.fn(async () => ({ ok: true })),
@@ -169,6 +187,84 @@ describe("codex TaskNerve host runtime", () => {
       repoRoot,
     });
     expect(result.after.push_tracking.tasks_before_push_history.at(-1)).toBe(4);
+  });
+
+  it("builds per-project CI sync snapshots with task upsert plans", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-ci-sync-runtime-"));
+    const host = mockHostServices();
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    const snapshot = await runtime.projectCiSyncSnapshot({
+      repoRoot,
+      tasks: [],
+      nowIsoUtc: "2026-03-11T04:05:00.000Z",
+    });
+
+    expect(snapshot.integration_mode).toBe("codex-native-host");
+    expect(snapshot.ci_metrics.unique_failure_count).toBe(1);
+    expect(snapshot.task_upserts).toHaveLength(1);
+    expect(snapshot.task_upserts[0]?.task.tags).toContain("ci");
+  });
+
+  it("syncs CI failures into project tasks and dispatches them", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-ci-sync-run-"));
+    const host = mockHostServices();
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    const result = await runtime.syncProjectCi({
+      repoRoot,
+      tasks: [],
+      nowIsoUtc: "2026-03-11T04:06:00.000Z",
+    });
+
+    expect(result.persisted_task_upserts).toBe(1);
+    expect(result.dispatched_task_ids).toHaveLength(1);
+    expect(result.settings.ci_last_failed_job_count).toBe(1);
+    expect(host.upsertTaskNerveProjectTasks).toHaveBeenCalledWith({
+      repoRoot,
+      tasks: expect.any(Array),
+    });
+    expect(host.dispatchTaskNerveTasks).toHaveBeenCalledWith({
+      repoRoot,
+      task_ids: result.dispatched_task_ids,
+    });
+  });
+
+  it("memoizes CI agent discovery across rapid CI sync snapshots", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-ci-agent-cache-"));
+    const host = mockHostServices();
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    await runtime.projectCiSyncSnapshot({
+      repoRoot,
+      tasks: [],
+      nowIsoUtc: "2026-03-11T04:07:00.000Z",
+    });
+    await runtime.projectCiSyncSnapshot({
+      repoRoot,
+      tasks: [],
+      nowIsoUtc: "2026-03-11T04:07:01.000Z",
+    });
+
+    expect(host.listTaskNerveAgents).toHaveBeenCalledTimes(1);
+    expect(host.readRepositoryCiFailures).toHaveBeenCalledTimes(1);
+  });
+
+  it("requests CI failures from host with a bounded limit", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-ci-failure-limit-"));
+    const host = mockHostServices();
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    await runtime.projectCiSyncSnapshot({
+      repoRoot,
+      tasks: [],
+      nowIsoUtc: "2026-03-11T04:08:00.000Z",
+    });
+
+    expect(host.readRepositoryCiFailures).toHaveBeenCalledWith({
+      repoRoot,
+      limit: 256,
+    });
   });
 
   it("exposes thread display snapshots through the host runtime integration surface", async () => {

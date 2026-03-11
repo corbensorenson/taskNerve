@@ -8,6 +8,8 @@ import {
   type ProjectCiTaskSyncPlan,
 } from "../domain/projectCiSync.js";
 
+const MAX_PARSED_CI_FAILURES = 256;
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -140,12 +142,18 @@ export function parseCodexProjectCiFailure(value: unknown): Partial<ProjectCiFai
   };
 }
 
-function normalizeCiFailureArray(value: unknown): Partial<ProjectCiFailure>[] {
+function normalizeCiFailureArray(
+  value: unknown,
+  limit = MAX_PARSED_CI_FAILURES,
+): Partial<ProjectCiFailure>[] {
   if (!Array.isArray(value)) {
     return [];
   }
   const failures: Partial<ProjectCiFailure>[] = [];
   for (const entry of value) {
+    if (failures.length >= limit) {
+      break;
+    }
     const normalized = parseCodexProjectCiFailure(entry);
     if (normalized) {
       failures.push(normalized);

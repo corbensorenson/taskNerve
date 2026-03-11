@@ -19,6 +19,7 @@ describe("taskNerve service integration surface", () => {
     expect(health.capabilities).toContain("conversation_display");
     expect(health.capabilities).toContain("conversation_interaction");
     expect(health.capabilities).toContain("project_git_sync");
+    expect(health.capabilities).toContain("project_ci_sync");
     expect(health.capabilities).toContain("thread_display");
   });
 
@@ -349,6 +350,86 @@ describe("taskNerve service integration surface", () => {
     expect(next.git_done_task_count_at_last_push).toBe(3);
     expect(next.git_last_push_at_utc).toBe("2026-03-11T04:05:00.000Z");
     expect(next.git_tasks_before_push_history).toEqual([2, 3, 2]);
+  });
+
+  it("builds CI failure task upserts and sync settings updates", () => {
+    const service = createTaskNerveService();
+    const plan = service.projectCiTaskSyncPlan({
+      settings: {
+        ci_auto_task_enabled: true,
+        ci_failure_task_priority: 8,
+      },
+      tasks: [
+        { task_id: "t-open", title: "existing", status: "open", tags: ["ci-key:github::build::unit::main"] },
+        { task_id: "t-done", title: "done", status: "done", tags: ["ci-key:github::build::lint::main"] },
+      ],
+      failures: [
+        {
+          provider: "github",
+          pipeline: "build",
+          job: "unit",
+          branch: "main",
+          status: "failed",
+          run_url: "https://ci.example/unit",
+        },
+        {
+          provider: "github",
+          pipeline: "build",
+          job: "lint",
+          branch: "main",
+          status: "failed",
+          run_url: "https://ci.example/lint",
+        },
+      ],
+      available_agent_ids: ["agent.beta"],
+      now_iso: "2026-03-11T05:00:00.000Z",
+    });
+
+    expect(plan.ci_metrics.unique_failure_count).toBe(2);
+    expect(plan.ci_metrics.task_upsert_count).toBe(2);
+    expect(plan.ci_metrics.reopened_count).toBe(1);
+    expect(plan.ci_metrics.refreshed_count).toBe(1);
+    expect(plan.task_upserts.every((entry) => entry.task.tags.includes("ci"))).toBe(true);
+
+    const settingsAfter = service.projectSettingsAfterCiSync({
+      settings: {
+        ci_last_failed_job_count: 1,
+      },
+      failed_job_count: plan.ci_metrics.unique_failure_count,
+      synced_at_utc: "2026-03-11T05:01:00.000Z",
+    });
+
+    expect(settingsAfter.ci_last_failed_job_count).toBe(2);
+    expect(settingsAfter.ci_last_sync_at_utc).toBe("2026-03-11T05:01:00.000Z");
+  });
+
+  it("returns an empty CI sync plan when no failures are present", () => {
+    const service = createTaskNerveService();
+    const plan = service.projectCiTaskSyncPlan({
+      settings: {
+        ci_auto_task_enabled: true,
+        ci_failure_task_priority: 8,
+      },
+      tasks: [
+        {
+          task_id: "t-open",
+          title: "existing CI task",
+          status: "open",
+          tags: ["ci", "ci-key:github::build::unit::main"],
+          claimed_by_agent_id: "agent.beta",
+        },
+      ],
+      failures: [],
+      available_agent_ids: ["agent.beta"],
+      now_iso: "2026-03-11T05:10:00.000Z",
+    });
+
+    expect(plan.ci_metrics.failure_count).toBe(0);
+    expect(plan.ci_metrics.unique_failure_count).toBe(0);
+    expect(plan.ci_metrics.task_upsert_count).toBe(0);
+    expect(plan.failures).toEqual([]);
+    expect(plan.task_upserts).toEqual([]);
+    expect(plan.dispatch_task_ids).toEqual([]);
   });
 
   it("loads and writes project settings and registry through the shared IO stores", async () => {

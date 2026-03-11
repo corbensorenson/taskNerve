@@ -190,7 +190,6 @@ function buildRecommendation(options: {
   minPushIntervalMinutes: number;
   minutesSinceLastPush: number | null;
   repository: ProjectGitRepositoryState;
-  preferredBranch: string | null;
   autoSyncAllowedBranches: string[];
 }): ProjectGitSyncSnapshot["recommendation"] {
   const needsPull = options.repository.behind_count > 0;
@@ -336,7 +335,6 @@ export function buildProjectGitSyncSnapshot(
       minPushIntervalMinutes,
       minutesSinceLastPush: minutesFromLastPush,
       repository,
-      preferredBranch,
       autoSyncAllowedBranches: allowedBranches,
     }),
   };

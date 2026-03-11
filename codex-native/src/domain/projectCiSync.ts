@@ -366,11 +366,37 @@ export function buildProjectCiTaskSyncPlan(
     }
   }
 
+  if (uniqueFailures.size === 0) {
+    return {
+      integration_mode: "codex-native-host",
+      generated_at_utc: generatedAtUtc,
+      policy: {
+        auto_task_enabled: Boolean(normalizedSettings.ci_auto_task_enabled),
+        failure_task_priority: normalizeInt(normalizedSettings.ci_failure_task_priority, 9, 0),
+        default_assignee_agent_id: normalizeOptionalText(normalizedSettings.ci_default_assignee_agent_id),
+      },
+      ci_metrics: {
+        failure_count: normalizedFailures.length,
+        unique_failure_count: 0,
+        task_upsert_count: 0,
+        newly_created_count: 0,
+        reopened_count: 0,
+        refreshed_count: 0,
+        dispatch_count: 0,
+      },
+      failures: [],
+      task_upserts: [],
+      dispatch_task_ids: [],
+    };
+  }
+
+  const relevantFailureKeys = new Set(uniqueFailures.keys());
+
   const activeTasksByKey = new Map<string, Partial<TaskRecord>>();
   const doneTasksByKey = new Map<string, Partial<TaskRecord>>();
   for (const task of tasks) {
     const key = parseCiTaskKey(task);
-    if (!key) {
+    if (!key || !relevantFailureKeys.has(key)) {
       continue;
     }
     if (task.status === "done") {
@@ -386,7 +412,10 @@ export function buildProjectCiTaskSyncPlan(
 
   const failurePriority = normalizeInt(normalizedSettings.ci_failure_task_priority, 9, 0);
   const preferredAssignee = normalizeOptionalText(normalizedSettings.ci_default_assignee_agent_id);
-  const loads = buildAgentLoadMap(tasks, availableAgents);
+  const loads =
+    preferredAssignee === null && availableAgents.length > 0
+      ? buildAgentLoadMap(tasks, availableAgents)
+      : new Map<string, number>();
 
   const failures: ProjectCiFailureRecord[] = [];
   const taskUpserts: ProjectCiTaskUpsert[] = [];

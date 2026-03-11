@@ -37,6 +37,9 @@ const CHROME_STATE_CACHE_TTL_MS = 1_000;
 const RESOURCE_STATS_CACHE_TTL_MS = 1_000;
 const PROJECT_GIT_STATE_CACHE_TTL_MS = 2_500;
 const PROJECT_CI_FAILURE_CACHE_TTL_MS = 7_500;
+const PROJECT_CI_AGENT_CACHE_TTL_MS = 2_500;
+const PROJECT_STATE_CACHE_MAX_ENTRIES = 256;
+const PROJECT_CI_FAILURE_FETCH_LIMIT = 256;
 
 export interface CodexTaskNerveSnapshotOptions {
   repoRoot: string;
@@ -635,6 +638,35 @@ function hasConversationChromeOverrides(input: CodexConversationChromeStateInput
   );
 }
 
+function getCachedMapValue<Key, Value>(map: Map<Key, Value>, key: Key): Value | null {
+  if (!map.has(key)) {
+    return null;
+  }
+  const value = map.get(key)!;
+  // Promote the accessed key to keep active repos hot under bounded cache limits.
+  map.delete(key);
+  map.set(key, value);
+  return value;
+}
+
+function rememberBoundedMapValue<Key, Value>(
+  map: Map<Key, Value>,
+  key: Key,
+  value: Value,
+  limit: number,
+) {
+  if (map.has(key)) {
+    map.delete(key);
+  }
+  map.set(key, value);
+  if (map.size > limit) {
+    const oldestKey = map.keys().next().value;
+    if (oldestKey !== undefined) {
+      map.delete(oldestKey);
+    }
+  }
+}
+
 export function createCodexTaskNerveHostRuntime(options: {
   host: Partial<CodexHostServices> | null | undefined;
   taskNerveService?: TaskNerveService;
@@ -692,6 +724,11 @@ export function createCodexTaskNerveHostRuntime(options: {
     }
   >();
   const projectCiFailureInflight = new Map<string, Promise<unknown>>();
+  let projectCiAgentCache: {
+    value: string[];
+    fetchedAtMs: number;
+  } | null = null;
+  let projectCiAgentInflight: Promise<string[]> | null = null;
   const conversationChromeEventState: CodexConversationChromeStateInput = {};
 
   function mergedConversationChromeStateInput(
@@ -954,7 +991,7 @@ export function createCodexTaskNerveHostRuntime(options: {
       return null;
     }
     const now = Date.now();
-    const cached = projectGitStateCache.get(key);
+    const cached = getCachedMapValue(projectGitStateCache, key);
     if (cached && now - cached.fetchedAtMs < PROJECT_GIT_STATE_CACHE_TTL_MS) {
       return cached.value;
     }
@@ -965,10 +1002,15 @@ export function createCodexTaskNerveHostRuntime(options: {
 
     const promise = Promise.resolve(host.readRepositoryGitState({ repoRoot: key }))
       .then((value) => {
-        projectGitStateCache.set(key, {
-          value,
-          fetchedAtMs: Date.now(),
-        });
+        rememberBoundedMapValue(
+          projectGitStateCache,
+          key,
+          {
+            value,
+            fetchedAtMs: Date.now(),
+          },
+          PROJECT_STATE_CACHE_MAX_ENTRIES,
+        );
         return value;
       })
       .finally(() => {
@@ -995,6 +1037,121 @@ export function createCodexTaskNerveHostRuntime(options: {
       settings,
       tasks: options.tasks,
       git_state: gitState,
+      now_iso: options.nowIsoUtc ?? undefined,
+    });
+    return {
+      settings,
+      snapshot,
+    };
+  }
+
+  function invalidateProjectCiFailureCache(repoRoot?: string | null) {
+    const key = typeof repoRoot === "string" ? repoRoot.trim() : "";
+    if (key) {
+      projectCiFailureCache.delete(key);
+      projectCiFailureInflight.delete(key);
+      return;
+    }
+    projectCiFailureCache.clear();
+    projectCiFailureInflight.clear();
+  }
+
+  async function loadProjectCiFailures(
+    repoRoot: string,
+    override?: unknown,
+    options: {
+      forceRefresh?: boolean;
+    } = {},
+  ): Promise<unknown> {
+    if (override !== undefined) {
+      return override;
+    }
+    if (typeof host.readRepositoryCiFailures !== "function") {
+      return [];
+    }
+    const key = repoRoot.trim();
+    if (!key) {
+      return [];
+    }
+    const forceRefresh = options.forceRefresh === true;
+    const now = Date.now();
+    const cached = getCachedMapValue(projectCiFailureCache, key);
+    if (!forceRefresh && cached && now - cached.fetchedAtMs < PROJECT_CI_FAILURE_CACHE_TTL_MS) {
+      return cached.value;
+    }
+    if (!forceRefresh) {
+      const inflight = projectCiFailureInflight.get(key);
+      if (inflight) {
+        return inflight;
+      }
+    }
+
+    const promise = Promise.resolve(
+      host.readRepositoryCiFailures({ repoRoot: key, limit: PROJECT_CI_FAILURE_FETCH_LIMIT }),
+    )
+      .then((value) => {
+        rememberBoundedMapValue(
+          projectCiFailureCache,
+          key,
+          {
+            value,
+            fetchedAtMs: Date.now(),
+          },
+          PROJECT_STATE_CACHE_MAX_ENTRIES,
+        );
+        return value;
+      })
+      .finally(() => {
+        projectCiFailureInflight.delete(key);
+      });
+    projectCiFailureInflight.set(key, promise);
+    return promise;
+  }
+
+  async function loadProjectCiSyncContext(options: {
+    repoRoot: string;
+    tasks?: Partial<TaskRecord>[];
+    ciFailures?: unknown;
+    availableAgentIds?: string[];
+    nowIsoUtc?: string | null;
+  }): Promise<{
+    settings: ProjectCodexSettings;
+    snapshot: ProjectCiTaskSyncPlan;
+  }> {
+    const settings = await taskNerve.loadProjectSettings({
+      repoRoot: options.repoRoot,
+    });
+
+    let availableAgentIds = parseStringArray(options.availableAgentIds);
+    if (availableAgentIds.length === 0 && typeof host.listTaskNerveAgents === "function") {
+      const now = Date.now();
+      if (projectCiAgentCache && now - projectCiAgentCache.fetchedAtMs < PROJECT_CI_AGENT_CACHE_TTL_MS) {
+        availableAgentIds = projectCiAgentCache.value;
+      } else {
+        if (!projectCiAgentInflight) {
+          projectCiAgentInflight = Promise.resolve(host.listTaskNerveAgents())
+            .then((value) => {
+              const parsed = parseAgentIds(value);
+              projectCiAgentCache = {
+                value: parsed,
+                fetchedAtMs: Date.now(),
+              };
+              return parsed;
+            })
+            .finally(() => {
+              projectCiAgentInflight = null;
+            });
+        }
+        availableAgentIds = await projectCiAgentInflight;
+      }
+    }
+
+    const ciFailures = await loadProjectCiFailures(options.repoRoot, options.ciFailures);
+    const snapshot = taskNerve.projectCiTaskSyncPlan({
+      settings,
+      tasks: options.tasks,
+      failures: ciFailures,
+      available_agent_ids: availableAgentIds,
       now_iso: options.nowIsoUtc ?? undefined,
     });
     return {
@@ -1288,9 +1445,16 @@ export function createCodexTaskNerveHostRuntime(options: {
         }
       }
 
-      const pushBlockedReason =
-        plan.mode === "smart" ? context.snapshot.recommendation.push_blocked_reason : null;
-      if (plan.should_push && pushBlockedReason) {
+      const pushBlockedReason = context.snapshot.recommendation.push_blocked_reason;
+      const ignoreInsufficientVolumeBlock =
+        plan.mode !== "smart" && pushBlockedReason === "insufficient-task-volume";
+      const hardBlockedByPolicy =
+        plan.should_push &&
+        pushBlockedReason !== null &&
+        !ignoreInsufficientVolumeBlock &&
+        syncOptions.force !== true;
+
+      if (hardBlockedByPolicy) {
         warnings.push(`Push skipped: ${pushBlockedReason}`);
       } else if (plan.should_push) {
         if (typeof host.pushRepository !== "function") {
@@ -1328,6 +1492,84 @@ export function createCodexTaskNerveHostRuntime(options: {
         plan_reason: plan.reason,
         before: context.snapshot,
         after,
+        warnings,
+      };
+    },
+
+    projectCiSyncSnapshot: async (projectOptions) => {
+      const context = await loadProjectCiSyncContext({
+        repoRoot: projectOptions.repoRoot,
+        tasks: projectOptions.tasks,
+        ciFailures: projectOptions.ciFailures,
+        availableAgentIds: projectOptions.availableAgentIds,
+        nowIsoUtc: projectOptions.nowIsoUtc,
+      });
+      return context.snapshot;
+    },
+
+    syncProjectCi: async (syncOptions) => {
+      const context = await loadProjectCiSyncContext({
+        repoRoot: syncOptions.repoRoot,
+        tasks: syncOptions.tasks,
+        ciFailures: syncOptions.ciFailures,
+        availableAgentIds: syncOptions.availableAgentIds,
+        nowIsoUtc: syncOptions.nowIsoUtc,
+      });
+      const warnings: string[] = [];
+      let persistedTaskUpserts = 0;
+      let dispatchedTaskIds: string[] = [];
+
+      const settingsAfterSync = await taskNerve.writeProjectSettings(
+        syncOptions.repoRoot,
+        taskNerve.projectSettingsAfterCiSync({
+          settings: context.settings,
+          failed_job_count: context.snapshot.ci_metrics.unique_failure_count,
+          synced_at_utc: syncOptions.nowIsoUtc ?? undefined,
+        }),
+      );
+
+      const taskPayload = context.snapshot.task_upserts.map((entry) => entry.task);
+      if (!context.snapshot.policy.auto_task_enabled) {
+        warnings.push("CI auto-tasking is disabled in project settings");
+      } else if (syncOptions.persistTasks === false) {
+        warnings.push("CI task persistence skipped by request");
+      } else if (taskPayload.length > 0) {
+        if (typeof host.upsertTaskNerveProjectTasks !== "function") {
+          warnings.push("Codex host method upsertTaskNerveProjectTasks is unavailable");
+        } else {
+          await host.upsertTaskNerveProjectTasks({
+            repoRoot: syncOptions.repoRoot,
+            tasks: taskPayload,
+          });
+          persistedTaskUpserts = taskPayload.length;
+        }
+      }
+
+      const shouldDispatch = syncOptions.dispatch !== false;
+      if (!shouldDispatch) {
+        // Explicit opt-out: keep snapshot output but skip host dispatch call.
+      } else if (!context.snapshot.policy.auto_task_enabled) {
+        // Auto-tasking disabled; dispatch is intentionally suppressed.
+      } else if (persistedTaskUpserts <= 0 || context.snapshot.dispatch_task_ids.length === 0) {
+        // Nothing new to dispatch.
+      } else if (typeof host.dispatchTaskNerveTasks !== "function") {
+        warnings.push("Codex host method dispatchTaskNerveTasks is unavailable");
+      } else {
+        dispatchedTaskIds = [...context.snapshot.dispatch_task_ids];
+        await host.dispatchTaskNerveTasks({
+          repoRoot: syncOptions.repoRoot,
+          task_ids: dispatchedTaskIds,
+        });
+      }
+
+      invalidateProjectCiFailureCache(syncOptions.repoRoot);
+
+      return {
+        integration_mode: "codex-native-host",
+        before: context.snapshot,
+        settings: settingsAfterSync,
+        persisted_task_upserts: persistedTaskUpserts,
+        dispatched_task_ids: dispatchedTaskIds,
         warnings,
       };
     },

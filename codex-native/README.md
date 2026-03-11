@@ -10,6 +10,7 @@ TaskNerve is integrated directly into Codex host runtime surfaces via:
 - `src/integration/codexConversationDisplay.ts`
 - `src/integration/codexConversationInteraction.ts`
 - `src/integration/codexProjectGitSync.ts`
+- `src/integration/codexProjectCiSync.ts`
 - `src/integration/codexConversationChrome.ts`
 
 No app-bundle patching or runtime script injection is part of the supported architecture.

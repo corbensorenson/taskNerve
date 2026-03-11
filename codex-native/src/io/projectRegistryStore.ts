@@ -10,6 +10,7 @@ import {
 import { taskNerveProjectsRegistryPath } from "./paths.js";
 
 const FILE_MISSING_MTIME_MS = -1;
+const PROJECT_REGISTRY_CACHE_LIMIT = 32;
 
 interface ProjectRegistryCacheEntry {
   mtimeMs: number;
@@ -19,6 +20,29 @@ interface ProjectRegistryCacheEntry {
 
 const projectRegistryCache = new Map<string, ProjectRegistryCacheEntry>();
 const projectRegistryInflight = new Map<string, Promise<ProjectRegistry>>();
+
+function getCachedProjectRegistry(filePath: string): ProjectRegistryCacheEntry | null {
+  if (!projectRegistryCache.has(filePath)) {
+    return null;
+  }
+  const cached = projectRegistryCache.get(filePath)!;
+  projectRegistryCache.delete(filePath);
+  projectRegistryCache.set(filePath, cached);
+  return cached;
+}
+
+function rememberProjectRegistry(filePath: string, entry: ProjectRegistryCacheEntry) {
+  if (projectRegistryCache.has(filePath)) {
+    projectRegistryCache.delete(filePath);
+  }
+  projectRegistryCache.set(filePath, entry);
+  if (projectRegistryCache.size > PROJECT_REGISTRY_CACHE_LIMIT) {
+    const oldestPath = projectRegistryCache.keys().next().value;
+    if (typeof oldestPath === "string") {
+      projectRegistryCache.delete(oldestPath);
+    }
+  }
+}
 
 async function fileMtimeMs(filePath: string): Promise<number> {
   try {
@@ -43,7 +67,7 @@ export async function loadProjectRegistry(
 
   const promise = (async () => {
     const currentMtimeMs = await fileMtimeMs(filePath);
-    const cached = projectRegistryCache.get(filePath);
+    const cached = getCachedProjectRegistry(filePath);
     if (cached && cached.mtimeMs === currentMtimeMs) {
       return cached.value;
     }
@@ -62,7 +86,7 @@ export async function loadProjectRegistry(
     const nextMtimeMs =
       wrote || currentMtimeMs === FILE_MISSING_MTIME_MS ? await fileMtimeMs(filePath) : currentMtimeMs;
     const nextRaw = wrote ? formatPrettyJson(normalized) : raw ?? formatPrettyJson(normalized);
-    projectRegistryCache.set(filePath, {
+    rememberProjectRegistry(filePath, {
       mtimeMs: nextMtimeMs,
       value: normalized,
       raw: nextRaw,
@@ -84,12 +108,12 @@ export async function writeProjectRegistry(
   const normalized = projectRegistrySchema.parse(registry);
   normalized.projects.sort((left, right) => left.name.localeCompare(right.name));
   const currentMtimeMs = await fileMtimeMs(filePath);
-  const cached = projectRegistryCache.get(filePath);
+  const cached = getCachedProjectRegistry(filePath);
   const existingRaw = cached && cached.mtimeMs === currentMtimeMs ? cached.raw : undefined;
   const wrote = await writePrettyJsonIfChanged(filePath, normalized, { existingRaw });
   const nextMtimeMs =
     wrote || currentMtimeMs === FILE_MISSING_MTIME_MS ? await fileMtimeMs(filePath) : currentMtimeMs;
-  projectRegistryCache.set(filePath, {
+  rememberProjectRegistry(filePath, {
     mtimeMs: nextMtimeMs,
     value: normalized,
     raw: formatPrettyJson(normalized),

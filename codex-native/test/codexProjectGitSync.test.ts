@@ -22,6 +22,7 @@ describe("codex project git sync", () => {
       ],
       git_state: {
         current_branch: "tasknerve/main",
+        remote: "origin",
         aheadCount: 3,
         behind_count: 1,
         changedFileCount: 0,
@@ -50,6 +51,7 @@ describe("codex project git sync", () => {
         ],
         git_state: {
           branch: "tasknerve/main",
+          remote: "origin",
           ahead_count: 1,
           behind_count: 0,
           clean: true,
@@ -60,5 +62,33 @@ describe("codex project git sync", () => {
     expect(plan.reason).toBe("smart-push");
     expect(plan.should_pull).toBe(false);
     expect(plan.should_push).toBe(true);
+  });
+
+  it("blocks smart push when branch policy disallows current branch", () => {
+    const snapshot = buildCodexProjectGitSyncSnapshot({
+      settings: {
+        git_auto_sync_enabled: true,
+        git_tasks_per_push_target: 1,
+        git_done_task_count_at_last_push: 0,
+        git_auto_sync_allowed_branches: ["tasknerve/main"],
+      },
+      tasks: [{ task_id: "t1", title: "done 1", status: "done" }],
+      git_state: {
+        branch: "feature/perf",
+        remote: "origin",
+        ahead_count: 1,
+        behind_count: 0,
+        clean: true,
+      },
+    });
+
+    const plan = planCodexProjectGitSync({
+      snapshot,
+    });
+
+    expect(snapshot.recommendation.reason).toBe("push-blocked");
+    expect(snapshot.recommendation.push_blocked_reason).toBe("branch-not-allowed");
+    expect(plan.reason).toBe("smart-push-blocked");
+    expect(plan.should_push).toBe(false);
   });
 });

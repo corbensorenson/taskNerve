@@ -32,6 +32,7 @@ Codex-first display surface:
 `createTaskNerveService()`:
 - project settings and registry IO
 - per-repo mtime/raw caching for settings/registry reads with low-overhead cache lookups across many open projects
+- settings/registry caches use bounded retention with hot-entry promotion to keep memory predictable at scale
 - task queue sorting/filtering/stats
 - memoized task snapshots for repeated task/search inputs
 - precomputed task-search text to reduce per-query string normalization overhead on large queues
@@ -44,6 +45,9 @@ Codex-first display surface:
 - `conversationInteractionStep(...)` interaction command pipeline for native host scroll/jump handling
 - `projectGitSyncSnapshot(...)` per-project git sync cadence and recommendation surface
 - `projectSettingsAfterGitPush(...)` per-project push-history tracking update helper
+- `projectCiTaskSyncPlan(...)` per-project CI failure triage to task-upsert planning
+- `projectSettingsAfterCiSync(...)` per-project CI sync tracking update helper
+- CI sync planning short-circuits when failure count is zero, avoiding unnecessary task indexing scans on large queues
 - thread display snapshots (timestamped entries, prompt-history navigation, virtualization window, scroll decisions)
 
 `createCodexTaskNerveHostRuntime()`:
@@ -54,6 +58,8 @@ Codex-first display surface:
 - host-exposed `applyConversationInteraction(...)` to execute native scroll/jump commands when host methods exist
 - host-exposed `projectGitSyncSnapshot(...)` for per-repo git sync metrics and recommendation
 - host-exposed `syncProjectGit(...)` for smart pull/push execution with tracked push cadence
+- host-exposed `projectCiSyncSnapshot(...)` for per-repo CI failure triage and task-upsert preview
+- host-exposed `syncProjectCi(...)` for automatic CI failure task upsert + dispatch through host task APIs
 - host-exposed thread display snapshot method for native Codex thread UIs
 - optional host-event refresh observers:
   - `observeThreadRefresh(...)` prefers `host.subscribeThreadEvents(...)`
@@ -71,8 +77,12 @@ Codex-first display surface:
 - per-source short caches/inflight de-dup for task-count, drawer, terminal, branch, and resource reads to reduce redundant host calls when only some event subscriptions are available
 - duplicate parsed chrome events are de-duplicated before forwarding to reduce unnecessary chrome update churn
 - resource stats host reads are independently short-cached to avoid repeated expensive telemetry fetches during rapid chrome refreshes
+- per-repo git/CI runtime caches are bounded with hot-entry promotion so memory remains stable across very large multi-project sessions
+- CI sync snapshots short-cache agent discovery and request CI failures with a bounded limit to reduce host/API pressure
+- CI failure payload normalization is capped per cycle to keep CPU predictable under noisy provider payloads
 - chrome refresh can run in a hybrid model: event-updated fields bypass host reads, while unsupported fields continue TTL-backed host reads
 - repository-settings refresh observers invalidate chrome cache; thread refresh observers stay display-focused to avoid chrome read churn during chatty thread events
+- per-repo CI failure reads are short-cached with inflight de-dup to avoid repeated CI API pressure during burst sync cycles
 
 ## Example
 
@@ -83,6 +93,7 @@ import {
   buildCodexConversationDisplaySnapshot,
   conversationInteractionStep,
   buildCodexProjectGitSyncSnapshot,
+  buildCodexProjectCiTaskSyncPlan,
 } from "codex-tasknerve-native";
 
 const taskNerve = createTaskNerveService();
@@ -146,6 +157,22 @@ const standaloneGit = buildCodexProjectGitSyncSnapshot({
   settings: snapshot.settings,
   tasks,
   git_state: gitSnapshot.repository,
+});
+
+const ciSnapshot = await runtime.projectCiSyncSnapshot({
+  repoRoot,
+  tasks,
+});
+
+const ciSync = await runtime.syncProjectCi({
+  repoRoot,
+  tasks,
+});
+
+const standaloneCi = buildCodexProjectCiTaskSyncPlan({
+  settings: snapshot.settings,
+  tasks,
+  failures: ciSnapshot.failures,
 });
 
 const chrome = await runtime.conversationChromeSnapshot();
