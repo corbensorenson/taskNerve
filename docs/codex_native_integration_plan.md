@@ -2,121 +2,58 @@
 
 ## Goal
 
-Make TaskNerve feel first-class inside Codex:
-- no browser-tab dependency
-- no iframe as the primary product surface
-- no second sign-in for controller/worker turns
-- no dependence on visible chat titles for worker routing
+Make TaskNerve feel like a built-in part of Codex:
+- no iframe
+- no second app
+- no second sign-in
+- no user-facing TaskNerve CLI
+- no Rust in the live runtime path
 
-TaskNerve should own project/task orchestration while Codex continues to own authenticated inference and conversation UX.
+Codex should remain the host for threads, auth, windows, and desktop UX. TaskNerve should remain the orchestration layer for tasks, controller policy, traces, project docs, and task-aware automation.
 
-## Current State
+## Steady-State Architecture
 
-The current branch is native-first in UX, but not fully native in runtime yet.
+Codex owns:
+- authenticated inference
+- thread creation and thread navigation
+- workspace and repo context
+- desktop shell and window management
+- host chrome and native controls
 
-Today:
-- the Codex sidebar/panel integration is native
-- Codex-authenticated turns are native
-- the durable task/project engine still runs through the Rust backend
-- the local panel transport still runs over the Rust localhost service
+TaskNerve owns:
+- project-scoped queue logic
+- task drawer and TaskNerve settings page
+- controller and worker orchestration
+- project document lifecycle
+- trace capture and export policy
+- TaskNerve branch state and workflow policy
 
-That means Rust is still required for the live product. It should be treated as legacy runtime until the cutover criteria in `docs/codex_native_cutover_audit.md` are satisfied.
+## Implementation Direction
 
-The active rewrite target now lives in `codex-native/`. New portable TaskNerve domain logic should land there first. Rust work on this branch should be limited to parity, compatibility, or removal-enabling migrations.
+Native TaskNerve work should continue to move toward:
+- TypeScript-first domain modules in `codex-native/`
+- renderer and main-process behavior that mirrors Codex's own style
+- in-app routes and host services instead of a second binary interface
+- repo-local persistence as the durable source of truth
 
-The implementation style target is documented in `docs/codex_native_style_contract.md`: TypeScript-first, Electron-compatible boundaries, zod-backed contracts, Vitest tests, and no steady-state localhost sidecar.
+## Development Model
 
-## Adopted Architecture
+The main developer loop is:
+1. edit `codex-native/` or `templates/`
+2. run native checks
+3. resync `Codex TaskNerve.app`
+4. review the result directly inside Codex
 
-### 1. TaskNerve stays authoritative for project state
+The supported sync command is:
 
-TaskNerve remains the system of record for:
-- project registry
-- task queue and claims
-- timeline/checkpoints
-- bridge/CI flows
-- Codex thread bindings and queued heartbeats
+```bash
+bash /Users/adimus/Documents/taskNerve/install-macos.sh --app "/Applications/Codex TaskNerve.app"
+```
 
-### 2. Codex becomes the native execution surface
+## Explicit Non-Goals
 
-The installed `Codex.app` bundle is patched locally by `tasknerve codex install` so TaskNerve can:
-- add a `TaskNerve` entry to the Codex shell
-- open a native TaskNerve overlay instead of an iframe
-- route controller and worker prompt injection through Codex desktop itself
-
-The overlay is intentionally designed around the user flow:
-- select project
-- bind one active Codex thread as controller
-- let TaskNerve adopt active non-archived project threads as workers
-- talk to the controller from the TaskNerve panel
-- queue project-wide heartbeats to active workers
-
-### 3. Native inference bridge, not a separate provider path
-
-TaskNerve now patches Codex main-process code to expose a localhost bridge backed by Codex's own authenticated app-server connection.
-
-That bridge currently supports:
-- `startThread`
-- `startTurn`
-- `setThreadName`
-- `updateThreadTitle`
-- opening a specific thread in the Codex UI
-
-This keeps controller and worker prompting on the user's Codex/ChatGPT subscription path instead of requiring a separate Claude/OpenRouter-style login.
-
-### 4. Local panel service remains useful, but only as TaskNerve data transport
-
-TaskNerve still runs a localhost panel/backend service under a LaunchAgent because the native overlay needs stable access to project/task APIs.
-
-That service is no longer the product surface by itself. Its job is:
-- serve project/task/codex snapshot APIs
-- accept queue mutations
-- accept controller/heartbeat requests
-- keep the native overlay lightweight
-
-This transport is temporary. The `codex-native/` workspace is the path to removing the localhost dependency entirely.
-
-### 5. Patch-and-sync update model
-
-Codex does not currently expose a stable plugin/sidebar extension API for this integration, so TaskNerve treats the desktop integration as a managed patch layer.
-
-`tasknerve codex sync` is the important operational command:
-- detect when `Codex.app` updated
-- compare current `app.asar` hash against the last patched hash
-- reapply the TaskNerve renderer patch
-- reapply the TaskNerve native bridge patch
-- refresh LaunchAgents and local skill state
-
-On macOS, install also writes a sync LaunchAgent that watches the patched app/tasknerve executable and periodically reruns `tasknerve codex sync --quiet`.
-
-## Update Resilience Strategy
-
-The main integration risk is Codex desktop internals changing between app updates. To reduce that risk:
-- patch application is marker-based and idempotent
-- TaskNerve keeps a clean backup of the original `app.asar`
-- the bridge injector now derives the current main-process symbol names from the shipped `main.js` during patch time instead of hardcoding one build's obfuscated names
-- `doctor` reports hash drift, patch health, panel health, native bridge health, and LaunchAgent state
-
-This is still an unsupported local patch path. Automatic reapply is realistic across normal Codex updates, but a major upstream desktop refactor can still require TaskNerve patch updates.
-
-## Constraints
-
-- macOS-only for now
-- no secrets are embedded into patched assets
-- TaskNerve writes only to TaskNerve-controlled state plus the user-approved local Codex bundle patch
-- uninstall must be reversible through `tasknerve codex uninstall`
-
-## Future Direction
-
-If Codex eventually ships a supported desktop extension API, TaskNerve should move to it and retire the bundle patcher.
-
-Until then, the right model is:
-- native overlay inside Codex
-- Codex-authenticated inference for controller and worker turns
-- TaskNerve-owned orchestration and project memory
-- syncable patch layer that can keep up with Codex desktop updates
-
-Near-term migration focus:
-- port queue ordering/filtering and project Codex settings logic into `codex-native/`
-- port controller bootstrap and project-contract generation into `codex-native/`
-- replace localhost-backed panel actions with in-process native state/actions
+The branch should not drift back toward:
+- a standalone TaskNerve CLI as the primary user surface
+- a Rust sidecar
+- a second auth path
+- a browser-only board outside Codex

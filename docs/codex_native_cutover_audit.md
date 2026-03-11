@@ -5,142 +5,54 @@ Branch: `codex/codex-native`
 
 ## Bottom Line
 
-TaskNerve is not fully native to Codex yet.
+TaskNerve has crossed the cutover.
 
-Today the user-facing product is Codex-native in presentation, but the runtime still depends on the Rust backend for critical behavior:
-- task and project state
-- task queue mutation APIs
-- Codex patch install/sync/uninstall
-- panel HTTP service
-- controller/worker orchestration state
-- local health/doctor/install flows
+The live product path is now:
+- native JS/TS patch and sync tooling under `codex-native/`
+- native in-process TaskNerve services inside the patched Codex desktop runtime
+- renderer requests that target the native bridge on `http://127.0.0.1:7791/tasknerve/...`
+- repo-local TaskNerve state plus root project contract markdown files
 
-Because of that, moving `src/main.rs` or the Rust install/runtime code into `/deprecated` right now would break the product instead of simplifying it.
+The archived Rust runtime lives under [deprecated/rust/](/Users/adimus/Documents/taskNerve/deprecated/rust/) and is not part of the live app path.
 
-## Native Workspace Status
+## Live Runtime
 
-The native cutover now has a real workspace at `codex-native/`.
+Active runtime surfaces:
+- [codex-native/](/Users/adimus/Documents/taskNerve/codex-native/)
+- [templates/TASKNERVE_CODEX_MAIN_BRIDGE.js](/Users/adimus/Documents/taskNerve/templates/TASKNERVE_CODEX_MAIN_BRIDGE.js)
+- [templates/TASKNERVE_CODEX_PANEL.js](/Users/adimus/Documents/taskNerve/templates/TASKNERVE_CODEX_PANEL.js)
 
-Ported there already:
-- project Codex settings defaults and model-routing policy
-- portable task queue sort/filter/stats helpers
-- single-message prompt queue collapse logic
-- project goals/manifest template renderers
-- controller bootstrap prompt builder
-- Codex host-service boundary contract
-- repo-local `.tasknerve/codex/project_settings.json` persistence
-- global TaskNerve `projects.json` persistence
+Active install and sync path:
+- [install-macos.sh](/Users/adimus/Documents/taskNerve/install-macos.sh)
+- [scripts/install-unix.sh](/Users/adimus/Documents/taskNerve/scripts/install-unix.sh)
+- [codex-native/scripts/sync-codex-tasknerve.mjs](/Users/adimus/Documents/taskNerve/codex-native/scripts/sync-codex-tasknerve.mjs)
 
-Not ported yet:
-- durable `.tasknerve` reads/writes
-- queue mutations and claims
-- Codex patch install/sync lifecycle
-- live panel data/actions
-- controller and worker runtime orchestration
+## Archived Runtime
 
-## Current Rust Runtime Dependencies
+Archived legacy surfaces:
+- [deprecated/rust/](/Users/adimus/Documents/taskNerve/deprecated/rust/)
+- [deprecated/legacy-ui/](/Users/adimus/Documents/taskNerve/deprecated/legacy-ui/)
 
-The current live Codex TaskNerve build still relies on Rust for these surfaces:
+These remain for reference and migration history only.
 
-### 1. Native panel asset injection
+## Product Contract
 
-Rust embeds and patches the injected panel assets:
-- `src/main.rs`
-- `templates/TASKNERVE_CODEX_PANEL.js`
-- `templates/TASKNERVE_CODEX_MAIN_BRIDGE.js`
+The supported product model on this branch is:
+- one app: Codex TaskNerve
+- one inference path: Codex's built-in signed-in inference
+- one user workflow: native TaskNerve page plus task drawer inside Codex
+- one durable project state model: `.tasknerve/`, `project_goals.md`, `project_manifest.md`, `contributing ideas.md`
 
-Key functions:
-- `render_codex_panel_script`
-- `install_codex_integration`
-- `sync_codex_integration`
+Not supported as primary workflows anymore:
+- user-facing TaskNerve CLI
+- Rust runtime services
+- the old browser task GUI
+- the old localhost `7788` panel sidecar
 
-### 2. TaskNerve panel transport
+## Verification Targets
 
-Rust still runs the local panel server and all panel APIs:
-- `serve_task_gui`
-- `handle_task_gui_connection`
-- `/api/tasks`
-- `/api/codex/*`
-- `/api/project/codex-settings`
-
-The native panel no longer depends on `/api/advisor`, but it still is not a self-contained Codex-side implementation because the rest of the panel transport remains Rust-hosted.
-
-### 3. Durable orchestration engine
-
-Rust still owns:
-- project registry
-- tasks and claims
-- advisor policy/state
-- Codex bindings
-- queued prompts
-- task/timeline persistence under `.tasknerve`
-
-### 4. Desktop patch lifecycle
-
-Rust still owns:
-- app bundle patching
-- backup/restore of `app.asar`
-- LaunchAgent installation
-- health/doctor reporting
-- sync/reapply after Codex updates
-
-## Native Cutover Criteria
-
-Rust can move into `/deprecated` only after all of the following are true:
-
-1. Codex-side native runtime owns project/task/codex/controller-automation APIs directly.
-2. The task queue engine exists in the native runtime, not behind localhost Rust APIs.
-3. The patch/sync logic is implemented in the native runtime patch layer or a tiny installer-only tool.
-4. The panel no longer depends on `http://127.0.0.1:7788` for normal operation.
-5. Controller bootstrap, worker adoption, heartbeat routing, and low-queue automation run without Rust.
-6. Repo-local `.tasknerve` state remains readable/writable by the native runtime.
-
-## Recommended Migration Order
-
-### Phase 1: Freeze legacy growth
-
-Do not add new product features that only exist in Rust.
-
-Allowed:
-- bug fixes
-- compatibility fixes
-- parity-preserving support for the current native overlay
-
-### Phase 2: Native host boundary
-
-Create a Codex-native host layer that owns:
-- active workspace/project context
-- thread discovery and routing
-- turn creation and thread creation
-- settings UI integration
-- git/repo selection reuse from Codex
-
-### Phase 3: Port orchestration core
-
-Port the following domain logic out of Rust:
-- project registry and selection
-- task CRUD and ordering
-- task request/start/claim/advance logic
-- worker heartbeat scheduling
-- controller low-queue automation
-- project codex settings
-- project goals/manifest file seeding and lock-state handling
-
-### Phase 4: Replace localhost panel transport
-
-Replace the current Rust HTTP panel service with native in-process state/actions.
-
-### Phase 5: Archive legacy runtime
-
-Only after parity is verified:
-- move Rust runtime code into `/deprecated`
-- keep installer migration notes
-- preserve repo-state compatibility tests
-
-## Immediate Policy
-
-Until the cutover criteria are met:
-- Rust is legacy runtime, not deprecated code
-- Rust should not be moved into `/deprecated`
-- new architecture work should target the native Codex runtime first
-- `codex-native/` is the preferred home for any new portable queue, settings, or controller orchestration logic
+Healthy native state means:
+- `127.0.0.1:7788` is not serving the old panel runtime
+- `127.0.0.1:7791/tasknerve/health` reports healthy
+- the patched app bundle contains the injected native bridge and panel assets
+- TaskNerve task/project actions work from inside Codex without a separate CLI process

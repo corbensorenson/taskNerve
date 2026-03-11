@@ -2,109 +2,75 @@
 
 Status: draft
 Managed by: TaskNerve
-Last generated: 2026-03-10T08:19:19Z
+Last updated: 2026-03-10
 
-This file locks the technical contract for how `project_goals.md` will be achieved. Use it to record approved languages, libraries, software patterns, commands, and engineering constraints.
+This file locks the technical contract for how `project_goals.md` will be achieved.
 
 ## Current Technical Snapshot
 - Repository: `taskNerve`
 - Repo root: `/Users/adimus/Documents/taskNerve`
 
-### Languages and runtimes detected
-- Rust
+### Languages and runtimes
+- TypeScript for portable native domain logic
+- JavaScript for injected main-process and renderer bridge assets
+- Node.js and Electron-compatible runtime boundaries
 
-### Toolchains and package managers detected
-- Cargo
+### Toolchains and package managers
+- npm
+- TypeScript compiler
+- Vitest
 
-### Likely frameworks and libraries detected
-- anyhow
-- chrono
-- clap
-- globset
-- ignore
-- rayon
-- serde
-- serde_json
-- serde_yaml
-- sha2
-- uuid
-- walkdir
+### Approved core libraries and tooling
+- `zod` for runtime validation
+- Vitest for tests
+- native Codex desktop bundle patching through `codex-native/scripts/sync-codex-tasknerve.mjs`
 
-### Notable files
-- Cargo.toml
-- docs/research/git-complaints-and-tasknerve-v1-speed-plan-2026-03-09.md
-- docs/.DS_Store
-- docs/codex_native_integration_plan.md
-- README.md
-- src/main.rs
-
-### Current project structure signals
-- source lives under `src/`
-- documentation lives alongside code in `docs/`
-- template-driven assets or generated artifacts
-- Codex skill or agent integration is shipped from the repo
-- GitHub workflow automation is present
-
-### Suggested working commands
-- cargo build
-- cargo test
-- cargo run
-
-### Top-level entries
-- .DS_Store
-- .editorconfig
-- .gitattributes
-- .github
-- .gitignore
-- CHANGELOG.md
-- CODE_OF_CONDUCT.md
-- CONTRIBUTING.md
-- Cargo.lock
-- Cargo.toml
-- GOVERNANCE.md
-- LICENSE
-- README.md
-- SECURITY.md
-- TASKNERVE_WORKFLOW.md
-- build.rs
-- docs
-- githooks
-- install-linux.sh
-- install-macos.sh
+### Notable files and directories
+- `codex-native/`
+- `templates/TASKNERVE_CODEX_MAIN_BRIDGE.js`
+- `templates/TASKNERVE_CODEX_PANEL.js`
+- `project_goals.md`
+- `project_manifest.md`
+- `contributing ideas.md`
+- `deprecated/rust/` for archived reference only
 
 ## Technical Contract
 
 ### Languages and runtimes
-- Primary implementation language(s):
-- Approved secondary language(s):
-- Runtime targets and supported platforms:
+- Primary implementation language(s): TypeScript and JavaScript
+- Archived-only language(s): Rust under `deprecated/`
+- Runtime targets and supported platforms: Electron/Codex desktop, macOS first
 
 ### Libraries and frameworks
-- Preferred libraries and frameworks:
-- Libraries that should be avoided unless explicitly approved:
+- Preferred libraries and frameworks: Node standard library, `zod`, Vitest
+- Libraries or patterns to avoid: new live Rust dependencies, sidecar-first architectures, redundant local HTTP services as the primary product path
 
 ### Architecture and software patterns
-- Module or service boundaries:
-- State and data-flow rules:
-- Error handling and logging expectations:
-- Concurrency, async, or threading model:
-- UI, API, or storage patterns that should be followed:
+- Module boundaries: portable domain logic in `codex-native/src`, live host patch assets in `templates/`
+- State rules: repo-local `.tasknerve/` plus root project markdown contracts remain the durable source of truth
+- Error handling: fail clearly, prefer deterministic health probes, keep patching reversible
+- Concurrency model: Codex-hosted native services with project-scoped orchestration and lightweight background refresh
+- UI patterns: match Codex styling and chrome; keep TaskNerve settings compact and task work drawer-first
 
 ### Quality gates
-- Required build, lint, test, and verification commands:
-- Required review expectations:
-- Required docs or release notes updates:
+- Required commands:
+  - `cd /Users/adimus/Documents/taskNerve/codex-native && npm install`
+  - `cd /Users/adimus/Documents/taskNerve/codex-native && npm run typecheck`
+  - `cd /Users/adimus/Documents/taskNerve/codex-native && npm test`
+  - `node --check /Users/adimus/Documents/taskNerve/templates/TASKNERVE_CODEX_MAIN_BRIDGE.js`
+  - `node --check /Users/adimus/Documents/taskNerve/templates/TASKNERVE_CODEX_PANEL.js`
+- Required review expectation: native UX changes should be reviewed against how Codex itself behaves
+- Required docs updates: README, skill docs, and project contracts whenever workflow changes materially
 
 ### Delivery rules
-- Migration and compatibility strategy:
-- Performance, security, and cost constraints:
-- Rules for introducing new dependencies or patterns:
+- Migration strategy: keep archived Rust reference-only; do not reintroduce it to the live path
+- Performance, security, and cost constraints: prefer Codex-native inference and efficient multi-agent orchestration
+- Dependency rule: new dependencies must fit the Codex-native TypeScript direction
 
 ## Open Questions For The User
-- [ ] Which current stack choices are intentional versus historical accidents?
-- [ ] Which libraries are mandatory versus replaceable?
-- [ ] Which software patterns should never be introduced here?
-- [ ] Which quality gates are non-negotiable before work is considered done?
+- [ ] Which Codex UI surfaces should TaskNerve integrate with next?
+- [ ] Which project settings belong in the compact settings drawer versus a fuller project page?
+- [ ] Which native host hooks should be treated as stable versus patch-layer implementation details?
 
 ## Lock Status
-- [ ] Mark this file as locked once the user and controller agree the technical contract is stable.
+- [ ] Mark this file as locked once the technical contract is stable.

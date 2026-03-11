@@ -1,6 +1,6 @@
-const TASKNERVE_BASE_URL = "__TASKNERVE_BASE_URL__";
 const TASKNERVE_NATIVE_BRIDGE_URL = "__TASKNERVE_NATIVE_BRIDGE_URL__";
 const TASKNERVE_NAV_ID = "tasknerve-codex-nav-entry";
+const TASKNERVE_ACCOUNT_MENU_ID = "tasknerve-codex-account-menu-entry";
 const TASKNERVE_PANEL_ID = "tasknerve-codex-panel-root";
 const TASKNERVE_PANEL_STYLE_ID = "tasknerve-codex-panel-style";
 const TASKNERVE_BRANCH_CHIP_ID = "tasknerve-codex-branch-chip";
@@ -8,6 +8,11 @@ const TASKNERVE_RESOURCE_CHIP_ID = "tasknerve-codex-resource-chip";
 const TASKNERVE_BRANCH_MENU_ID = "tasknerve-codex-branch-menu";
 const TASKNERVE_TOPBAR_TASK_CHIP_ID = "tasknerve-codex-topbar-task-chip";
 const TASKNERVE_TERMINAL_TOGGLE_ID = "tasknerve-codex-terminal-toggle";
+const TASKNERVE_TOOLTIP_ID = "tasknerve-codex-tooltip";
+const TASKNERVE_DEFAULT_NATIVE_BRIDGE_ORIGINS = [
+  "http://127.0.0.1:7791",
+  "http://localhost:7791",
+];
 const TASKNERVE_STORAGE_PROJECT_KEY = "tasknerve.codex.selectedProject";
 const TASKNERVE_STORAGE_TASK_SEARCH_KEY = "tasknerve.codex.taskSearch";
 const TASKNERVE_STORAGE_NATIVE_PROJECT_PREFS_KEY = "tasknerve.codex.nativeProjectPrefs";
@@ -22,22 +27,30 @@ const TASKNERVE_PROJECT_DOCUMENTS = [
     label: "project_goals.md",
     fileName: "project_goals.md",
     title: "Project Goals",
+    icon: "goals",
   },
   {
     key: "project_manifest",
     label: "project_manifest.md",
     fileName: "project_manifest.md",
     title: "Project Manifest",
+    icon: "manifest",
   },
   {
     key: "contributing_ideas",
     label: "contributing ideas.md",
     fileName: "contributing ideas.md",
     title: "Contributing Ideas",
+    icon: "ideas",
   },
 ];
 const TASKNERVE_DEFAULT_HEARTBEAT =
   "Please continue working on {project_name} project utilizing the taskNerve system. I believe in you, do your absolute best!";
+const TASKNERVE_GIT_SYNC_POLICIES = [
+  { value: "every_task", label: "Every completed task" },
+  { value: "every_n_tasks", label: "Every N completed tasks" },
+  { value: "manual", label: "Manual only" },
+];
 
 const tasknerveState = {
   panelOpen: false,
@@ -54,9 +67,19 @@ const tasknerveState = {
   refreshTimer: null,
   branchMenuOpen: false,
   flash: { tone: "info", message: "" },
+  bridgeOrigin: null,
+  domSyncScheduled: false,
+  domSyncInProgress: false,
+  settingsSearch: "",
+  expandedSettingsProjects: {},
   ensuredProjectDocs: {},
   sidebarFolders: {},
+  sidebarProjectsExpanded: {},
+  sidebarRenderSignatures: {},
+  sidebarNativeRowsByProject: {},
   nativeProjectPrefs: {},
+  nativeTerminalToggle: null,
+  tooltipTarget: null,
   resourceMonitor: {
     loading: false,
     cpuPercent: null,
@@ -133,6 +156,92 @@ function tasknerveClosestInteractive(node) {
   return node.closest("a,button,[role='button'],div.cursor-interaction") || node;
 }
 
+function tasknerveTopbarInteractiveNodes() {
+  const seen = new Set();
+  return Array.from(
+    document.querySelectorAll("button,[role='button'],a,div.cursor-interaction,[aria-label],[title]"),
+  )
+    .map((node) => tasknerveClosestInteractive(node))
+    .filter((node) => {
+      if (!node || seen.has(node)) {
+        return false;
+      }
+      seen.add(node);
+      if (
+        node.id === TASKNERVE_NAV_ID ||
+        node.id === TASKNERVE_BRANCH_CHIP_ID ||
+        node.id === TASKNERVE_TOPBAR_TASK_CHIP_ID ||
+        node.id === TASKNERVE_TERMINAL_TOGGLE_ID ||
+        node.closest(`#${TASKNERVE_PANEL_ID}`)
+      ) {
+        return false;
+      }
+      const rect = node.getBoundingClientRect();
+      if (!rect.width || !rect.height) {
+        return false;
+      }
+      return rect.top <= 140 && rect.right >= window.innerWidth * 0.35;
+    })
+    .sort((left, right) => left.getBoundingClientRect().left - right.getBoundingClientRect().left);
+}
+
+function tasknerveTopbarDividerNodes() {
+  return Array.from(document.querySelectorAll("div,span")).filter((node) => {
+    if (
+      node.closest(`#${TASKNERVE_PANEL_ID}`) ||
+      node.id === TASKNERVE_NAV_ID ||
+      node.id === TASKNERVE_BRANCH_CHIP_ID ||
+      node.id === TASKNERVE_TOPBAR_TASK_CHIP_ID
+    ) {
+      return false;
+    }
+    const rect = node.getBoundingClientRect();
+    if (!rect.width || !rect.height) {
+      return false;
+    }
+    const text = tasknerveNormalizeText(node.textContent);
+    return !text && rect.top <= 140 && rect.width <= 8 && rect.height >= 18 && rect.right >= window.innerWidth * 0.4;
+  });
+}
+
+function tasknerveFindChromeHostFromNode(node, constraints = {}) {
+  const {
+    minWidth = 220,
+    minHeight = 24,
+    maxTop = Number.POSITIVE_INFINITY,
+    minBottom = 0,
+    requireMultipleControls = true,
+  } = constraints;
+  let current = node?.parentElement || null;
+  while (current) {
+    const rect = current.getBoundingClientRect();
+    if (
+      rect.width >= minWidth &&
+      rect.height >= minHeight &&
+      rect.top <= maxTop &&
+      rect.bottom >= minBottom
+    ) {
+      if (!requireMultipleControls) {
+        return current;
+      }
+      const controls = Array.from(
+        current.querySelectorAll("button,[role='button'],a,div.cursor-interaction"),
+      ).filter((candidate) => {
+        if (candidate.closest(`#${TASKNERVE_PANEL_ID}`)) {
+          return false;
+        }
+        const candidateRect = candidate.getBoundingClientRect();
+        return candidateRect.width > 0 && candidateRect.height > 0;
+      });
+      if (controls.length >= 2) {
+        return current;
+      }
+    }
+    current = current.parentElement;
+  }
+  return node?.parentElement || null;
+}
+
 function tasknerveById(id) {
   return document.getElementById(id);
 }
@@ -167,12 +276,43 @@ function tasknerveWriteStorageJson(key, value) {
   tasknerveWriteStorage(key, JSON.stringify(value));
 }
 
-function tasknerveBaseOrigin() {
-  return TASKNERVE_BASE_URL.replace(/\/+$/, "");
+function tasknerveNativeBridgeOrigin() {
+  return tasknerveBridgeOrigins()[0] || "";
 }
 
-function tasknerveNativeBridgeOrigin() {
-  return TASKNERVE_NATIVE_BRIDGE_URL.replace(/\/+$/, "");
+function tasknerveBridgeOrigins() {
+  const origins = [];
+  const configured = String(TASKNERVE_NATIVE_BRIDGE_URL || "").replace(/\/+$/, "").trim();
+  if (configured && !configured.includes("__TASKNERVE_NATIVE_BRIDGE_URL__")) {
+    origins.push(configured);
+  }
+  if (tasknerveState.bridgeOrigin && !origins.includes(tasknerveState.bridgeOrigin)) {
+    origins.unshift(tasknerveState.bridgeOrigin);
+  }
+  TASKNERVE_DEFAULT_NATIVE_BRIDGE_ORIGINS.forEach((origin) => {
+    if (!origins.includes(origin)) {
+      origins.push(origin);
+    }
+  });
+  return origins.filter(Boolean);
+}
+
+async function tasknerveBridgeRequest(nativePath, options = {}) {
+  const origins = tasknerveBridgeOrigins();
+  if (origins.length === 0) {
+    throw new Error("TaskNerve native bridge is unavailable");
+  }
+  let lastError = null;
+  for (const origin of origins) {
+    try {
+      const response = await fetch(`${origin}${nativePath}`, options);
+      tasknerveState.bridgeOrigin = origin;
+      return response;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("TaskNerve native bridge is unavailable");
 }
 
 function tasknerveProjectQuery(projectKey = tasknerveState.selectedProject) {
@@ -295,6 +435,76 @@ function tasknerveFindSkillsRow() {
   return tasknerveClosestInteractive(textMatch);
 }
 
+function tasknerveFindSidebarSettingsRow() {
+  return (
+    Array.from(
+      document.querySelectorAll("a[href],button,[role='button'],div.cursor-interaction"),
+    )
+      .map((node) => tasknerveClosestInteractive(node))
+      .filter(Boolean)
+      .find((node) => {
+        if (
+          node.id === TASKNERVE_NAV_ID ||
+          node.id === TASKNERVE_ACCOUNT_MENU_ID ||
+          node.closest(`#${TASKNERVE_PANEL_ID}`) ||
+          node.closest("[data-tasknerve-project-tree]")
+        ) {
+          return false;
+        }
+        const rect = node.getBoundingClientRect();
+        if (!rect.width || !rect.height || rect.left > 260 || rect.bottom < window.innerHeight - 120) {
+          return false;
+        }
+        return tasknerveNormalizeText(node.textContent) === "Settings";
+      }) || null
+  );
+}
+
+function tasknerveFindAccountMenuContainer(referenceRow) {
+  let current = referenceRow?.parentElement || null;
+  while (current) {
+    const rect = current.getBoundingClientRect();
+    const text = tasknerveNormalizeText(current.textContent).toLowerCase();
+    if (
+      rect.width >= 220 &&
+      rect.width <= 520 &&
+      rect.height >= 180 &&
+      rect.left <= 460 &&
+      rect.top <= window.innerHeight - 120 &&
+      text.includes("language") &&
+      text.includes("log out")
+    ) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+  return null;
+}
+
+function tasknerveFindAccountMenuSettingsRow() {
+  const candidates = Array.from(
+    document.querySelectorAll("a[href],button,[role='button'],div.cursor-interaction"),
+  )
+    .map((node) => tasknerveClosestInteractive(node))
+    .filter(Boolean)
+    .filter((node) => {
+      if (
+        node.id === TASKNERVE_NAV_ID ||
+        node.id === TASKNERVE_ACCOUNT_MENU_ID ||
+        node.closest(`#${TASKNERVE_PANEL_ID}`)
+      ) {
+        return false;
+      }
+      return tasknerveNormalizeText(node.textContent) === "Settings";
+    });
+  return (
+    candidates.find((node) => {
+      const container = tasknerveFindAccountMenuContainer(node);
+      return !!container;
+    }) || null
+  );
+}
+
 function tasknerveReplaceLabel(root) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   let textNode = walker.nextNode();
@@ -309,12 +519,113 @@ function tasknerveReplaceLabel(root) {
   return false;
 }
 
+function tasknerveApplyNativeTooltip(node, text) {
+  if (!node) {
+    return;
+  }
+  const normalized = tasknerveNormalizeText(text || "");
+  if (!normalized) {
+    node.removeAttribute("aria-label");
+    node.removeAttribute("data-tasknerve-tooltip");
+    node.removeAttribute("data-tooltip");
+    node.removeAttribute("title");
+    return;
+  }
+  node.setAttribute("aria-label", normalized);
+  node.setAttribute("data-tasknerve-tooltip", normalized);
+  node.removeAttribute("data-tooltip");
+  node.removeAttribute("title");
+}
+
+function tasknerveTooltipNode() {
+  let tooltip = tasknerveById(TASKNERVE_TOOLTIP_ID);
+  if (!tooltip) {
+    tooltip = document.createElement("div");
+    tooltip.id = TASKNERVE_TOOLTIP_ID;
+    tooltip.hidden = true;
+    document.body.appendChild(tooltip);
+  }
+  return tooltip;
+}
+
+function tasknerveTooltipText(node) {
+  return tasknerveNormalizeText(
+    node?.getAttribute?.("data-tasknerve-tooltip") ||
+      node?.getAttribute?.("aria-label") ||
+      "",
+  );
+}
+
+function tasknerveHideTooltip() {
+  tasknerveState.tooltipTarget = null;
+  const tooltip = tasknerveById(TASKNERVE_TOOLTIP_ID);
+  if (!tooltip) {
+    return;
+  }
+  tooltip.hidden = true;
+  tooltip.textContent = "";
+}
+
+function tasknervePositionTooltip(node, point = null) {
+  const tooltip = tasknerveTooltipNode();
+  const text = tasknerveTooltipText(node);
+  if (!text) {
+    tasknerveHideTooltip();
+    return;
+  }
+  tooltip.textContent = text;
+  tooltip.hidden = false;
+  const rect = node.getBoundingClientRect();
+  const tooltipRect = tooltip.getBoundingClientRect();
+  const centeredLeft = rect.left + rect.width / 2 - tooltipRect.width / 2;
+  const left = point?.clientX != null
+    ? Math.min(
+        Math.max(12, point.clientX - tooltipRect.width / 2),
+        window.innerWidth - tooltipRect.width - 12,
+      )
+    : Math.min(
+        Math.max(12, centeredLeft),
+        window.innerWidth - tooltipRect.width - 12,
+      );
+  const topFromAnchor = rect.top - tooltipRect.height - 10;
+  const top = topFromAnchor >= 10 ? topFromAnchor : rect.bottom + 10;
+  tooltip.style.left = `${Math.round(left)}px`;
+  tooltip.style.top = `${Math.round(point?.clientY != null && topFromAnchor < 10 ? point.clientY + 16 : top)}px`;
+}
+
+function tasknerveShowTooltip(node, point = null) {
+  const text = tasknerveTooltipText(node);
+  if (!text) {
+    tasknerveHideTooltip();
+    return;
+  }
+  tasknerveState.tooltipTarget = node;
+  tasknervePositionTooltip(node, point);
+}
+
+function tasknerveReplaceSidebarSectionLabel() {
+  const candidate = Array.from(document.querySelectorAll("div,span,p,h2,h3"))
+    .find((node) => {
+      if (node.closest(`#${TASKNERVE_PANEL_ID}`) || node.closest(`[data-tasknerve-project-tree]`)) {
+        return false;
+      }
+      if (tasknerveNormalizeText(node.textContent) !== "Threads") {
+        return false;
+      }
+      const rect = node.getBoundingClientRect();
+      return rect.left <= 220 && rect.top >= 110 && rect.top <= Math.max(420, window.innerHeight * 0.55);
+    });
+  if (candidate) {
+    candidate.textContent = "Projects";
+  }
+}
+
 function tasknerveCreateIcon() {
   const icon = document.createElement("span");
   icon.className = "tasknerve-codex-icon";
   icon.setAttribute("aria-hidden", "true");
   icon.innerHTML =
-    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7.5c0-1.38 1.12-2.5 2.5-2.5h4.25l1.5 1.5h3.75C18.88 6.5 20 7.62 20 9v7.5c0 1.38-1.12 2.5-2.5 2.5h-10C6.12 19 5 17.88 5 16.5V7.5Z"></path><path d="M8 12h8"></path><path d="M8 15.5h5"></path></svg>';
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M7.25 5.75h9.5A2.25 2.25 0 0 1 19 8v8a2.25 2.25 0 0 1-2.25 2.25h-9.5A2.25 2.25 0 0 1 5 16V8a2.25 2.25 0 0 1 2.25-2.25Z"></path><path d="M8.75 9.25h6.5"></path><path d="M8.75 12.5h6.5"></path><path d="M8.75 15.75h4.25"></path></svg>';
   return icon;
 }
 
@@ -336,6 +647,121 @@ function tasknerveCreateDocumentIcon() {
   return icon;
 }
 
+function tasknerveCreateGoalsIcon() {
+  const icon = document.createElement("span");
+  icon.className = "tasknerve-sidebar-doc-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5.25a6.75 6.75 0 1 0 6.75 6.75"></path><path d="M18.75 5.25 12 12"></path><path d="m14.5 5.25 4.25 0 0 4.25"></path></svg>';
+  return icon;
+}
+
+function tasknerveCreateManifestIcon() {
+  const icon = document.createElement("span");
+  icon.className = "tasknerve-sidebar-doc-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5.25" y="4.75" width="13.5" height="14.5" rx="2.25"></rect><path d="M8.75 9.25h6.5"></path><path d="M8.75 12.5h6.5"></path><path d="M8.75 15.75h4.25"></path></svg>';
+  return icon;
+}
+
+function tasknerveCreateIdeasIcon() {
+  const icon = document.createElement("span");
+  icon.className = "tasknerve-sidebar-doc-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 17.25h5"></path><path d="M10 20.25h4"></path><path d="M8.75 14.75c-1.46-1.08-2.5-2.76-2.5-4.75A5.75 5.75 0 0 1 12 4.25 5.75 5.75 0 0 1 17.75 10c0 1.99-1.04 3.67-2.5 4.75-.49.36-.75.92-.75 1.52v.23h-5v-.23c0-.6-.26-1.16-.75-1.52Z"></path></svg>';
+  return icon;
+}
+
+function tasknerveCreateVsCodeIcon() {
+  const icon = document.createElement("span");
+  icon.className = "tasknerve-sidebar-doc-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M16.75 4.75 9.5 10.5l-3-2.25-2.25 1.5L7.5 12l-3.25 2.25 2.25 1.5 3-2.25 7.25 5.75 2-1V6.75l-2-2Z"></path></svg>';
+  return icon;
+}
+
+function tasknerveCreateSettingsCogIcon() {
+  const icon = document.createElement("span");
+  icon.className = "tasknerve-sidebar-doc-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"></circle><path d="M19.25 15.05a1 1 0 0 0 .21 1.09l.09.1a2 2 0 1 1-2.83 2.83l-.1-.09a1 1 0 0 0-1.08-.22 1 1 0 0 0-.62.92V20a2 2 0 1 1-4 0v-.15a1 1 0 0 0-.66-.94 1 1 0 0 0-1.08.22l-.1.09a2 2 0 1 1-2.83-2.83l.09-.1a1 1 0 0 0 .22-1.08 1 1 0 0 0-.92-.62H4a2 2 0 1 1 0-4h.15a1 1 0 0 0 .94-.66 1 1 0 0 0-.22-1.08l-.09-.1a2 2 0 1 1 2.83-2.83l.1.09a1 1 0 0 0 1.08.22 1 1 0 0 0 .62-.92V4a2 2 0 1 1 4 0v.15a1 1 0 0 0 .66.94 1 1 0 0 0 1.08-.22l.1-.09a2 2 0 1 1 2.83 2.83l-.09.1a1 1 0 0 0-.22 1.08 1 1 0 0 0 .92.62H20a2 2 0 1 1 0 4h-.15a1 1 0 0 0-.6.1Z"></path></svg>';
+  return icon;
+}
+
+function tasknerveCreateFreshProjectIcon() {
+  const icon = document.createElement("span");
+  icon.className = "tasknerve-sidebar-doc-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 8.25c0-1.24 1.01-2.25 2.25-2.25h4.12l1.48 1.5h4.9c1.24 0 2.25 1.01 2.25 2.25v6.5c0 1.24-1.01 2.25-2.25 2.25H6.75A2.25 2.25 0 0 1 4.5 16.25v-8Z"></path><path d="M12 10v5"></path><path d="M9.5 12.5H14.5"></path></svg>';
+  return icon;
+}
+
+function tasknerveCreateImportProjectIcon() {
+  const icon = document.createElement("span");
+  icon.className = "tasknerve-sidebar-doc-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 8.25c0-1.24 1.01-2.25 2.25-2.25h4.12l1.48 1.5h4.9c1.24 0 2.25 1.01 2.25 2.25v6.5c0 1.24-1.01 2.25-2.25 2.25H6.75A2.25 2.25 0 0 1 4.5 16.25v-8Z"></path><path d="m12 9 3 3-3 3"></path><path d="M8.5 12H15"></path></svg>';
+  return icon;
+}
+
+function tasknerveCreateSidebarShortcutIcon(iconKey) {
+  switch (iconKey) {
+    case "goals":
+      return tasknerveCreateGoalsIcon();
+    case "manifest":
+      return tasknerveCreateManifestIcon();
+    case "ideas":
+      return tasknerveCreateIdeasIcon();
+    case "vscode":
+      return tasknerveCreateVsCodeIcon();
+    default:
+      return tasknerveCreateDocumentIcon();
+  }
+}
+
+function tasknerveCreateDocShortcutButton(projectKey, descriptor) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "tasknerve-sidebar-doc-shortcut";
+  button.setAttribute("data-tasknerve-doc-project", projectKey);
+  button.setAttribute("data-tasknerve-doc-key", descriptor.key);
+  const tooltip = `Open ${descriptor.label} for ${tasknerveProjectName(projectKey)}`;
+  tasknerveApplyNativeTooltip(button, tooltip);
+  button.appendChild(tasknerveCreateSidebarShortcutIcon(descriptor.icon));
+  if (
+    tasknerveState.panelMode === "document" &&
+    tasknerveState.documentEditor.projectKey === projectKey &&
+    tasknerveState.documentEditor.docKey === descriptor.key
+  ) {
+    button.classList.add("tasknerve-active");
+  }
+  button.addEventListener("click", (event) => {
+    void tasknerveOpenProjectDocument(event, projectKey, descriptor.key);
+  });
+  return button;
+}
+
+function tasknerveCreateVsCodeShortcutButton(projectKey) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "tasknerve-sidebar-doc-shortcut";
+  button.setAttribute("data-tasknerve-doc-project", projectKey);
+  button.setAttribute("data-tasknerve-doc-key", "vscode");
+  const tooltip = `Open ${tasknerveProjectName(projectKey)} in Visual Studio Code`;
+  tasknerveApplyNativeTooltip(button, tooltip);
+  button.appendChild(tasknerveCreateSidebarShortcutIcon("vscode"));
+  button.addEventListener("click", (event) => {
+    void tasknerveOpenProjectInVsCode(event, projectKey);
+  });
+  return button;
+}
+
 function tasknerveCreateFolderIcon() {
   const icon = document.createElement("span");
   icon.className = "tasknerve-sidebar-folder-icon";
@@ -347,10 +773,10 @@ function tasknerveCreateFolderIcon() {
 
 function tasknerveCreateThreadIcon() {
   const icon = document.createElement("span");
-  icon.className = "tasknerve-sidebar-thread-icon";
+  icon.className = "tasknerve-sidebar-thread-status";
   icon.setAttribute("aria-hidden", "true");
   icon.innerHTML =
-    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19.25c4 0 7.25-2.85 7.25-6.37S16 6.5 12 6.5 4.75 9.35 4.75 12.88c0 1.53.62 2.94 1.66 4.05L5.6 20.5l3.66-1.39c.83.09 1.62.14 2.74.14Z"></path></svg>';
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="7"></circle><circle cx="12" cy="12" r="2.6" fill="currentColor" stroke="none"></circle></svg>';
   return icon;
 }
 
@@ -362,6 +788,57 @@ function tasknerveProjectSidebarFolderState(projectKey) {
     };
   }
   return tasknerveState.sidebarFolders[projectKey];
+}
+
+function tasknerveSidebarProjectExpanded(projectKey, projectRow) {
+  const explicit = tasknerveNormalizeText(projectRow?.getAttribute?.("aria-expanded") || "").toLowerCase();
+  if (explicit === "true") {
+    tasknerveState.sidebarProjectsExpanded = {
+      ...tasknerveState.sidebarProjectsExpanded,
+      [projectKey]: true,
+    };
+    return true;
+  }
+  if (explicit === "false") {
+    tasknerveState.sidebarProjectsExpanded = {
+      ...tasknerveState.sidebarProjectsExpanded,
+      [projectKey]: false,
+    };
+    return false;
+  }
+  if (tasknerveState.sidebarProjectsExpanded[projectKey] == null) {
+    tasknerveState.sidebarProjectsExpanded = {
+      ...tasknerveState.sidebarProjectsExpanded,
+      [projectKey]: true,
+    };
+  }
+  return tasknerveState.sidebarProjectsExpanded[projectKey] !== false;
+}
+
+function tasknerveBindSidebarProjectRow(projectKey, projectRow) {
+  if (!projectKey || !projectRow || projectRow.dataset.tasknerveProjectRowBound === "true") {
+    return;
+  }
+  projectRow.dataset.tasknerveProjectRowBound = "true";
+  projectRow.addEventListener("click", (event) => {
+    if (
+      event.target?.closest?.("[data-tasknerve-project-settings-action]") ||
+      event.target?.closest?.("[data-tasknerve-doc-project]") ||
+      event.target?.closest?.("[data-tasknerve-folder-project]")
+    ) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      const explicit = tasknerveNormalizeText(projectRow.getAttribute("aria-expanded") || "").toLowerCase();
+      if (explicit === "true" || explicit === "false") {
+        tasknerveState.sidebarProjectsExpanded = {
+          ...tasknerveState.sidebarProjectsExpanded,
+          [projectKey]: explicit === "true",
+        };
+      }
+      tasknerveEnsureSidebarProjectDocuments();
+    });
+  });
 }
 
 function tasknerveProjectSidebarLabels(project) {
@@ -491,6 +968,7 @@ function tasknerveCreateSidebarThreadButton({
   meta = "",
   active = false,
   empty = false,
+  busy = false,
   onClick,
 }) {
   const button = document.createElement("button");
@@ -503,7 +981,14 @@ function tasknerveCreateSidebarThreadButton({
     button.classList.add("tasknerve-empty");
     button.disabled = true;
   }
-  button.appendChild(tasknerveCreateThreadIcon());
+  if (busy) {
+    button.classList.add("tasknerve-busy");
+  }
+  const status = tasknerveCreateThreadIcon();
+  status.classList.toggle("tasknerve-busy", busy);
+  status.classList.toggle("tasknerve-active", active);
+  status.classList.toggle("tasknerve-empty", empty);
+  button.appendChild(status);
   const labelNode = document.createElement("span");
   labelNode.className = "tasknerve-sidebar-thread-label";
   labelNode.textContent = label;
@@ -538,12 +1023,21 @@ function tasknerveProjectSidebarThreads(project) {
   const snapshot = tasknerveProjectSnapshot(project?.key);
   const controller = tasknerveControllerBinding(snapshot);
   const controllerThreadId = controller?.thread_id || null;
-  const discoveredThreads = tasknerveDiscoveredThreads(snapshot)
-    .filter((thread) => thread?.thread_id && thread.thread_id !== controllerThreadId)
-    .sort(
-      (left, right) =>
-        Number(right?.updated_at_unix_seconds || 0) - Number(left?.updated_at_unix_seconds || 0),
-    );
+  const deduped = new Map();
+  [...tasknerveWorkerBindings(snapshot), ...tasknerveDiscoveredThreads(snapshot)].forEach((thread) => {
+    if (!thread?.thread_id || thread.thread_id === controllerThreadId) {
+      return;
+    }
+    const existing = deduped.get(thread.thread_id) || {};
+    deduped.set(thread.thread_id, {
+      ...existing,
+      ...thread,
+    });
+  });
+  const discoveredThreads = Array.from(deduped.values()).sort(
+    (left, right) =>
+      Number(right?.updated_at_unix_seconds || 0) - Number(left?.updated_at_unix_seconds || 0),
+  );
   return {
     snapshot,
     controller,
@@ -551,32 +1045,806 @@ function tasknerveProjectSidebarThreads(project) {
   };
 }
 
+function tasknerveThreadBindingForThread(snapshot, threadId) {
+  if (!threadId) {
+    return null;
+  }
+  const bindings = [
+    tasknerveControllerBinding(snapshot),
+    ...tasknerveWorkerBindings(snapshot),
+    ...((snapshot?.codex?.bindings || []).filter(Boolean)),
+  ].filter(Boolean);
+  return bindings.find((binding) => binding?.thread_id === threadId) || null;
+}
+
+function tasknerveThreadBusy(snapshot, threadId, updatedAtUtc = null) {
+  const binding = tasknerveThreadBindingForThread(snapshot, threadId);
+  if (Number(binding?.queued_running_count || 0) > 0 || Number(binding?.queued_pending_count || 0) > 0) {
+    return true;
+  }
+  const updatedAt = updatedAtUtc || binding?.updated_at_utc || null;
+  if (!updatedAt) {
+    return false;
+  }
+  const ageMs = Date.now() - new Date(updatedAt).getTime();
+  return Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= 90 * 1000;
+}
+
+function tasknerveSidebarRowThreadId(row) {
+  const candidates = [
+    row?.getAttribute?.("href"),
+    row?.querySelector?.("[href]")?.getAttribute?.("href"),
+  ]
+    .filter(Boolean)
+    .map((value) => String(value));
+  for (const candidate of candidates) {
+    const match = candidate.match(/\/local\/([^/?#]+)/);
+    if (match?.[1]) {
+      try {
+        return decodeURIComponent(match[1]);
+      } catch (_error) {
+        return match[1];
+      }
+    }
+  }
+  return null;
+}
+
+function tasknerveSidebarNativeRowPayload(row, index = 0) {
+  const normalizedText = tasknerveNormalizeText(row?.textContent || "");
+  const metaMatch = normalizedText.match(/(?:^|\s)(new|now|\d+[smhdw])$/i);
+  const meta = metaMatch ? metaMatch[1] : "";
+  const label = meta ? normalizedText.slice(0, normalizedText.length - meta.length).trim() : normalizedText;
+  const threadId = tasknerveSidebarRowThreadId(row);
+  return {
+    row,
+    rowKey: threadId || `${row?.getAttribute?.("href") || ""}|${label}|${meta}|${index}`,
+    threadId,
+    label: label || normalizedText || "Untitled thread",
+    meta,
+  };
+}
+
+function tasknerveOpenNativeSidebarRow(row) {
+  if (!row) {
+    return;
+  }
+  row.dispatchEvent(
+    new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+    }),
+  );
+}
+
+function tasknerveSidebarNativeBoundaryRow(projectRow, projects) {
+  const otherProjectRows = (projects || [])
+    .map((candidate) => tasknerveFindSidebarProjectRow(candidate))
+    .filter((candidateRow) => candidateRow && candidateRow !== projectRow);
+  const projectSet = new Set(otherProjectRows);
+  let cursor = projectRow?.nextElementSibling || null;
+  while (cursor) {
+    if (projectSet.has(cursor)) {
+      return cursor;
+    }
+    const text = tasknerveNormalizeText(cursor.textContent);
+    if (text === "Add project" || text === "Settings") {
+      return cursor;
+    }
+    cursor = cursor.nextElementSibling;
+  }
+  return null;
+}
+
+function tasknerveSidebarNativeRowFromSibling(node, index = 0) {
+  if (!node || node.getAttribute?.("data-tasknerve-project-tree")) {
+    return null;
+  }
+  const interactive =
+    tasknerveClosestInteractive(node) ||
+    tasknerveClosestInteractive(
+      node.querySelector?.("a[href],button,[role='button'],div.cursor-interaction"),
+    ) ||
+    null;
+  if (!interactive || interactive.closest?.("[data-tasknerve-project-tree]")) {
+    return null;
+  }
+  const text = tasknerveNormalizeText(interactive.textContent);
+  if (!text || text === "Add project" || text === "Settings" || text === "Projects") {
+    return null;
+  }
+  return tasknerveSidebarNativeRowPayload(interactive, index);
+}
+
+function tasknerveSidebarNativeProjectRowsBySiblings(project, projects) {
+  const projectRow = tasknerveFindSidebarProjectRow(project);
+  if (!projectRow || !projectRow.parentElement) {
+    return [];
+  }
+  const boundary = tasknerveSidebarNativeBoundaryRow(projectRow, projects);
+  const rows = [];
+  const seen = new Set();
+  let cursor = projectRow.nextElementSibling;
+  let index = 0;
+  while (cursor && cursor !== boundary) {
+    const nextCursor = cursor.nextElementSibling;
+    const directPayload = tasknerveSidebarNativeRowFromSibling(cursor, index);
+    if (directPayload?.row && !seen.has(directPayload.row)) {
+      seen.add(directPayload.row);
+      rows.push(directPayload);
+      index += 1;
+    } else {
+      const descendants = Array.from(
+        cursor.querySelectorAll?.("a[href],button,[role='button'],div.cursor-interaction") || [],
+      );
+      descendants.forEach((descendant) => {
+        const payload = tasknerveSidebarNativeRowFromSibling(descendant, index);
+        if (payload?.row && !seen.has(payload.row)) {
+          seen.add(payload.row);
+          rows.push(payload);
+          index += 1;
+        }
+      });
+    }
+    cursor = nextCursor;
+  }
+  return rows;
+}
+
+function tasknerveSidebarNativeProjectRowsByGeometry(project, projects, threads = []) {
+  const projectRow = tasknerveFindSidebarProjectRow(project);
+  if (!projectRow) {
+    return [];
+  }
+  const projectRect = projectRow.getBoundingClientRect();
+  const boundaryRows = [
+    ...(projects || [])
+      .map((candidate) => tasknerveFindSidebarProjectRow(candidate))
+      .filter((candidateRow) => candidateRow && candidateRow !== projectRow),
+    ...Array.from(document.querySelectorAll("a[href],button,[role='button'],div.cursor-interaction"))
+      .map((node) => tasknerveClosestInteractive(node))
+      .filter(Boolean)
+      .filter((node) => {
+        const text = tasknerveNormalizeText(node.textContent);
+        return text === "Add project" || text === "Settings";
+      }),
+  ]
+    .filter((node) => {
+      const rect = node.getBoundingClientRect();
+      return rect.top > projectRect.top + 4;
+    })
+    .sort((left, right) => left.getBoundingClientRect().top - right.getBoundingClientRect().top);
+  const boundaryTop = boundaryRows[0]?.getBoundingClientRect().top || Number.POSITIVE_INFINITY;
+  const positionalRows = tasknerveSidebarCandidates()
+    .filter((row) => row !== projectRow)
+    .filter((row) => {
+      const rect = row.getBoundingClientRect();
+      const text = tasknerveNormalizeText(row.textContent);
+      if (!text || text === "Add project" || text === "Settings") {
+        return false;
+      }
+      return rect.top >= projectRect.bottom - 6 && rect.top < boundaryTop - 6;
+    })
+    .map((row, index) => tasknerveSidebarNativeRowPayload(row, index));
+  const matchedRows = tasknerveSidebarThreadRowsById(threads)
+    .map(({ row, rowKey, threadId }, index) => {
+      const payload = tasknerveSidebarNativeRowPayload(row, index);
+      payload.rowKey = rowKey || payload.rowKey;
+      payload.threadId = threadId || payload.threadId;
+      return payload;
+    });
+  const persistedRows = (tasknerveState.sidebarNativeRowsByProject?.[project?.key] || [])
+    .filter((entry) => entry?.row?.isConnected)
+    .filter((entry) => !entry.row.closest?.("[data-tasknerve-project-tree]"))
+    .map((entry, index) => {
+      const payload = tasknerveSidebarNativeRowPayload(entry.row, index);
+      payload.rowKey = entry.rowKey || payload.rowKey;
+      payload.threadId = entry.threadId || payload.threadId;
+      return payload;
+    });
+  const seen = new Set();
+  const nextRows = [...matchedRows, ...positionalRows, ...persistedRows]
+    .filter((entry) => {
+      if (!entry?.row || seen.has(entry.row)) {
+        return false;
+      }
+      seen.add(entry.row);
+      return true;
+    })
+    .sort(
+      (left, right) =>
+        left.row.getBoundingClientRect().top - right.row.getBoundingClientRect().top,
+    );
+  return nextRows;
+}
+
+function tasknerveSidebarNativeProjectRows(project, projects, threads = []) {
+  const siblingRows = tasknerveSidebarNativeProjectRowsBySiblings(project, projects);
+  const geometricRows = tasknerveSidebarNativeProjectRowsByGeometry(project, projects, threads);
+  const seen = new Set();
+  const resolvedRows = [...siblingRows, ...geometricRows]
+    .filter((entry) => {
+      const key = entry?.rowKey || entry?.threadId || "";
+      if (!entry?.row || !key || seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    })
+    .sort(
+      (left, right) =>
+        left.row.getBoundingClientRect().top - right.row.getBoundingClientRect().top,
+    );
+  tasknerveState.sidebarNativeRowsByProject = {
+    ...(tasknerveState.sidebarNativeRowsByProject || {}),
+    [project.key]: resolvedRows,
+  };
+  return resolvedRows;
+}
+
+function tasknerveSidebarControllerRow(project, controllerBinding, nativeRows) {
+  const labels = new Set(
+    [
+      controllerBinding?.display_label,
+      controllerBinding?.thread_name,
+      `${tasknerveProjectName(project?.key) || project?.name || project?.key}-controller`,
+      `${project?.name || project?.key}-controller`,
+    ]
+      .map((value) => tasknerveNormalizeText(value))
+      .filter(Boolean),
+  );
+  const rows = nativeRows || [];
+  const exact =
+    rows.find((entry) => {
+      if (controllerBinding?.thread_id && entry.threadId === controllerBinding.thread_id) {
+        return true;
+      }
+      return labels.has(tasknerveNormalizeText(entry.label));
+    }) || null;
+  if (exact) {
+    return exact;
+  }
+  return (
+    rows.find((entry) =>
+      tasknerveNormalizeText(entry.label).toLowerCase().includes("controller"),
+    ) || null
+  );
+}
+
+function tasknerveResolvedSidebarAgentEntries(snapshot, controller, controllerRow, nativeRows, agents) {
+  const seenThreadIds = new Set();
+  const seenKeys = new Set();
+  const controllerIds = new Set([controllerRow?.threadId, controller?.thread_id].filter(Boolean));
+  const entries = [];
+  const pushEntry = (entry) => {
+    if (!entry) {
+      return;
+    }
+    const rowKey = entry.rowKey || entry.threadId || `${entry.label || ""}|${entry.meta || ""}`;
+    if (!rowKey || seenKeys.has(rowKey)) {
+      return;
+    }
+    if (entry.threadId) {
+      if (controllerIds.has(entry.threadId) || seenThreadIds.has(entry.threadId)) {
+        return;
+      }
+      seenThreadIds.add(entry.threadId);
+    }
+    seenKeys.add(rowKey);
+    entries.push({
+      row: entry.row || null,
+      rowKey,
+      threadId: entry.threadId || null,
+      label: entry.label || "Untitled thread",
+      meta: entry.meta || "",
+      updated_at_utc: entry.updated_at_utc || null,
+      source: entry.source || "snapshot",
+    });
+  };
+  (nativeRows || [])
+    .filter((entry) => entry && entry !== controllerRow)
+    .forEach((entry) => {
+      const normalizedLabel = tasknerveNormalizeText(entry.label).toLowerCase();
+      if (normalizedLabel.includes("controller")) {
+        return;
+      }
+      pushEntry({
+        ...entry,
+        source: "native",
+      });
+    });
+  [...tasknerveWorkerBindings(snapshot), ...(agents || [])].forEach((thread) => {
+    if (!thread?.thread_id || controllerIds.has(thread.thread_id)) {
+      return;
+    }
+    pushEntry({
+      row: null,
+      rowKey: thread.thread_id,
+      threadId: thread.thread_id,
+      label: tasknerveSidebarThreadLabel(thread),
+      meta: tasknerveCompactRelativeTime(thread.updated_at_utc),
+      updated_at_utc: thread.updated_at_utc || null,
+      source: "snapshot",
+    });
+  });
+  return entries;
+}
+
+function tasknerveSidebarProjectSignature(projectKey, payload) {
+  return JSON.stringify({
+    uiVersion: "sidebar-v4",
+    projectKey,
+    activeThreadId: tasknerveState.hostContext?.active_thread_id || "",
+    panelMode: tasknerveState.panelMode || "",
+    activeDocument:
+      tasknerveState.panelMode === "document" &&
+      tasknerveState.documentEditor.projectKey === projectKey
+        ? tasknerveState.documentEditor.docKey || ""
+        : "",
+    projectOpen: payload.projectOpen !== false,
+    controllerRowKey: payload.controllerRow?.rowKey || payload.controller?.thread_id || "",
+    controllerLabel: payload.controllerLabel || "",
+    agentsOpen: !!payload.folderState?.agentsOpen,
+    agents: (payload.agentEntries || []).map((entry) => ({
+      rowKey: entry?.rowKey || entry?.threadId || entry?.label || "",
+      label: entry?.label || "",
+      threadId: entry?.threadId || "",
+    })),
+  });
+}
+
 function tasknerveSyncHiddenSidebarRows(activeRows) {
-  const activeThreadIds = new Set(activeRows.map((entry) => entry.threadId).filter(Boolean));
+  const activeRowKeys = new Set(activeRows.map((entry) => entry.rowKey || entry.threadId).filter(Boolean));
   document
     .querySelectorAll("[data-tasknerve-hidden-sidebar-row='true']")
     .forEach((node) => {
-      const threadId = node.getAttribute("data-tasknerve-hidden-thread-id") || "";
-      if (!activeThreadIds.has(threadId)) {
+      const rowKey = node.getAttribute("data-tasknerve-hidden-thread-id") || "";
+      if (!activeRowKeys.has(rowKey)) {
         node.style.removeProperty("display");
         node.removeAttribute("data-tasknerve-hidden-sidebar-row");
         node.removeAttribute("data-tasknerve-hidden-thread-id");
       }
     });
-  activeRows.forEach(({ threadId, row }) => {
-    if (!threadId || !row) {
+  activeRows.forEach(({ threadId, row, rowKey }) => {
+    const nextKey = rowKey || threadId;
+    if (!nextKey || !row) {
       return;
     }
     row.style.display = "none";
     row.setAttribute("data-tasknerve-hidden-sidebar-row", "true");
-    row.setAttribute("data-tasknerve-hidden-thread-id", threadId);
+    row.setAttribute("data-tasknerve-hidden-thread-id", nextKey);
+  });
+}
+
+function tasknerveRestoreHiddenSidebarRows() {
+  document
+    .querySelectorAll("[data-tasknerve-hidden-sidebar-row='true']")
+    .forEach((node) => {
+      node.style.removeProperty("display");
+      node.removeAttribute("data-tasknerve-hidden-sidebar-row");
+      node.removeAttribute("data-tasknerve-hidden-thread-id");
+    });
+}
+
+function tasknerveScrollProjectSettingsCardIntoView(projectKey) {
+  const card = tasknerveProjectCard(projectKey);
+  if (!card) {
+    return;
+  }
+  card.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+async function tasknerveOpenProjectSettings(event, projectKey) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  if (projectKey) {
+    tasknerveState.selectedProject = projectKey;
+    tasknerveWriteStorage(TASKNERVE_STORAGE_PROJECT_KEY, projectKey);
+    tasknerveState.expandedSettingsProjects = {
+      ...tasknerveState.expandedSettingsProjects,
+      [projectKey]: true,
+    };
+  }
+  if (!tasknerveState.panelOpen) {
+    await tasknerveOpenPanel(null, "settings");
+  } else {
+    tasknerveSetPanelMode("settings");
+    tasknerveLayoutPanel();
+    await tasknerveRefreshAllProjectSnapshots();
+  }
+  window.setTimeout(() => {
+    tasknerveScrollProjectSettingsCardIntoView(projectKey);
+  }, 60);
+}
+
+function tasknerveSidebarProjectActionCandidates(projectRow) {
+  return Array.from(projectRow?.querySelectorAll?.("button,[role='button'],a[href]") || [])
+    .filter((node) => node && node !== projectRow)
+    .filter((node) => !node.closest?.("[data-tasknerve-project-tree]"))
+    .filter((node) => !node.closest?.("[data-tasknerve-sidebar-header-actions]"))
+    .filter((node) => !node.hasAttribute?.("data-tasknerve-project-settings-action"));
+}
+
+function tasknerveFindSidebarProjectStartThreadAction(project, projectRow) {
+  const projectName = tasknerveNormalizeText(tasknerveProjectName(project?.key)).toLowerCase();
+  const candidates = tasknerveSidebarProjectActionCandidates(projectRow).map((node) => {
+    const rect = node.getBoundingClientRect();
+    const text = [
+      node.getAttribute("aria-label"),
+      node.getAttribute("title"),
+      node.textContent,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return { node, rect, text };
+  });
+  const labeled = candidates
+    .filter(({ text }) =>
+      text.includes("start new thread") ||
+      text.includes("new thread") ||
+      (text.includes("thread") && projectName && text.includes(projectName)),
+    )
+    .sort((left, right) => right.rect.left - left.rect.left);
+  if (labeled[0]?.node) {
+    return labeled[0].node;
+  }
+  const fallback = candidates
+    .filter(({ rect, text }) =>
+      rect.width <= 48 &&
+      rect.height <= 48 &&
+      !text.includes("more") &&
+      !text.includes("option") &&
+      !text.includes("settings"),
+    )
+    .sort((left, right) => right.rect.left - left.rect.left);
+  return fallback[0]?.node || null;
+}
+
+function tasknerveCreateSidebarProjectSettingsButton(projectKey) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "tasknerve-sidebar-project-settings-action";
+  button.setAttribute("data-tasknerve-project-settings-action", projectKey);
+  const tooltip = `Open TaskNerve settings for ${tasknerveProjectName(projectKey)}`;
+  tasknerveApplyNativeTooltip(button, tooltip);
+  button.appendChild(tasknerveCreateSettingsCogIcon());
+  button.addEventListener("click", (event) => {
+    void tasknerveOpenProjectSettings(event, projectKey);
+  });
+  return button;
+}
+
+function tasknerveEnsureSidebarProjectRowActions() {
+  const projects = Array.isArray(tasknerveState.snapshot?.projects) ? tasknerveState.snapshot.projects : [];
+  projects.forEach((project) => {
+    if (!project?.key) {
+      return;
+    }
+    const projectRow = tasknerveFindSidebarProjectRow(project);
+    if (!projectRow) {
+      return;
+    }
+    const nativeStartThreadAction = tasknerveFindSidebarProjectStartThreadAction(project, projectRow);
+    let button = nativeStartThreadAction || null;
+    if (!button) {
+      button =
+        projectRow.parentElement?.querySelector?.(
+          `[data-tasknerve-project-settings-action="${project.key}"]`,
+        ) || null;
+      if (!button) {
+        button = tasknerveCreateSidebarProjectSettingsButton(project.key);
+        projectRow.appendChild(button);
+      }
+    }
+    button.style.removeProperty("display");
+    button.removeAttribute("data-tasknerve-hidden-project-action");
+    button.classList.add("tasknerve-sidebar-project-settings-action");
+    button.setAttribute("data-tasknerve-project-settings-action", project.key);
+    button.textContent = "";
+    button.appendChild(tasknerveCreateSettingsCogIcon());
+    const tooltip = `Open TaskNerve settings for ${tasknerveProjectName(project.key)}`;
+    tasknerveApplyNativeTooltip(button, tooltip);
+    Array.from(button.querySelectorAll("[title],[data-tooltip],[data-tasknerve-tooltip]")).forEach((node) => {
+      if (node !== button) {
+        node.removeAttribute("title");
+        node.removeAttribute("data-tooltip");
+        node.removeAttribute("data-tasknerve-tooltip");
+      }
+    });
+    Array.from(
+      projectRow.parentElement?.querySelectorAll?.(
+        `[data-tasknerve-project-settings-action="${project.key}"]`,
+      ) || [],
+    )
+      .filter((candidate) => candidate !== button)
+      .forEach((candidate) => candidate.remove());
+    if (!button.dataset.tasknerveProjectSettingsBound) {
+      button.dataset.tasknerveProjectSettingsBound = "true";
+      button.addEventListener(
+        "click",
+        (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          event.stopImmediatePropagation();
+          void tasknerveOpenProjectSettings(event, project.key);
+        },
+        true,
+      );
+    }
+    button.classList.toggle(
+      "tasknerve-active",
+      tasknerveState.panelOpen &&
+        tasknerveState.panelMode === "settings" &&
+        tasknerveState.selectedProject === project.key,
+    );
+  });
+}
+
+function tasknerveCreateSidebarHeaderActionsContainer() {
+  const actions = document.createElement("div");
+  actions.className = "tasknerve-sidebar-header-actions";
+  actions.setAttribute("data-tasknerve-sidebar-header-actions", "true");
+  return actions;
+}
+
+function tasknerveCreateSidebarHeaderRow() {
+  const row = document.createElement("div");
+  row.className = "tasknerve-sidebar-projects-header-row";
+  row.setAttribute("data-tasknerve-sidebar-header-row", "true");
+  return row;
+}
+
+function tasknerveFindSidebarProjectsHeaderLabel() {
+  return Array.from(document.querySelectorAll("div,span,p,h2,h3"))
+    .find((node) => {
+      if (node.closest(`#${TASKNERVE_PANEL_ID}`) || node.closest("[data-tasknerve-project-tree]")) {
+        return false;
+      }
+      const text = tasknerveNormalizeText(node.textContent);
+      if (text !== "Projects" && text !== "Threads") {
+        return false;
+      }
+      const rect = node.getBoundingClientRect();
+      return rect.left <= 220 && rect.top >= 110 && rect.top <= Math.max(420, window.innerHeight * 0.55);
+    }) || null;
+}
+
+function tasknerveFindSidebarProjectsHeaderHost() {
+  const label = tasknerveFindSidebarProjectsHeaderLabel();
+  if (!label) {
+    return null;
+  }
+  let current = label.parentElement || null;
+  while (current) {
+    const rect = current.getBoundingClientRect();
+    if (
+      rect.width >= 180 &&
+      rect.width <= 420 &&
+      rect.height >= 20 &&
+      rect.height <= 72 &&
+      rect.left <= 260 &&
+      rect.top >= 100 &&
+      rect.top <= Math.max(420, window.innerHeight * 0.55)
+    ) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+  return label.parentElement || null;
+}
+
+function tasknerveSidebarHeaderActionCandidates() {
+  const host = tasknerveFindSidebarProjectsHeaderHost();
+  if (!host) {
+    return [];
+  }
+  return Array.from(host.querySelectorAll("button,[role='button'],a[href],div.cursor-interaction"))
+    .map((node) => tasknerveClosestInteractive(node))
+    .filter(Boolean)
+    .filter((node, index, list) => list.indexOf(node) === index)
+    .filter((node) => {
+      if (
+        node.closest?.("[data-tasknerve-sidebar-header-actions]") ||
+        node.hasAttribute?.("data-tasknerve-sidebar-header-action")
+      ) {
+        return false;
+      }
+      const rect = node.getBoundingClientRect();
+      const text = [
+        node.getAttribute("aria-label"),
+        node.getAttribute("data-tooltip"),
+        node.getAttribute("title"),
+        node.textContent,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return rect.width <= 44 && rect.height <= 44 && !text.includes("settings");
+    })
+    .sort((left, right) => left.getBoundingClientRect().left - right.getBoundingClientRect().left);
+}
+
+function tasknerveHideSidebarRowByText(text) {
+  const normalizedTarget = tasknerveNormalizeText(text);
+  Array.from(document.querySelectorAll("a[href],button,[role='button'],div.cursor-interaction"))
+    .map((node) => tasknerveClosestInteractive(node))
+    .filter(Boolean)
+    .filter((node) => !node.closest?.(`#${TASKNERVE_PANEL_ID}`))
+    .filter((node) => {
+      const rect = node.getBoundingClientRect();
+      return rect.left <= 360 && rect.width > 0 && rect.height > 0;
+    })
+    .filter((node) => {
+      const label = tasknerveNormalizeText(node.textContent);
+      return (
+        label === normalizedTarget ||
+        label.startsWith(`${normalizedTarget} `) ||
+        label.endsWith(` ${normalizedTarget}`) ||
+        label.includes(normalizedTarget)
+      );
+    })
+    .forEach((node) => {
+      node.style.display = "none";
+      node.setAttribute("data-tasknerve-hidden-sidebar-action", normalizedTarget);
+    });
+}
+
+function tasknerveSuggestedProjectsBaseDir() {
+  const projects = Array.isArray(tasknerveState.snapshot?.projects) ? tasknerveState.snapshot.projects : [];
+  const roots = projects
+    .map((project) => tasknerveNormalizeText(project?.repo_root))
+    .filter(Boolean);
+  if (roots[0]) {
+    return roots[0].split("/").slice(0, -1).join("/") || roots[0];
+  }
+  return "/Users/adimus/Documents";
+}
+
+async function tasknerveRegisterProjectFlow(importExisting = false) {
+  const actionLabel = importExisting ? "Import existing project" : "Create fresh project";
+  const defaultBaseDir = tasknerveSuggestedProjectsBaseDir();
+  const defaultName = importExisting ? "" : "new-project";
+  const projectName = window.prompt(
+    `${actionLabel}: project name`,
+    defaultName,
+  );
+  if (!projectName) {
+    return;
+  }
+  const suggestedPath = `${defaultBaseDir.replace(/\/+$/, "")}/${projectName}`;
+  const projectRoot = window.prompt(
+    `${actionLabel}: absolute project path`,
+    importExisting ? suggestedPath : suggestedPath,
+  );
+  if (!projectRoot) {
+    return;
+  }
+  try {
+    const payload = await tasknerveFetchNativeJson("/tasknerve/project/register", {
+      project_name: projectName,
+      project_root: projectRoot,
+      import_existing: importExisting,
+    });
+    const projectKey = payload?.selected_project?.key || projectName;
+    tasknerveState.selectedProject = projectKey;
+    tasknerveWriteStorage(TASKNERVE_STORAGE_PROJECT_KEY, projectKey);
+    tasknerveSetFlash(
+      `${importExisting ? "Imported" : "Created"} ${projectKey}.`,
+      "info",
+    );
+    await tasknerveRefresh(false);
+    await tasknerveRefreshAllProjectSnapshots();
+    await tasknerveBootstrapController(projectKey).catch((error) => {
+      tasknerveSetFlash(`Project created, but controller bootstrap failed: ${error}`, "error");
+    });
+    await tasknerveOpenProjectSettings(null, projectKey);
+  } catch (error) {
+    tasknerveSetFlash(`${actionLabel} failed: ${error}`, "error");
+  }
+}
+
+function tasknerveCreateSidebarHeaderActionButton(kind) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "tasknerve-sidebar-header-action";
+  button.setAttribute("data-tasknerve-sidebar-header-action", kind);
+  const fresh = kind === "fresh";
+  tasknerveApplyNativeTooltip(
+    button,
+    fresh ? "Create fresh project" : "Import existing project",
+  );
+  button.appendChild(fresh ? tasknerveCreateFreshProjectIcon() : tasknerveCreateImportProjectIcon());
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    void tasknerveRegisterProjectFlow(!fresh);
+  });
+  return button;
+}
+
+function tasknerveEnsureSidebarHeaderActions() {
+  tasknerveHideSidebarRowByText("New thread");
+  tasknerveHideSidebarRowByText("Add project");
+  const host = tasknerveFindSidebarProjectsHeaderHost();
+  if (!host) {
+    return;
+  }
+  host.classList.add("tasknerve-sidebar-projects-header-host");
+  tasknerveSidebarHeaderActionCandidates().forEach((node) => {
+    node.style.display = "none";
+    node.setAttribute("data-tasknerve-hidden-header-action", "true");
+  });
+  const label = tasknerveFindSidebarProjectsHeaderLabel();
+  if (label) {
+    label.classList.add("tasknerve-sidebar-projects-header-label");
+  }
+  let headerRow = host.querySelector("[data-tasknerve-sidebar-header-row]");
+  if (!headerRow) {
+    headerRow = tasknerveCreateSidebarHeaderRow();
+    if (label) {
+      label.insertAdjacentElement("beforebegin", headerRow);
+    } else {
+      host.prepend(headerRow);
+    }
+  }
+  if (label && label.parentElement !== headerRow) {
+    headerRow.prepend(label);
+  }
+  let actions = host.querySelector("[data-tasknerve-sidebar-header-actions]");
+  if (!actions) {
+    actions = tasknerveCreateSidebarHeaderActionsContainer();
+  }
+  if (actions.parentElement !== headerRow) {
+    headerRow.appendChild(actions);
+  }
+  const kinds = ["fresh", "import"];
+  kinds.forEach((kind) => {
+    let button = actions.querySelector(`[data-tasknerve-sidebar-header-action="${kind}"]`) || null;
+    if (!button) {
+      button = tasknerveCreateSidebarHeaderActionButton(kind);
+      actions.appendChild(button);
+    }
+    button.classList.add("tasknerve-sidebar-header-action");
+    button.setAttribute("data-tasknerve-sidebar-header-action", kind);
+    button.innerHTML = "";
+    button.appendChild(kind === "fresh" ? tasknerveCreateFreshProjectIcon() : tasknerveCreateImportProjectIcon());
+    tasknerveApplyNativeTooltip(
+      button,
+      kind === "fresh" ? "Create fresh project" : "Import existing project",
+    );
+    if (!button.dataset.tasknerveSidebarHeaderBound) {
+      button.dataset.tasknerveSidebarHeaderBound = kind;
+      button.addEventListener(
+        "click",
+        (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          event.stopImmediatePropagation();
+          void tasknerveRegisterProjectFlow(kind === "import");
+        },
+        true,
+      );
+    }
   });
 }
 
 function tasknerveEnsureSidebarProjectDocuments() {
   const projects = Array.isArray(tasknerveState.snapshot?.projects) ? tasknerveState.snapshot.projects : [];
+  if (projects.length === 0) {
+    tasknerveRestoreHiddenSidebarRows();
+    tasknerveState.sidebarNativeRowsByProject = {};
+    document.querySelectorAll("[data-tasknerve-project-tree]").forEach((container) => {
+      container.remove();
+    });
+    return;
+  }
   const seen = new Set();
   const hiddenRows = [];
+  let anchoredProjects = 0;
   projects.forEach((project) => {
     if (!project?.key) {
       return;
@@ -585,6 +1853,8 @@ function tasknerveEnsureSidebarProjectDocuments() {
     if (!row || !row.parentElement) {
       return;
     }
+    tasknerveBindSidebarProjectRow(project.key, row);
+    anchoredProjects += 1;
     seen.add(project.key);
     let container = Array.from(row.parentElement.querySelectorAll("[data-tasknerve-project-tree]")).find(
       (node) => node.getAttribute("data-tasknerve-project-tree") === project.key,
@@ -596,118 +1866,160 @@ function tasknerveEnsureSidebarProjectDocuments() {
     } else if (row.nextElementSibling !== container) {
       row.insertAdjacentElement("afterend", container);
     }
-    container.innerHTML = "";
     const folderState = tasknerveProjectSidebarFolderState(project.key);
-    const { controller, agents } = tasknerveProjectSidebarThreads(project);
-    const controllerLabel = controller
-      ? tasknerveSidebarThreadLabel(
-          controller,
-          `${tasknerveProjectName(project.key) || project.name || project.key}-controller`,
-        )
-      : `Create ${tasknerveProjectName(project.key) || project.name || project.key}-controller`;
-    const controllerMeta = controller
-      ? tasknerveCompactRelativeTime(controller.updated_at_utc)
-      : "new";
-    container.appendChild(
-      tasknerveCreateSidebarThreadButton({
-        label: controllerLabel,
-        meta: controllerMeta,
-        active: tasknerveState.hostContext?.active_thread_id === controller?.thread_id,
-        onClick: controller
-          ? () => {
-              void tasknerveOpenNativeThread(controller.thread_id);
-            }
-          : () => {
-              void tasknerveBootstrapController(project.key);
-            },
-      }),
+    const { snapshot, controller, agents } = tasknerveProjectSidebarThreads(project);
+    const projectOpen = tasknerveSidebarProjectExpanded(project.key, row);
+    const nativeRows = tasknerveSidebarNativeProjectRows(
+      project,
+      projects,
+      [controller, ...agents].filter(Boolean),
     );
-    container.appendChild(
-      tasknerveCreateSidebarFolderRow(
-        project.key,
-        "documents",
-        "Project docs",
-        TASKNERVE_PROJECT_DOCUMENTS.length,
-        folderState.documentsOpen,
-      ),
+    const controllerRow = tasknerveSidebarControllerRow(project, controller, nativeRows);
+    const agentEntries = tasknerveResolvedSidebarAgentEntries(
+      snapshot,
+      controller,
+      controllerRow,
+      nativeRows,
+      agents,
     );
-    if (folderState.documentsOpen) {
-      const docsList = document.createElement("div");
-      docsList.className = "tasknerve-sidebar-folder-children";
-      TASKNERVE_PROJECT_DOCUMENTS.forEach((documentDescriptor) => {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "tasknerve-sidebar-doc";
-        if (
-          tasknerveState.panelMode === "document" &&
-          tasknerveState.documentEditor.projectKey === project.key &&
-          tasknerveState.documentEditor.docKey === documentDescriptor.key
-        ) {
-          button.classList.add("tasknerve-active");
-        }
-        button.setAttribute("data-tasknerve-doc-project", project.key);
-        button.setAttribute("data-tasknerve-doc-key", documentDescriptor.key);
-        button.setAttribute(
-          "aria-label",
-          `${documentDescriptor.label} for ${project.name || project.key || "project"}`,
-        );
-        button.appendChild(tasknerveCreateDocumentIcon());
-        const label = document.createElement("span");
-        label.className = "tasknerve-sidebar-doc-label";
-        label.textContent = documentDescriptor.label;
-        button.appendChild(label);
-        button.addEventListener("click", (event) => {
-          void tasknerveOpenProjectDocument(event, project.key, documentDescriptor.key);
-        });
-        docsList.appendChild(button);
-      });
-      container.appendChild(docsList);
-    }
-    container.appendChild(
-      tasknerveCreateSidebarFolderRow(
-        project.key,
-        "agents",
-        "Agents",
-        agents.length,
-        folderState.agentsOpen,
-      ),
-    );
-    if (folderState.agentsOpen) {
-      const agentsList = document.createElement("div");
-      agentsList.className = "tasknerve-sidebar-folder-children";
-      if (agents.length === 0) {
-        agentsList.appendChild(
-          tasknerveCreateSidebarThreadButton({
-            label: "No active agents yet",
-            meta: "",
-            empty: true,
-          }),
-        );
+    const controllerLabel = controllerRow
+      ? controllerRow.label
+      : controller
+        ? tasknerveSidebarThreadLabel(
+            controller,
+            `${tasknerveProjectName(project.key) || project.name || project.key}-controller`,
+          )
+        : `Create ${tasknerveProjectName(project.key) || project.name || project.key}-controller`;
+    const controllerMeta = controllerRow
+      ? controllerRow.meta
+      : controller
+        ? tasknerveCompactRelativeTime(controller.updated_at_utc)
+        : "new";
+    const signature = tasknerveSidebarProjectSignature(project.key, {
+      folderState,
+      projectOpen,
+      controller,
+      controllerRow,
+      controllerLabel,
+      controllerMeta,
+      agentEntries,
+    });
+    if (container.getAttribute("data-tasknerve-signature") !== signature) {
+      container.innerHTML = "";
+      container.hidden = !projectOpen;
+      container.style.display = projectOpen ? "" : "none";
+      if (!projectOpen) {
+        container.setAttribute("data-tasknerve-signature", signature);
       } else {
-        agents.forEach((thread) => {
+      const docStrip = document.createElement("div");
+      docStrip.className = "tasknerve-sidebar-doc-strip";
+      TASKNERVE_PROJECT_DOCUMENTS.forEach((documentDescriptor) => {
+        docStrip.appendChild(tasknerveCreateDocShortcutButton(project.key, documentDescriptor));
+      });
+      docStrip.appendChild(tasknerveCreateVsCodeShortcutButton(project.key));
+      container.appendChild(docStrip);
+      container.appendChild(
+        tasknerveCreateSidebarThreadButton({
+          label: controllerLabel,
+          meta: controllerMeta,
+          busy: tasknerveThreadBusy(
+            snapshot,
+            controllerRow?.threadId || controller?.thread_id,
+            controller?.updated_at_utc,
+          ),
+          active:
+            (controllerRow && tasknerveState.hostContext?.active_thread_id === controllerRow.threadId) ||
+            tasknerveState.hostContext?.active_thread_id === controller?.thread_id,
+          onClick:
+            controllerRow?.threadId || controller?.thread_id
+              ? () => {
+                  void tasknerveOpenNativeThread(controllerRow?.threadId || controller?.thread_id);
+                }
+              : () => {
+                  void tasknerveBootstrapController(project.key);
+                },
+        }),
+      );
+      container.appendChild(
+        tasknerveCreateSidebarFolderRow(
+          project.key,
+          "agents",
+          "Agents",
+          agentEntries.length,
+          folderState.agentsOpen,
+        ),
+      );
+      if (folderState.agentsOpen) {
+        const agentsList = document.createElement("div");
+        agentsList.className = "tasknerve-sidebar-folder-children";
+        if (agentEntries.length === 0) {
           agentsList.appendChild(
             tasknerveCreateSidebarThreadButton({
-              label: tasknerveSidebarThreadLabel(thread),
-              meta: tasknerveCompactRelativeTime(thread.updated_at_utc),
-              active: tasknerveState.hostContext?.active_thread_id === thread.thread_id,
-              onClick: () => {
-                void tasknerveOpenNativeThread(thread.thread_id);
-              },
+              label: "No active agents yet",
+              meta: "",
+              empty: true,
             }),
           );
-        });
+        } else {
+          agentEntries.forEach((entry) => {
+            agentsList.appendChild(
+              tasknerveCreateSidebarThreadButton({
+                label: entry.label,
+                meta: entry.meta,
+                busy: tasknerveThreadBusy(snapshot, entry.threadId, entry.updated_at_utc),
+                active: tasknerveState.hostContext?.active_thread_id === entry.threadId,
+                onClick: () => {
+                  if (entry.threadId) {
+                    void tasknerveOpenNativeThread(entry.threadId);
+                    return;
+                  }
+                  if (entry.row) {
+                    tasknerveOpenNativeSidebarRow(entry.row);
+                  }
+                },
+              }),
+            );
+          });
+        }
+        container.appendChild(agentsList);
       }
-      container.appendChild(agentsList);
+      container.setAttribute("data-tasknerve-signature", signature);
+      }
     }
-    hiddenRows.push(...tasknerveSidebarThreadRowsById([controller, ...agents].filter(Boolean)));
+    if (!projectOpen) {
+      container.hidden = true;
+      container.style.display = "none";
+    } else {
+      container.hidden = false;
+      container.style.display = "";
+    }
+    if (projectOpen && nativeRows.length > 0) {
+      hiddenRows.push(...nativeRows.map((entry) => ({
+        row: entry.row,
+        rowKey: entry.rowKey,
+        threadId: entry.threadId,
+      })));
+    } else if (projectOpen) {
+      hiddenRows.push(...tasknerveSidebarThreadRowsById([controller, ...agents].filter(Boolean)));
+    }
     if (!tasknerveState.ensuredProjectDocs[project.key]) {
       void tasknerveEnsureProjectDocuments(project.key).catch(() => {});
     }
   });
+  if (anchoredProjects === 0) {
+    tasknerveRestoreHiddenSidebarRows();
+    tasknerveState.sidebarNativeRowsByProject = {};
+    document.querySelectorAll("[data-tasknerve-project-tree]").forEach((container) => {
+      container.remove();
+    });
+    return;
+  }
   tasknerveSyncHiddenSidebarRows(hiddenRows);
   document.querySelectorAll("[data-tasknerve-project-tree]").forEach((container) => {
     const projectKey = container.getAttribute("data-tasknerve-project-tree") || "";
     if (!seen.has(projectKey)) {
+      delete tasknerveState.sidebarRenderSignatures[projectKey];
+      delete tasknerveState.sidebarNativeRowsByProject[projectKey];
       container.remove();
     }
   });
@@ -814,6 +2126,74 @@ function tasknerveProjectName(projectKey = tasknerveState.selectedProject) {
 function tasknerveProjectRoot(projectKey = tasknerveState.selectedProject) {
   const project = tasknerveProjectRecord(projectKey);
   return project?.repo_root || "";
+}
+
+function tasknerveProjectSettingsExpanded(projectKey, searchActive = false) {
+  if (searchActive) {
+    return true;
+  }
+  if (tasknerveState.expandedSettingsProjects[projectKey] != null) {
+    return !!tasknerveState.expandedSettingsProjects[projectKey];
+  }
+  return tasknerveState.selectedProject === projectKey;
+}
+
+function tasknerveToggleProjectSettingsExpanded(projectKey) {
+  tasknerveState.expandedSettingsProjects = {
+    ...tasknerveState.expandedSettingsProjects,
+    [projectKey]: !tasknerveProjectSettingsExpanded(projectKey, false),
+  };
+  tasknerveRenderSettings(tasknerveState.snapshot);
+}
+
+function tasknerveProjectMatchesSettingsSearch(project, projectSnapshot, search) {
+  const needle = tasknerveNormalizeText(search).toLowerCase();
+  if (!needle) {
+    return true;
+  }
+  const haystack = [
+    project?.name,
+    project?.key,
+    project?.repo_root,
+    tasknerveControllerBinding(projectSnapshot)?.display_label,
+    tasknerveProjectCodexSettings(projectSnapshot)?.git_origin_url,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return haystack.includes(needle);
+}
+
+function tasknerveGitSyncPolicy(settings) {
+  const policy = tasknerveNormalizeText(settings?.git_sync_policy || "");
+  if (
+    policy === "every_task" ||
+    policy === "every_n_tasks" ||
+    policy === "manual"
+  ) {
+    return policy;
+  }
+  return "every_task";
+}
+
+function tasknerveGitSyncEveryNTasks(settings) {
+  const raw = Number(settings?.git_sync_every_n_tasks || 1);
+  if (!Number.isFinite(raw) || raw <= 0) {
+    return 1;
+  }
+  return Math.max(1, Math.floor(raw));
+}
+
+function tasknerveGitSyncPolicySummary(settings) {
+  const policy = tasknerveGitSyncPolicy(settings);
+  if (policy === "manual") {
+    return "Git sync runs manually";
+  }
+  if (policy === "every_n_tasks") {
+    const every = tasknerveGitSyncEveryNTasks(settings);
+    return `Git sync runs every ${every} completed task${every === 1 ? "" : "s"}`;
+  }
+  return "Git sync runs after every completed task";
 }
 
 function tasknerveProjectDocumentDescriptor(docKey) {
@@ -1483,19 +2863,53 @@ function tasknerveEnsurePanelStyles() {
 }
 #${TASKNERVE_PANEL_ID} .tasknerve-settings-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+#${TASKNERVE_PANEL_ID} .tasknerve-settings-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+}
+#${TASKNERVE_PANEL_ID} .tasknerve-settings-list {
+  display: grid;
   gap: 12px;
 }
 #${TASKNERVE_PANEL_ID} .tasknerve-project-card {
-  padding: 14px;
+  padding: 12px 14px;
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.022);
   border: 1px solid rgba(255, 255, 255, 0.05);
   display: grid;
-  gap: 12px;
+  gap: 10px;
 }
 #${TASKNERVE_PANEL_ID} .tasknerve-project-card-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
+  gap: 14px;
+}
+#${TASKNERVE_PANEL_ID} .tasknerve-project-accordion-head {
+  appearance: none;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  text-align: left;
+  cursor: pointer;
+}
+#${TASKNERVE_PANEL_ID} .tasknerve-project-accordion-head:focus-visible {
+  outline: none;
+}
+#${TASKNERVE_PANEL_ID} .tasknerve-project-card-summary {
+  display: grid;
+  gap: 8px;
 }
 #${TASKNERVE_PANEL_ID} .tasknerve-project-card-title {
   margin: 0;
@@ -1503,11 +2917,29 @@ function tasknerveEnsurePanelStyles() {
   font-weight: 650;
   letter-spacing: -0.02em;
 }
+#${TASKNERVE_PANEL_ID} .tasknerve-project-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
 #${TASKNERVE_PANEL_ID} .tasknerve-project-card-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   justify-content: flex-end;
+}
+#${TASKNERVE_PANEL_ID} .tasknerve-project-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: rgba(214, 223, 235, 0.78);
+  font-size: 12px;
+  white-space: nowrap;
+}
+#${TASKNERVE_PANEL_ID} .tasknerve-project-toggle-caret {
+  font-size: 12px;
+  opacity: 0.82;
 }
 #${TASKNERVE_PANEL_ID} .tasknerve-project-stats {
   display: flex;
@@ -1529,6 +2961,13 @@ function tasknerveEnsurePanelStyles() {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+}
+#${TASKNERVE_PANEL_ID} .tasknerve-project-card-body {
+  display: grid;
+  gap: 12px;
+}
+#${TASKNERVE_PANEL_ID} .tasknerve-project-card-body[hidden] {
+  display: none;
 }
 #${TASKNERVE_PANEL_ID} .tasknerve-project-settings-grid .tasknerve-field.full {
   grid-column: 1 / -1;
@@ -1597,7 +3036,7 @@ function tasknerveEnsurePanelStyles() {
   width: 100%;
   min-height: 34px;
   padding: 0 10px 0 28px;
-  border-radius: 10px;
+  border-radius: 0;
   font: inherit;
   cursor: pointer;
   text-align: left;
@@ -1611,12 +3050,13 @@ function tasknerveEnsurePanelStyles() {
 .tasknerve-sidebar-thread:focus-visible,
 .tasknerve-sidebar-doc:hover,
 .tasknerve-sidebar-doc:focus-visible {
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.035);
   outline: none;
 }
 .tasknerve-sidebar-thread.tasknerve-active,
 .tasknerve-sidebar-doc.tasknerve-active {
-  background: rgba(86, 126, 210, 0.18);
+  background: transparent;
+  box-shadow: none;
 }
 .tasknerve-sidebar-folder {
   color: rgba(214, 220, 230, 0.9);
@@ -1634,8 +3074,8 @@ function tasknerveEnsurePanelStyles() {
 }
 .tasknerve-sidebar-folder-icon,
 .tasknerve-sidebar-folder-icon svg,
-.tasknerve-sidebar-thread-icon,
-.tasknerve-sidebar-thread-icon svg,
+.tasknerve-sidebar-thread-status,
+.tasknerve-sidebar-thread-status svg,
 .tasknerve-sidebar-doc-icon,
 .tasknerve-sidebar-doc-icon svg {
   display: inline-flex;
@@ -1643,15 +3083,34 @@ function tasknerveEnsurePanelStyles() {
   justify-content: center;
 }
 .tasknerve-sidebar-folder-icon svg,
-.tasknerve-sidebar-thread-icon svg,
+.tasknerve-sidebar-thread-status svg,
 .tasknerve-sidebar-doc-icon svg {
   width: 14px;
   height: 14px;
 }
 .tasknerve-sidebar-folder-icon,
-.tasknerve-sidebar-thread-icon,
+.tasknerve-sidebar-thread-status,
 .tasknerve-sidebar-doc-icon {
   grid-column: 2;
+}
+.tasknerve-sidebar-thread-status {
+  color: rgba(184, 194, 208, 0.58);
+}
+.tasknerve-sidebar-thread-status.tasknerve-active {
+  color: rgba(231, 237, 245, 0.9);
+}
+.tasknerve-sidebar-thread-status.tasknerve-busy {
+  color: rgba(112, 198, 160, 0.96);
+}
+.tasknerve-sidebar-thread-status.tasknerve-empty {
+  color: rgba(184, 194, 208, 0.38);
+}
+.tasknerve-sidebar-thread.tasknerve-active .tasknerve-sidebar-thread-label {
+  color: rgba(244, 247, 252, 0.98);
+  font-weight: 640;
+}
+.tasknerve-sidebar-thread.tasknerve-busy .tasknerve-sidebar-thread-status {
+  filter: drop-shadow(0 0 3px rgba(112, 198, 160, 0.28));
 }
 .tasknerve-sidebar-folder-label,
 .tasknerve-sidebar-thread-label,
@@ -1680,6 +3139,8 @@ function tasknerveEnsurePanelStyles() {
 .tasknerve-sidebar-thread-meta {
   font-size: 12px;
   color: rgba(165, 175, 191, 0.7);
+  justify-self: end;
+  padding-left: 8px;
 }
 .tasknerve-sidebar-folder-count {
   min-width: 18px;
@@ -1689,9 +3150,144 @@ function tasknerveEnsurePanelStyles() {
   display: grid;
   gap: 2px;
 }
+.tasknerve-sidebar-doc-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
+  margin: 4px 0 6px;
+  padding: 0 10px 0 28px;
+}
+.tasknerve-sidebar-projects-header-host {
+  width: 100%;
+}
+.tasknerve-sidebar-projects-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  width: 100%;
+  min-height: 30px;
+}
+.tasknerve-sidebar-projects-header-label {
+  display: inline-flex;
+  align-items: center;
+  margin-right: auto !important;
+  min-width: 0;
+}
+.tasknerve-sidebar-header-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: 0 0 auto;
+  gap: 6px;
+  margin-left: 0;
+}
+.tasknerve-sidebar-doc-shortcut {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(223, 230, 239, 0.84);
+  border-radius: 10px;
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}
+.tasknerve-sidebar-doc-shortcut .tasknerve-sidebar-doc-icon,
+.tasknerve-sidebar-doc-shortcut .tasknerve-sidebar-doc-icon svg {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.tasknerve-sidebar-doc-shortcut .tasknerve-sidebar-doc-icon svg {
+  width: 15px;
+  height: 15px;
+}
+.tasknerve-sidebar-doc-shortcut:hover,
+.tasknerve-sidebar-doc-shortcut:focus-visible {
+  background: rgba(255, 255, 255, 0.075);
+  border-color: rgba(255, 255, 255, 0.14);
+  outline: none;
+}
+.tasknerve-sidebar-doc-shortcut.tasknerve-active {
+  background: rgba(86, 126, 210, 0.18);
+  border-color: rgba(103, 148, 255, 0.34);
+  color: rgba(245, 248, 253, 0.96);
+}
+.tasknerve-sidebar-header-action,
+.tasknerve-sidebar-project-settings-action {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  min-width: 30px;
+  min-height: 30px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  background: transparent;
+  color: rgba(223, 230, 239, 0.82);
+  cursor: pointer;
+}
+.tasknerve-sidebar-header-action .tasknerve-sidebar-doc-icon,
+.tasknerve-sidebar-header-action .tasknerve-sidebar-doc-icon svg,
+.tasknerve-sidebar-project-settings-action .tasknerve-sidebar-doc-icon,
+.tasknerve-sidebar-project-settings-action .tasknerve-sidebar-doc-icon svg {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.tasknerve-sidebar-header-action .tasknerve-sidebar-doc-icon svg,
+.tasknerve-sidebar-project-settings-action .tasknerve-sidebar-doc-icon svg {
+  width: 15px;
+  height: 15px;
+}
+.tasknerve-sidebar-header-action:hover,
+.tasknerve-sidebar-header-action:focus-visible,
+.tasknerve-sidebar-project-settings-action:hover,
+.tasknerve-sidebar-project-settings-action:focus-visible {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.14);
+  outline: none;
+}
+.tasknerve-sidebar-header-action.tasknerve-active,
+.tasknerve-sidebar-project-settings-action.tasknerve-active {
+  background: rgba(255, 255, 255, 0.11);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+.tasknerve-sidebar-project-settings-action {
+  margin-left: 6px;
+  flex: 0 0 auto;
+}
 .tasknerve-sidebar-folder-children .tasknerve-sidebar-thread,
 .tasknerve-sidebar-folder-children .tasknerve-sidebar-doc {
   padding-left: 48px;
+}
+#${TASKNERVE_TOOLTIP_ID} {
+  position: fixed;
+  z-index: 2147483620;
+  max-width: min(320px, calc(100vw - 24px));
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: rgba(14, 18, 26, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.34);
+  color: rgba(242, 246, 251, 0.96);
+  font-size: 12px;
+  line-height: 1.35;
+  letter-spacing: 0.01em;
+  pointer-events: none;
+  white-space: nowrap;
 }
 #${TASKNERVE_BRANCH_CHIP_ID} {
   position: relative;
@@ -1704,6 +3300,7 @@ function tasknerveEnsurePanelStyles() {
   align-items: center;
   gap: 10px;
   min-width: 0;
+  flex-wrap: nowrap;
 }
 #${TASKNERVE_RESOURCE_CHIP_ID} .tasknerve-resource-pair {
   font-size: 12px;
@@ -1724,9 +3321,15 @@ function tasknerveEnsurePanelStyles() {
 }
 #${TASKNERVE_BRANCH_CHIP_ID} .tasknerve-branch-label {
   min-width: 0;
+  max-width: min(28vw, 220px);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+#${TASKNERVE_RESOURCE_CHIP_ID},
+#${TASKNERVE_BRANCH_CHIP_ID},
+#${TASKNERVE_TERMINAL_TOGGLE_ID} {
+  flex-shrink: 1;
 }
 #${TASKNERVE_BRANCH_CHIP_ID} .tasknerve-branch-caret {
   opacity: 0.72;
@@ -1735,6 +3338,9 @@ function tasknerveEnsurePanelStyles() {
 #${TASKNERVE_TOPBAR_TASK_CHIP_ID} {
   position: relative;
   color: rgba(245, 247, 250, 0.96) !important;
+  min-width: auto !important;
+  padding: 0 12px !important;
+  border-radius: 999px !important;
 }
 #${TASKNERVE_TOPBAR_TASK_CHIP_ID} .tasknerve-topbar-task-inner {
   display: inline-flex;
@@ -1761,16 +3367,39 @@ function tasknerveEnsurePanelStyles() {
   color: inherit !important;
 }
 #${TASKNERVE_TERMINAL_TOGGLE_ID} {
-  position: fixed !important;
+  position: relative !important;
   top: auto !important;
   left: auto !important;
+  right: auto !important;
+  bottom: auto !important;
+  z-index: auto !important;
+  margin: 0 0 0 8px !important;
+  flex: 0 0 auto !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  min-width: 34px !important;
+  min-height: 34px !important;
+  border-radius: 999px !important;
+  padding: 0 10px !important;
+  color: rgba(232, 239, 248, 0.88) !important;
+}
+#${TASKNERVE_TERMINAL_TOGGLE_ID}.tasknerve-terminal-floating {
+  position: fixed !important;
   right: 18px !important;
   bottom: 18px !important;
   z-index: 2147483588 !important;
   margin: 0 !important;
 }
-#${TASKNERVE_TERMINAL_TOGGLE_ID}.tasknerve-terminal-stacked {
-  bottom: 70px !important;
+#${TASKNERVE_TERMINAL_TOGGLE_ID} .tasknerve-terminal-icon,
+#${TASKNERVE_TERMINAL_TOGGLE_ID} .tasknerve-terminal-icon svg {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+#${TASKNERVE_TERMINAL_TOGGLE_ID} .tasknerve-terminal-icon svg {
+  width: 15px;
+  height: 15px;
 }
 #${TASKNERVE_BRANCH_MENU_ID} {
   position: fixed;
@@ -1832,10 +3461,25 @@ function tasknerveEnsurePanelStyles() {
   color: rgba(214, 223, 235, 0.82);
 }
 #${TASKNERVE_NAV_ID} .tasknerve-codex-icon,
-#${TASKNERVE_NAV_ID} .tasknerve-codex-icon svg {
+#${TASKNERVE_NAV_ID} .tasknerve-codex-icon svg,
+#${TASKNERVE_ACCOUNT_MENU_ID} .tasknerve-codex-icon,
+#${TASKNERVE_ACCOUNT_MENU_ID} .tasknerve-codex-icon svg {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+#${TASKNERVE_NAV_ID} .tasknerve-codex-icon,
+#${TASKNERVE_ACCOUNT_MENU_ID} .tasknerve-codex-icon {
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  color: rgba(223, 230, 240, 0.9);
+  opacity: 0.92;
+}
+#${TASKNERVE_NAV_ID} .tasknerve-codex-icon svg,
+#${TASKNERVE_ACCOUNT_MENU_ID} .tasknerve-codex-icon svg {
+  width: 18px;
+  height: 18px;
 }
 @media (max-width: 1460px) {
   #${TASKNERVE_PANEL_ID} .tasknerve-metrics {
@@ -1850,6 +3494,20 @@ function tasknerveEnsurePanelStyles() {
   #${TASKNERVE_PANEL_ID} .tasknerve-project-settings-grid,
   #${TASKNERVE_PANEL_ID} .tasknerve-editor-grid {
     grid-template-columns: 1fr;
+  }
+  #${TASKNERVE_PANEL_ID} .tasknerve-project-card-head,
+  #${TASKNERVE_PANEL_ID} .tasknerve-settings-toolbar {
+    grid-template-columns: 1fr;
+  }
+  #${TASKNERVE_PANEL_ID} .tasknerve-project-card-actions {
+    justify-content: flex-start;
+  }
+  #${TASKNERVE_RESOURCE_CHIP_ID} .tasknerve-resource-chip-inner {
+    gap: 6px;
+  }
+  #${TASKNERVE_RESOURCE_CHIP_ID} .tasknerve-resource-pair,
+  #${TASKNERVE_BRANCH_CHIP_ID} .tasknerve-branch-label {
+    font-size: 11px;
   }
 }
 @media (max-width: 980px) {
@@ -1872,6 +3530,19 @@ function tasknerveEnsurePanelStyles() {
   }
   #${TASKNERVE_PANEL_ID} .tasknerve-modal-card {
     width: calc(100vw - 24px);
+  }
+  #${TASKNERVE_RESOURCE_CHIP_ID} .tasknerve-resource-chip-inner {
+    gap: 4px;
+  }
+  #${TASKNERVE_RESOURCE_CHIP_ID} .tasknerve-resource-pair {
+    font-size: 10px;
+  }
+  #${TASKNERVE_BRANCH_CHIP_ID} .tasknerve-branch-label {
+    max-width: min(20vw, 120px);
+    font-size: 10px;
+  }
+  #${TASKNERVE_TERMINAL_TOGGLE_ID} {
+    margin-left: 6px !important;
   }
 }
 `;
@@ -2245,22 +3916,9 @@ function tasknerveToggleBranchMenu(anchor) {
 }
 
 function tasknerveFindTopbarCommitControls() {
-  return Array.from(
-    document.querySelectorAll("button,[role='button'],a,div.cursor-interaction"),
-  ).filter((node) => {
-    if (
-      node.id === TASKNERVE_NAV_ID ||
-      node.id === TASKNERVE_BRANCH_CHIP_ID ||
-      node.id === TASKNERVE_TOPBAR_TASK_CHIP_ID ||
-      node.closest(`#${TASKNERVE_PANEL_ID}`)
-    ) {
-      return false;
-    }
+  return tasknerveTopbarInteractiveNodes().filter((node) => {
     const rect = node.getBoundingClientRect();
-    if (!rect.width || !rect.height) {
-      return false;
-    }
-    if (rect.top > 140 || rect.right < window.innerWidth * 0.45) {
+    if (rect.right < window.innerWidth * 0.45) {
       return false;
     }
     const text = tasknerveNormalizeText(node.textContent).toLowerCase();
@@ -2268,43 +3926,124 @@ function tasknerveFindTopbarCommitControls() {
   });
 }
 
-function tasknerveHideCommitControls() {
-  const controls = tasknerveFindTopbarCommitControls();
-  controls.forEach((node) => {
-    if (node.dataset.tasknerveCommitHidden === "true") {
-      return;
+function tasknerveHideCommitArtifact(node, attribute) {
+  if (!node || node.dataset[attribute] === "true") {
+    return;
+  }
+  node.dataset[attribute] = "true";
+  node.style.display = "none";
+}
+
+function tasknerveHideNearbyCommitArtifacts(node) {
+  const nodeRect = node.getBoundingClientRect();
+  tasknerveTopbarInteractiveNodes().forEach((candidate) => {
+    const rect = candidate.getBoundingClientRect();
+    const sameRow =
+      Math.abs(rect.top - nodeRect.top) <= 18 ||
+      Math.abs(rect.top + rect.height / 2 - (nodeRect.top + nodeRect.height / 2)) <= 18;
+    const nearCommitCluster =
+      rect.left >= nodeRect.left - 16 &&
+      rect.right <= nodeRect.right + 52 &&
+      rect.left <= nodeRect.right + 24;
+    if (sameRow && nearCommitCluster) {
+      tasknerveHideCommitArtifact(candidate, "tasknerveCommitHidden");
     }
-    node.dataset.tasknerveCommitHidden = "true";
-    node.style.display = "none";
-    const parent = node.parentElement;
-    if (!parent) {
-      return;
+  });
+  tasknerveTopbarDividerNodes().forEach((divider) => {
+    const rect = divider.getBoundingClientRect();
+    const sameRow =
+      Math.abs(rect.top - nodeRect.top) <= 18 ||
+      Math.abs(rect.top + rect.height / 2 - (nodeRect.top + nodeRect.height / 2)) <= 18;
+    const nearCommitCluster =
+      rect.left >= nodeRect.left - 8 &&
+      rect.left <= nodeRect.right + 28;
+    if (sameRow && nearCommitCluster) {
+      tasknerveHideCommitArtifact(divider, "tasknerveDividerHidden");
     }
-    Array.from(parent.children).forEach((sibling) => {
-      if (sibling === node || sibling.dataset.tasknerveDividerHidden === "true") {
-        return;
-      }
-      const rect = sibling.getBoundingClientRect();
-      const nodeRect = node.getBoundingClientRect();
-      const text = tasknerveNormalizeText(sibling.textContent);
-      if (!text && rect.height > 10 && rect.width <= 6 && Math.abs(rect.left - nodeRect.right) <= 20) {
-        sibling.dataset.tasknerveDividerHidden = "true";
-        sibling.style.display = "none";
-      }
-    });
   });
 }
 
-function tasknerveFindTopbarTaskChipCandidate() {
-  const existing = tasknerveById(TASKNERVE_TOPBAR_TASK_CHIP_ID);
-  if (existing) {
-    return existing;
-  }
-  const candidates = Array.from(
-    document.querySelectorAll("button,[role='button'],a,div.cursor-interaction"),
-  )
+function tasknerveHideOrphanCommitDropdowns() {
+  const dividers = tasknerveTopbarDividerNodes();
+  tasknerveTopbarInteractiveNodes().forEach((node) => {
+    if (node.dataset.tasknerveCommitHidden === "true") {
+      return;
+    }
+    const rect = node.getBoundingClientRect();
+    const text = tasknerveNormalizeText(node.textContent);
+    const label = [
+      node.getAttribute("aria-label"),
+      node.getAttribute("title"),
+      node.getAttribute("data-tooltip"),
+    ]
+      .filter(Boolean)
+      .map((value) => tasknerveNormalizeText(value).toLowerCase())
+      .join(" ");
+    const hasNoWords = !/[a-z0-9]/i.test(text) && !/[a-z0-9]/i.test(label);
+    if (!hasNoWords || rect.width > 64 || rect.right < window.innerWidth * 0.35) {
+      return;
+    }
+    const divider = dividers.find((candidate) => {
+      const dividerRect = candidate.getBoundingClientRect();
+      const sameRow =
+        Math.abs(dividerRect.top - rect.top) <= 18 ||
+        Math.abs(dividerRect.top + dividerRect.height / 2 - (rect.top + rect.height / 2)) <= 18;
+      return sameRow && dividerRect.left >= rect.right - 6 && dividerRect.left <= rect.right + 20;
+    });
+    if (!divider) {
+      return;
+    }
+    tasknerveHideCommitArtifact(node, "tasknerveCommitHidden");
+    tasknerveHideCommitArtifact(divider, "tasknerveDividerHidden");
+  });
+}
+
+function tasknerveHideCommitControls() {
+  const controls = tasknerveFindTopbarCommitControls();
+  controls.forEach((node) => {
+    tasknerveHideNearbyCommitArtifacts(node);
+  });
+  tasknerveHideOrphanCommitDropdowns();
+}
+
+function tasknerveFindDiffToggleControl() {
+  return tasknerveTopbarInteractiveNodes()
     .filter((node) => {
-      if (node.id === TASKNERVE_NAV_ID || node.closest(`#${TASKNERVE_PANEL_ID}`)) {
+      const label = [
+        node.getAttribute("aria-label"),
+        node.getAttribute("title"),
+        node.getAttribute("data-tooltip"),
+        node.textContent,
+      ]
+        .filter(Boolean)
+        .map((value) => tasknerveNormalizeText(value).toLowerCase())
+        .join(" ");
+      return (
+        label.includes("toggle diff") ||
+        label.includes("diff panel") ||
+        label.includes("open diff") ||
+        label.includes("show diff")
+      );
+    })
+    .sort((left, right) => left.getBoundingClientRect().left - right.getBoundingClientRect().left)[0] || null;
+}
+
+function tasknerveFindTopbarDiffReadoutNodes() {
+  const seen = new Set();
+  return Array.from(document.querySelectorAll("button,[role='button'],a,div,span"))
+    .map((node) => tasknerveClosestInteractive(node) || node)
+    .filter((node) => {
+      if (!node || seen.has(node)) {
+        return false;
+      }
+      seen.add(node);
+      if (
+        node.id === TASKNERVE_NAV_ID ||
+        node.id === TASKNERVE_BRANCH_CHIP_ID ||
+        node.id === TASKNERVE_TOPBAR_TASK_CHIP_ID ||
+        node.id === TASKNERVE_TERMINAL_TOGGLE_ID ||
+        node.closest(`#${TASKNERVE_PANEL_ID}`)
+      ) {
         return false;
       }
       const rect = node.getBoundingClientRect();
@@ -2318,21 +4057,146 @@ function tasknerveFindTopbarTaskChipCandidate() {
       return /[+]\s?\d[\d,]*/.test(text) && /[-−]\s?\d[\d,]*/.test(text);
     })
     .sort((left, right) => left.getBoundingClientRect().left - right.getBoundingClientRect().left);
-  return candidates[0] || null;
 }
 
-function tasknerveFindTerminalToggleCandidate() {
-  const existing = tasknerveById(TASKNERVE_TERMINAL_TOGGLE_ID);
-  if (existing) {
-    return existing;
+function tasknerveHideDiffArtifacts(anchor) {
+  const anchorRect = anchor?.getBoundingClientRect?.();
+  if (!anchorRect) {
+    return;
   }
-  const candidates = Array.from(
-    document.querySelectorAll("button,[role='button'],a,div.cursor-interaction"),
-  ).filter((node) => {
+  tasknerveFindTopbarDiffReadoutNodes().forEach((node) => {
+    if (node === anchor || anchor.contains?.(node) || node.contains?.(anchor)) {
+      return;
+    }
+    const rect = node.getBoundingClientRect();
+    const sameRow =
+      Math.abs(rect.top - anchorRect.top) <= 18 ||
+      Math.abs(rect.top + rect.height / 2 - (anchorRect.top + anchorRect.height / 2)) <= 18;
+    const nearby = rect.left >= anchorRect.left - 12 && rect.left <= anchorRect.right + 180;
+    if (sameRow && nearby) {
+      tasknerveHideCommitArtifact(node, "tasknerveDiffHidden");
+    }
+  });
+  const diffToggle = tasknerveFindDiffToggleControl();
+  if (
+    diffToggle &&
+    diffToggle !== anchor &&
+    !anchor.contains?.(diffToggle) &&
+    !diffToggle.contains?.(anchor)
+  ) {
+    tasknerveHideCommitArtifact(diffToggle, "tasknerveDiffHidden");
+  }
+  tasknerveTopbarDividerNodes().forEach((divider) => {
+    const rect = divider.getBoundingClientRect();
+    const sameRow =
+      Math.abs(rect.top - anchorRect.top) <= 18 ||
+      Math.abs(rect.top + rect.height / 2 - (anchorRect.top + anchorRect.height / 2)) <= 18;
+    const nearby = rect.left >= anchorRect.left - 8 && rect.left <= anchorRect.right + 180;
+    if (sameRow && nearby) {
+      tasknerveHideCommitArtifact(divider, "tasknerveDividerHidden");
+    }
+  });
+}
+
+function tasknerveFindTopbarTaskChipCandidate() {
+  const candidates = tasknerveFindTopbarDiffReadoutNodes();
+  if (candidates[0]) {
+    return candidates[0];
+  }
+  const diffToggle = tasknerveFindDiffToggleControl();
+  if (diffToggle) {
+    return diffToggle;
+  }
+  return tasknerveById(TASKNERVE_TOPBAR_TASK_CHIP_ID) || null;
+}
+
+function tasknerveCreateTerminalIcon() {
+  const icon = document.createElement("span");
+  icon.className = "tasknerve-terminal-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6.75A1.75 1.75 0 0 1 5.75 5h12.5A1.75 1.75 0 0 1 20 6.75v10.5A1.75 1.75 0 0 1 18.25 19H5.75A1.75 1.75 0 0 1 4 17.25V6.75Z"></path><path d="m8 9 2.5 3L8 15"></path><path d="M13 15h3"></path></svg>';
+  return icon;
+}
+
+function tasknerveFindNativeTerminalToggleCandidate() {
+  const seen = new Set();
+  const labeledCandidates = Array.from(
+    document.querySelectorAll("button,[role='button'],a,div.cursor-interaction,[aria-label],[title]"),
+  )
+    .map((node) => tasknerveClosestInteractive(node))
+    .filter((node) => {
+      if (!node || seen.has(node)) {
+        return false;
+      }
+      seen.add(node);
+      if (
+        node.closest(`#${TASKNERVE_PANEL_ID}`) ||
+        node.id === TASKNERVE_NAV_ID ||
+        node.id === TASKNERVE_TERMINAL_TOGGLE_ID
+      ) {
+        return false;
+      }
+      const rect = node.getBoundingClientRect();
+      if (!rect.width || !rect.height) {
+        return false;
+      }
+      const label = [
+        node.getAttribute("aria-label"),
+        node.getAttribute("title"),
+        node.getAttribute("data-tooltip"),
+        node.textContent,
+      ]
+        .filter(Boolean)
+        .map((value) => tasknerveNormalizeText(value).toLowerCase())
+        .join(" ");
+      return label.includes("terminal");
+    })
+    .sort((left, right) => {
+      const leftRect = left.getBoundingClientRect();
+      const rightRect = right.getBoundingClientRect();
+      const leftScore =
+        Math.abs(leftRect.bottom - window.innerHeight) + Math.abs(leftRect.right - window.innerWidth);
+      const rightScore =
+        Math.abs(rightRect.bottom - window.innerHeight) + Math.abs(rightRect.right - window.innerWidth);
+      return leftScore - rightScore;
+    });
+  if (labeledCandidates[0]) {
+    return labeledCandidates[0];
+  }
+  const branchChip = tasknerveById(TASKNERVE_BRANCH_CHIP_ID);
+  const fallback = tasknerveFooterCandidates()
+    .filter((node) => node !== branchChip)
+    .filter((node) => {
+      const rect = node.getBoundingClientRect();
+      const text = tasknerveNormalizeText(node.textContent).toLowerCase();
+      return (
+        rect.width <= 44 &&
+        rect.height <= 44 &&
+        rect.right >= window.innerWidth - 80 &&
+        !text.includes("local") &&
+        !text.includes("access") &&
+        !text.includes("trunk") &&
+        !text.includes("main")
+      );
+    })
+    .sort((left, right) => right.getBoundingClientRect().right - left.getBoundingClientRect().right);
+  return fallback[0] || null;
+}
+
+function tasknerveTerminalPanelOpen() {
+  const toggle = tasknerveById(TASKNERVE_TERMINAL_TOGGLE_ID) || tasknerveFindNativeTerminalToggleCandidate();
+  if (
+    toggle &&
+    (toggle.getAttribute("aria-pressed") === "true" ||
+      toggle.getAttribute("aria-expanded") === "true" ||
+      tasknerveNormalizeText(toggle.getAttribute("data-state")).toLowerCase() === "open")
+  ) {
+    return true;
+  }
+  return Array.from(document.querySelectorAll("button,[role='button'],a")).some((node) => {
     if (
-      node.id === TASKNERVE_NAV_ID ||
-      node.id === TASKNERVE_BRANCH_CHIP_ID ||
-      node.id === TASKNERVE_TOPBAR_TASK_CHIP_ID ||
+      node.id === TASKNERVE_TERMINAL_TOGGLE_ID ||
       node.closest(`#${TASKNERVE_PANEL_ID}`)
     ) {
       return false;
@@ -2341,7 +4205,7 @@ function tasknerveFindTerminalToggleCandidate() {
     if (!rect.width || !rect.height) {
       return false;
     }
-    if (rect.top > 140 || rect.right < window.innerWidth * 0.35) {
+    if (rect.left < window.innerWidth * 0.5 || rect.top < window.innerHeight * 0.45) {
       return false;
     }
     const label = [
@@ -2353,36 +4217,260 @@ function tasknerveFindTerminalToggleCandidate() {
       .filter(Boolean)
       .map((value) => tasknerveNormalizeText(value).toLowerCase())
       .join(" ");
-    return label.includes("terminal");
+    return (
+      label.includes("close terminal") ||
+      label.includes("hide terminal") ||
+      label.includes("close integrated terminal")
+    );
+  }) || Array.from(document.querySelectorAll("div,span,p,h2,h3")).some((node) => {
+    if (node.closest(`#${TASKNERVE_PANEL_ID}`)) {
+      return false;
+    }
+    const rect = node.getBoundingClientRect();
+    if (!rect.width || !rect.height) {
+      return false;
+    }
+    if (rect.top < window.innerHeight * 0.45 || rect.left > window.innerWidth * 0.3) {
+      return false;
+    }
+    const text = tasknerveNormalizeText(node.textContent).toLowerCase();
+    return text.startsWith("terminal ");
   });
-  return candidates[0] || null;
+}
+
+function tasknerveFooterControlHost(snapshot) {
+  const branchChip = tasknerveFindFooterBranchChip(snapshot);
+  if (branchChip?.parentElement) {
+    return branchChip.parentElement;
+  }
+  const resourceChip = tasknerveById(TASKNERVE_RESOURCE_CHIP_ID);
+  return resourceChip?.parentElement || tasknerveFindFooterHost();
 }
 
 function tasknerveEnsureTerminalTogglePosition(snapshot) {
-  const button = tasknerveFindTerminalToggleCandidate();
-  if (!button) {
+  const host = tasknerveFooterControlHost(snapshot);
+  const branchChip = tasknerveFindFooterBranchChip(snapshot);
+  const resourceChip = tasknerveById(TASKNERVE_RESOURCE_CHIP_ID);
+  const insertAnchor = branchChip || resourceChip || null;
+  if (!host) {
     return;
   }
+  const terminalOpen = tasknerveTerminalPanelOpen();
+  if (tasknerveState.nativeTerminalToggle?.isConnected) {
+    tasknerveState.nativeTerminalToggle.style.removeProperty("display");
+    tasknerveState.nativeTerminalToggle.style.removeProperty("visibility");
+    tasknerveState.nativeTerminalToggle.style.removeProperty("pointer-events");
+    tasknerveState.nativeTerminalToggle.style.removeProperty("width");
+    tasknerveState.nativeTerminalToggle.style.removeProperty("min-width");
+    tasknerveState.nativeTerminalToggle.style.removeProperty("padding");
+    tasknerveState.nativeTerminalToggle.style.removeProperty("margin");
+    tasknerveState.nativeTerminalToggle.style.removeProperty("border");
+    tasknerveState.nativeTerminalToggle.removeAttribute("data-tasknerve-hidden-terminal-toggle");
+  }
+  const nativeButton = tasknerveFindNativeTerminalToggleCandidate();
+  if (nativeButton && nativeButton.id !== TASKNERVE_TERMINAL_TOGGLE_ID && !terminalOpen) {
+    tasknerveState.nativeTerminalToggle = nativeButton;
+    nativeButton.style.display = "none";
+    nativeButton.setAttribute("data-tasknerve-hidden-terminal-toggle", "true");
+  }
+  let button = tasknerveById(TASKNERVE_TERMINAL_TOGGLE_ID);
+  if (button && button.dataset.tasknerveOwned !== "true") {
+    button.removeAttribute("id");
+    button = null;
+  }
+  if (!button) {
+    button = document.createElement("button");
+    button.type = "button";
+    button.dataset.tasknerveOwned = "true";
+    button.appendChild(tasknerveCreateTerminalIcon());
+    tasknerveApplyNativeTooltip(button, "Open terminal");
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const target =
+        (tasknerveState.nativeTerminalToggle?.isConnected && tasknerveState.nativeTerminalToggle) ||
+        tasknerveFindNativeTerminalToggleCandidate();
+      if (target) {
+        target.dispatchEvent(
+          new MouseEvent("click", {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+          }),
+        );
+      }
+    });
+  }
   button.id = TASKNERVE_TERMINAL_TOGGLE_ID;
-  button.style.position = "fixed";
-  button.style.left = "auto";
-  button.style.top = "auto";
-  button.style.right = "18px";
-  button.style.bottom = "18px";
-  button.style.zIndex = "2147483588";
-  button.style.margin = "0";
-  const branchChip = tasknerveFindFooterBranchChip(snapshot);
-  if (branchChip) {
-    const branchRect = branchChip.getBoundingClientRect();
-    const overlapLikely = branchRect.bottom > window.innerHeight - 140;
-    button.classList.toggle("tasknerve-terminal-stacked", overlapLikely);
-  } else {
-    button.classList.remove("tasknerve-terminal-stacked");
+  if (terminalOpen) {
+    button.style.display = "none";
+    return;
+  }
+  button.style.display = "";
+  button.style.position = "";
+  button.style.left = "";
+  button.style.top = "";
+  button.style.right = "";
+  button.style.bottom = "";
+  button.style.zIndex = "";
+  button.style.margin = "";
+  if (insertAnchor) {
+    if (button.parentElement !== host || button.previousElementSibling !== insertAnchor) {
+      insertAnchor.insertAdjacentElement("afterend", button);
+    }
+  } else if (button.parentElement !== host) {
+    host.appendChild(button);
+  }
+  button.classList.remove("tasknerve-terminal-floating");
+}
+
+function tasknerveSyncInjectedChrome() {
+  if (tasknerveState.domSyncInProgress) {
+    return;
+  }
+  tasknerveState.domSyncInProgress = true;
+  try {
+    tasknerveRemoveInjectedNav();
+    tasknerveEnsureAccountMenuEntry();
+    tasknerveReplaceSidebarSectionLabel();
+    tasknerveLayoutPanel();
+    tasknerveHideCommitControls();
+    tasknerveEnsureTopbarTaskChip(tasknerveState.snapshot);
+    tasknerveEnsureBranchChip(tasknerveState.snapshot);
+    tasknerveEnsureTerminalTogglePosition(tasknerveState.snapshot);
+    tasknerveEnsureSidebarHeaderActions();
+    tasknerveEnsureSidebarProjectDocuments();
+    tasknerveEnsureSidebarProjectRowActions();
+  } finally {
+    tasknerveState.domSyncInProgress = false;
   }
 }
 
-function tasknerveOpenTaskListPanel(event) {
+function tasknerveScheduleDomSync() {
+  if (tasknerveState.domSyncScheduled) {
+    return;
+  }
+  tasknerveState.domSyncScheduled = true;
+  window.requestAnimationFrame(() => {
+    tasknerveState.domSyncScheduled = false;
+    tasknerveSyncInjectedChrome();
+  });
+}
+
+async function tasknerveOpenTaskListPanel(event) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  await tasknerveSyncProjectFromHost().catch(() => {});
   return tasknerveTogglePanel(event, "tasks");
+}
+
+function tasknerveFooterCandidates() {
+  return Array.from(
+    document.querySelectorAll("button,[role='button'],a,div.cursor-interaction"),
+  )
+    .filter((node) => {
+      if (
+        node.id === TASKNERVE_NAV_ID ||
+        node.id === TASKNERVE_RESOURCE_CHIP_ID ||
+        node.id === TASKNERVE_BRANCH_CHIP_ID ||
+        node.id === TASKNERVE_TERMINAL_TOGGLE_ID ||
+        node.closest(`#${TASKNERVE_PANEL_ID}`)
+      ) {
+        return false;
+      }
+      const rect = node.getBoundingClientRect();
+      if (!rect.width || !rect.height) {
+        return false;
+      }
+      return rect.top >= Math.max(220, window.innerHeight * 0.55);
+    })
+    .sort((left, right) => {
+      const leftRect = left.getBoundingClientRect();
+      const rightRect = right.getBoundingClientRect();
+      if (Math.abs(leftRect.top - rightRect.top) > 4) {
+        return leftRect.top - rightRect.top;
+      }
+      return leftRect.left - rightRect.left;
+    });
+}
+
+function tasknerveFindFooterHost() {
+  const nodes = tasknerveFooterCandidates();
+  const preferred = nodes.find((node) => {
+    const label = [
+      node.getAttribute("aria-label"),
+      node.getAttribute("title"),
+      node.textContent,
+    ]
+      .filter(Boolean)
+      .map((value) => tasknerveNormalizeText(value).toLowerCase())
+      .join(" ");
+    return label.includes("local") || label.includes("access");
+  }) || nodes[0] || null;
+  return tasknerveFindChromeHostFromNode(preferred, {
+    minWidth: 320,
+    maxTop: window.innerHeight,
+    requireMultipleControls: false,
+  });
+}
+
+function tasknerveFindNativeFooterBranchCandidate(snapshot) {
+  const gitBranchHint = tasknerveNormalizeText(tasknerveGitBranchHint(snapshot));
+  const activeBranch = tasknerveNormalizeText(tasknerveActiveTimelineBranch(snapshot));
+  const candidates = tasknerveFooterCandidates()
+    .filter((node) => {
+      const text = tasknerveNormalizeText(node.textContent);
+      if (!text) {
+        return false;
+      }
+      return (
+        (gitBranchHint && text.includes(gitBranchHint)) ||
+        (activeBranch && text.includes(activeBranch)) ||
+        /\b[\w.-]+\/[\w.-]+\b/.test(text)
+      );
+    })
+    .sort((left, right) => {
+      const leftRect = left.getBoundingClientRect();
+      const rightRect = right.getBoundingClientRect();
+      return (
+        Math.abs(rightRect.right - window.innerWidth) -
+        Math.abs(leftRect.right - window.innerWidth)
+      );
+    });
+  return candidates[0] || null;
+}
+
+function tasknerveFindFooterPrototypeControl(snapshot) {
+  return tasknerveFindNativeFooterBranchCandidate(snapshot) || tasknerveFooterCandidates()[0] || null;
+}
+
+function tasknerveFindTopbarHost() {
+  const candidate = tasknerveFindTopbarTaskChipCandidate();
+  if (candidate?.parentElement) {
+    return candidate.parentElement;
+  }
+  const nodes = tasknerveTopbarInteractiveNodes().filter((node) => {
+    const text = tasknerveNormalizeText(node.textContent).toLowerCase();
+    return text !== "commit" && !text.startsWith("commit ") && !text.startsWith("push ");
+  });
+  const preferred = nodes[nodes.length - 1] || null;
+  return tasknerveFindChromeHostFromNode(preferred, {
+    minWidth: 280,
+    maxTop: 150,
+  });
+}
+
+function tasknerveFindTopbarPrototypeControl() {
+  const nodes = tasknerveTopbarInteractiveNodes().filter((node) => {
+    if (node.id === TASKNERVE_TOPBAR_TASK_CHIP_ID) {
+      return false;
+    }
+    const text = tasknerveNormalizeText(node.textContent).toLowerCase();
+    return text !== "commit" && !text.startsWith("commit ") && !text.startsWith("push ");
+  });
+  return nodes[nodes.length - 1] || null;
 }
 
 function tasknerveEnsureTopbarTaskChip(snapshot) {
@@ -2390,14 +4478,41 @@ function tasknerveEnsureTopbarTaskChip(snapshot) {
     return;
   }
   tasknerveHideCommitControls();
-  const chip = tasknerveFindTopbarTaskChipCandidate();
+  const nativeCandidate = tasknerveFindTopbarTaskChipCandidate();
+  let chip = nativeCandidate || tasknerveById(TASKNERVE_TOPBAR_TASK_CHIP_ID);
+  const host = tasknerveFindTopbarHost();
+  const existing = tasknerveById(TASKNERVE_TOPBAR_TASK_CHIP_ID);
+  if (existing && nativeCandidate && existing !== nativeCandidate) {
+    existing.remove();
+  }
+  if (!chip && host) {
+    const prototype = tasknerveFindTopbarPrototypeControl();
+    if (prototype) {
+      chip = prototype.cloneNode(false);
+      prototype.insertAdjacentElement("beforebegin", chip);
+    } else {
+      chip = document.createElement("button");
+      chip.type = "button";
+      host.appendChild(chip);
+    }
+  }
   if (!chip) {
     return;
   }
+  tasknerveHideDiffArtifacts(chip);
+  const insertionHost =
+    host && (chip === host || chip.contains?.(host)) ? chip.parentElement : host;
+  if (insertionHost && chip.parentElement !== insertionHost) {
+    insertionHost.appendChild(chip);
+  }
   const remaining = tasknerveRemainingTaskCount(snapshot);
   chip.id = TASKNERVE_TOPBAR_TASK_CHIP_ID;
-  chip.setAttribute("aria-label", "Open TaskNerve project task list");
-  chip.title = `${remaining} TaskNerve task${remaining === 1 ? "" : "s"} left in this project`;
+  chip.removeAttribute("href");
+  chip.classList.remove("tasknerve-terminal-floating");
+  tasknerveApplyNativeTooltip(
+    chip,
+    `Open TaskNerve tasks for ${tasknerveProjectName(snapshot?.selected_project?.key)}`,
+  );
   chip.innerHTML = "";
   const inner = document.createElement("span");
   inner.className = "tasknerve-topbar-task-inner";
@@ -2417,6 +4532,7 @@ function tasknerveEnsureTopbarTaskChip(snapshot) {
       (event) => {
         event.preventDefault();
         event.stopPropagation();
+        event.stopImmediatePropagation();
         void tasknerveOpenTaskListPanel(event);
       },
       true,
@@ -2427,6 +4543,7 @@ function tasknerveEnsureTopbarTaskChip(snapshot) {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
           event.stopPropagation();
+          event.stopImmediatePropagation();
           void tasknerveOpenTaskListPanel(event);
         }
       },
@@ -2435,45 +4552,8 @@ function tasknerveEnsureTopbarTaskChip(snapshot) {
   }
 }
 
-function tasknerveFindFooterBranchChip(snapshot) {
-  const existing = tasknerveById(TASKNERVE_BRANCH_CHIP_ID);
-  if (existing) {
-    return existing;
-  }
-  const gitBranchHint = tasknerveNormalizeText(tasknerveGitBranchHint(snapshot));
-  const activeBranch = tasknerveNormalizeText(tasknerveActiveTimelineBranch(snapshot));
-  const candidates = Array.from(
-    document.querySelectorAll("button,[role='button'],a,div.cursor-interaction"),
-  )
-    .filter((node) => {
-      if (node.id === TASKNERVE_NAV_ID || node.closest(`#${TASKNERVE_PANEL_ID}`)) {
-        return false;
-      }
-      const rect = node.getBoundingClientRect();
-      if (!rect.width || !rect.height) {
-        return false;
-      }
-      if (rect.bottom < window.innerHeight - 220 || rect.left < window.innerWidth * 0.45) {
-        return false;
-      }
-      const text = tasknerveNormalizeText(node.textContent);
-      if (!text) {
-        return false;
-      }
-      return (
-        (gitBranchHint && text.includes(gitBranchHint)) ||
-        (activeBranch && text.includes(activeBranch))
-      );
-    })
-    .sort((left, right) => {
-      const leftRect = left.getBoundingClientRect();
-      const rightRect = right.getBoundingClientRect();
-      return (
-        Math.abs(rightRect.bottom - window.innerHeight) -
-        Math.abs(leftRect.bottom - window.innerHeight)
-      );
-    });
-  return candidates[0] || null;
+function tasknerveFindFooterBranchChip() {
+  return tasknerveById(TASKNERVE_BRANCH_CHIP_ID);
 }
 
 function tasknerveMetricPercentText(label, value) {
@@ -2485,7 +4565,8 @@ function tasknerveMetricPercentText(label, value) {
 
 function tasknerveEnsureResourceChip(snapshot) {
   const branchChip = tasknerveFindFooterBranchChip(snapshot);
-  if (!branchChip || !branchChip.parentElement) {
+  const host = branchChip?.parentElement || tasknerveFindFooterHost();
+  if (!branchChip || !host) {
     return;
   }
   let chip = tasknerveById(TASKNERVE_RESOURCE_CHIP_ID);
@@ -2500,9 +4581,12 @@ function tasknerveEnsureResourceChip(snapshot) {
     branchChip.insertAdjacentElement("beforebegin", chip);
   }
   const monitor = tasknerveState.resourceMonitor || {};
-  chip.title = monitor.recommendedWorkerCap && monitor.maxWorkers
-    ? `CPU ${tasknerveMetricPercentText("", monitor.cpuPercent).trim()} | GPU ${tasknerveMetricPercentText("", monitor.gpuPercent).trim()} | Recommended workers ${monitor.recommendedWorkerCap}/${monitor.maxWorkers}`
-    : "TaskNerve system resources";
+  tasknerveApplyNativeTooltip(
+    chip,
+    monitor.recommendedWorkerCap && monitor.maxWorkers
+      ? `CPU ${tasknerveMetricPercentText("", monitor.cpuPercent).trim()} | GPU ${tasknerveMetricPercentText("", monitor.gpuPercent).trim()} | Recommended workers ${monitor.recommendedWorkerCap}/${monitor.maxWorkers}`
+      : "TaskNerve system resources",
+  );
   chip.innerHTML = `
     <span class="tasknerve-resource-chip-inner">
       <span class="tasknerve-resource-pair">${tasknerveEscapeHtml(tasknerveMetricPercentText("CPU", monitor.cpuPercent))}</span>
@@ -2515,17 +4599,47 @@ function tasknerveEnsureBranchChip(snapshot) {
   if (!snapshot) {
     return;
   }
-  const chip = tasknerveFindFooterBranchChip(snapshot);
-  if (!chip) {
+  const host = tasknerveFindFooterHost();
+  if (!host) {
     return;
+  }
+  const nativeCandidate = tasknerveFindNativeFooterBranchCandidate(snapshot);
+  if (nativeCandidate && nativeCandidate.id !== TASKNERVE_BRANCH_CHIP_ID) {
+    nativeCandidate.style.display = "none";
+    nativeCandidate.setAttribute("data-tasknerve-hidden-footer-branch", "true");
+  }
+  let chip = tasknerveFindFooterBranchChip();
+  if (!chip) {
+    const prototype = nativeCandidate || tasknerveFindFooterPrototypeControl(snapshot);
+    if (prototype) {
+      chip = prototype.cloneNode(false);
+      chip.removeAttribute("href");
+      chip.removeAttribute("title");
+      if (nativeCandidate?.parentElement === host) {
+        nativeCandidate.insertAdjacentElement("beforebegin", chip);
+      } else {
+        host.appendChild(chip);
+      }
+    } else {
+      chip = document.createElement("button");
+      chip.type = "button";
+      host.appendChild(chip);
+    }
+  } else if (!chip.parentElement) {
+    host.appendChild(chip);
+  } else if (chip.parentElement !== host) {
+    host.appendChild(chip);
   }
   const timeline = tasknerveTimelineSummary(snapshot);
   const activeBranch = timeline?.active_branch || "timeline off";
   chip.id = TASKNERVE_BRANCH_CHIP_ID;
-  chip.setAttribute("aria-label", "TaskNerve branches");
-  chip.title = timeline?.timeline_initialized
-    ? `TaskNerve branch: ${activeBranch}`
-    : "TaskNerve timeline is not initialized for this project";
+  chip.removeAttribute("href");
+  tasknerveApplyNativeTooltip(
+    chip,
+    timeline?.timeline_initialized
+      ? `Switch TaskNerve branch for ${tasknerveProjectName(snapshot?.selected_project?.key)}`
+      : "TaskNerve timeline is not initialized for this project",
+  );
   chip.innerHTML = "";
   const inner = document.createElement("span");
   inner.className = "tasknerve-branch-chip-inner";
@@ -2588,11 +4702,18 @@ function tasknerveSetFlash(message, tone) {
 }
 
 async function tasknerveFetchJson(path, options) {
-  const response = await fetch(`${tasknerveBaseOrigin()}${path}`, {
+  const method = String(options?.method || "GET").toUpperCase();
+  const nativePath = path.startsWith("/api/") ? `/tasknerve${path}` : path;
+  const requestOptions = {
     cache: "no-store",
     mode: "cors",
     ...options,
-  });
+    method,
+  };
+  if (method === "GET" || method === "HEAD") {
+    delete requestOptions.body;
+  }
+  const response = await tasknerveBridgeRequest(nativePath, requestOptions);
   const text = await response.text();
   let payload = null;
   try {
@@ -2615,11 +4736,7 @@ async function tasknerveFetchJson(path, options) {
 }
 
 async function tasknerveFetchNativeJson(path, payload) {
-  const origin = tasknerveNativeBridgeOrigin();
-  if (!origin || origin.includes("__TASKNERVE_NATIVE_BRIDGE_URL__")) {
-    throw new Error("TaskNerve native bridge is unavailable");
-  }
-  const response = await fetch(`${origin}${path}`, {
+  const response = await tasknerveBridgeRequest(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     cache: "no-store",
@@ -2643,17 +4760,14 @@ async function tasknerveFetchNativeJson(path, payload) {
 }
 
 async function tasknerveFetchNativeGetJson(path, params) {
-  const origin = tasknerveNativeBridgeOrigin();
-  if (!origin || origin.includes("__TASKNERVE_NATIVE_BRIDGE_URL__")) {
-    throw new Error("TaskNerve native bridge is unavailable");
-  }
   const query = new URLSearchParams();
   Object.entries(params || {}).forEach(([key, value]) => {
     if (value != null && value !== "") {
       query.set(key, String(value));
     }
   });
-  const response = await fetch(`${origin}${path}?${query.toString()}`, {
+  const suffix = query.toString();
+  const response = await tasknerveBridgeRequest(suffix ? `${path}?${suffix}` : path, {
     cache: "no-store",
     mode: "cors",
   });
@@ -2683,12 +4797,11 @@ function tasknerveBase64Encode(value) {
 }
 
 async function tasknerveFetchHostContext() {
-  const origin = tasknerveNativeBridgeOrigin();
-  if (!origin || origin.includes("__TASKNERVE_NATIVE_BRIDGE_URL__")) {
+  if (tasknerveBridgeOrigins().length === 0) {
     return null;
   }
   try {
-    const response = await fetch(`${origin}/tasknerve/host/context`, {
+    const response = await tasknerveBridgeRequest("/tasknerve/host/context", {
       cache: "no-store",
       mode: "cors",
     });
@@ -2704,6 +4817,25 @@ async function tasknerveFetchHostContext() {
   } catch (_error) {
     return null;
   }
+}
+
+async function tasknerveWaitForBridgeReady(timeoutMs = 3200) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const response = await tasknerveBridgeRequest("/tasknerve/health", {
+        cache: "no-store",
+        mode: "cors",
+      });
+      if (response.ok) {
+        return true;
+      }
+    } catch (_error) {}
+    await new Promise((resolve) => {
+      window.setTimeout(resolve, 180);
+    });
+  }
+  return false;
 }
 
 function tasknerveProjectFromWindowContext(hostContext = tasknerveState.hostContext) {
@@ -3017,8 +5149,14 @@ async function tasknerveRefresh(userInitiated) {
     }
     tasknerveState.lastRefreshedAt = Date.now();
   } catch (error) {
+    if (!tasknerveState.snapshot) {
+      tasknerveRenderTransientShell(
+        `TaskNerve could not load project state. Reopen Codex TaskNerve or resync the native app if this persists. ${error}`,
+        "error",
+      );
+    }
     tasknerveSetFlash(
-      `TaskNerve failed to load. Run "tasknerve codex doctor --json" if this persists. ${error}`,
+      `TaskNerve failed to load. Reopen Codex TaskNerve or resync the native app if this persists. ${error}`,
       "error",
     );
   } finally {
@@ -3233,6 +5371,28 @@ async function tasknerveOpenProjectDocument(event, projectKey, docKey) {
   await tasknerveLoadProjectDocument(projectKey, docKey);
 }
 
+async function tasknerveOpenProjectInVsCode(event, projectKey) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  const projectRoot = tasknerveProjectRoot(projectKey);
+  if (!projectRoot) {
+    tasknerveSetFlash("Project root is unavailable.", "error");
+    return;
+  }
+  try {
+    await tasknerveFlushDocumentAutosave();
+    await tasknerveFetchNativeJson("/tasknerve/project/open-vscode", {
+      project_root: projectRoot,
+      project_name: tasknerveProjectName(projectKey),
+    });
+    tasknerveSetFlash(`Opened ${tasknerveProjectName(projectKey)} in VS Code.`, "info");
+  } catch (error) {
+    tasknerveSetFlash(`Failed to open VS Code: ${error}`, "error");
+  }
+}
+
 function tasknerveRenderDocumentEditor(forceValue = false) {
   const page = tasknerveById("tasknerveDocumentPage");
   const title = tasknerveById("tasknerveDocumentTitle");
@@ -3259,6 +5419,48 @@ function tasknerveRenderDocumentEditor(forceValue = false) {
   }
   input.placeholder = documentState.loading ? "Loading document…" : "Start writing in markdown…";
   input.disabled = documentState.loading;
+}
+
+function tasknerveRenderTransientShell(message, tone = "loading") {
+  const select = tasknerveById("tasknerveProjectSelect");
+  const metrics = tasknerveById("tasknerveMetrics");
+  const settingsPage = tasknerveById("tasknerveSettingsPage");
+  const taskList = tasknerveById("tasknerveTaskList");
+  const taskEmpty = tasknerveById("tasknerveTaskEmpty");
+  const taskMeta = tasknerveById("tasknerveTaskCountMeta");
+  const selectedProject =
+    tasknerveState.selectedProject ||
+    tasknerveReadStorage(TASKNERVE_STORAGE_PROJECT_KEY) ||
+    "";
+  if (select && select.options.length === 0) {
+    const label = selectedProject || (tone === "loading" ? "Loading TaskNerve…" : "TaskNerve");
+    select.innerHTML = `<option value="${tasknerveEscapeHtml(selectedProject)}">${tasknerveEscapeHtml(label)}</option>`;
+  }
+  if (metrics) {
+    metrics.innerHTML = `
+      <div class="tasknerve-metric">
+        <strong>${tone === "loading" ? "…" : "!"}</strong>
+        <span>${tasknerveEscapeHtml(tone === "loading" ? "Syncing" : "Unavailable")}</span>
+      </div>
+    `;
+  }
+  if (taskMeta) {
+    taskMeta.textContent = message;
+  }
+  if (taskList) {
+    taskList.innerHTML = "";
+  }
+  if (taskEmpty) {
+    taskEmpty.hidden = false;
+    taskEmpty.textContent = message;
+  }
+  if (settingsPage && !settingsPage.innerHTML.trim()) {
+    settingsPage.innerHTML = `
+      <div class="tasknerve-empty">
+        ${tasknerveEscapeHtml(message)}
+      </div>
+    `;
+  }
 }
 
 function tasknerveRenderProjectPicker(snapshot) {
@@ -3495,6 +5697,168 @@ function tasknerveRenderEditor(snapshot) {
   }
 }
 
+function tasknerveRenderSettingsProjectCard(project, searchActive = false) {
+  const projectSnapshot = tasknerveProjectSnapshot(project.key) || {
+    selected_project: project,
+    tasks: [],
+    codex: {},
+    project_codex_settings: {},
+  };
+  const tasks = tasknerveTasks(projectSnapshot);
+  const settings = tasknerveProjectCodexSettings(projectSnapshot);
+  const nativePrefs = tasknerveNativeProjectPrefs(project.key);
+  const controller = tasknerveControllerBinding(projectSnapshot);
+  const workers = tasknerveWorkerBindings(projectSnapshot);
+  const activeThreads = tasknerveDiscoveredThreads(projectSnapshot);
+  const projectName = project.name || project.key || "project";
+  const openCount = tasks.filter((task) => task.status === "open").length;
+  const claimedCount = tasks.filter((task) => task.status === "claimed").length;
+  const doneCount = tasks.filter((task) => task.status === "done").length;
+  const expanded = tasknerveProjectSettingsExpanded(project.key, searchActive);
+  const lowQueueChecked = settings.low_queue_controller_enabled ? " checked" : "";
+  const singleMessageChecked = settings.worker_single_message_mode ? " checked" : "";
+  const routingChecked = settings.worker_model_routing_enabled ? " checked" : "";
+  const resourceAwareChecked = nativePrefs.resourceAwareWorkers ? " checked" : "";
+  const isSelected = tasknerveState.selectedProject === project.key;
+  const gitSyncPolicy = tasknerveGitSyncPolicy(settings);
+  const gitSyncEveryNTasks = tasknerveGitSyncEveryNTasks(settings);
+  return `
+    <article class="tasknerve-project-card" data-tasknerve-project-card="${tasknerveEscapeHtml(project.key)}">
+      <div class="tasknerve-project-card-head">
+        <button
+          type="button"
+          class="tasknerve-project-accordion-head"
+          data-tasknerve-settings-toggle="${tasknerveEscapeHtml(project.key)}"
+          aria-expanded="${expanded ? "true" : "false"}"
+        >
+          <div class="tasknerve-project-card-summary">
+            <div class="tasknerve-project-title-row">
+              <h2 class="tasknerve-project-card-title">${tasknerveEscapeHtml(projectName)}</h2>
+              ${isSelected ? '<span class="tasknerve-project-stat">Current</span>' : ""}
+            </div>
+            <div class="tasknerve-project-meta">${tasknerveEscapeHtml(project.repo_root || "")}</div>
+            <div class="tasknerve-project-stats">
+              <div class="tasknerve-project-stat">${tasknerveEscapeHtml(tasknerveRemainingTaskCount(projectSnapshot))} left</div>
+              <div class="tasknerve-project-stat">${tasknerveEscapeHtml(openCount)} open</div>
+              <div class="tasknerve-project-stat">${tasknerveEscapeHtml(claimedCount)} claimed</div>
+              <div class="tasknerve-project-stat">${tasknerveEscapeHtml(doneCount)} done</div>
+              <div class="tasknerve-project-stat">${tasknerveEscapeHtml(workers.length)} workers</div>
+              <div class="tasknerve-project-stat">${tasknerveEscapeHtml(activeThreads.length)} active threads</div>
+            </div>
+            <div class="tasknerve-settings-copy">
+              ${tasknerveEscapeHtml(
+                controller
+                  ? `Controller ${controller.display_label || controller.thread_id_short || controller.thread_id} is bound. ${tasknerveGitSyncPolicySummary(settings)}.`
+                  : `No controller thread is bound yet. ${tasknerveGitSyncPolicySummary(settings)}.`,
+              )}
+            </div>
+          </div>
+          <span class="tasknerve-project-toggle">
+            <span>${expanded ? "Hide settings" : "Show settings"}</span>
+            <span class="tasknerve-project-toggle-caret">${expanded ? "▾" : "▸"}</span>
+          </span>
+        </button>
+        <div class="tasknerve-project-card-actions">
+          <button type="button" class="tasknerve-button ghost" data-tasknerve-open-tasks="${tasknerveEscapeHtml(project.key)}">Open tasks</button>
+          <button type="button" class="tasknerve-button ghost" data-tasknerve-project-window="${tasknerveEscapeHtml(project.key)}">Open window</button>
+        </div>
+      </div>
+      <div class="tasknerve-project-card-body" ${expanded ? "" : "hidden"}>
+        <div class="tasknerve-project-settings-grid">
+          <label class="tasknerve-field">
+            <span>Git origin URL</span>
+            <input class="tasknerve-input" data-tasknerve-setting="git_origin_url" type="text" value="${tasknerveEscapeHtml(settings.git_origin_url || settings.actual_git_origin_url || "")}" placeholder="https://github.com/org/repo.git" />
+          </label>
+          <label class="tasknerve-field">
+            <span>Git sync policy</span>
+            <select class="tasknerve-select" data-tasknerve-setting="git_sync_policy">
+              ${TASKNERVE_GIT_SYNC_POLICIES.map((option) => `<option value="${tasknerveEscapeHtml(option.value)}"${option.value === gitSyncPolicy ? " selected" : ""}>${tasknerveEscapeHtml(option.label)}</option>`).join("")}
+            </select>
+          </label>
+          <label class="tasknerve-field">
+            <span>Sync every N completed tasks</span>
+            <input class="tasknerve-input" data-tasknerve-setting="git_sync_every_n_tasks" type="number" min="1" step="1" value="${tasknerveEscapeHtml(gitSyncEveryNTasks)}" />
+          </label>
+          <label class="tasknerve-field">
+            <span>Controller default model</span>
+            <input class="tasknerve-input" data-tasknerve-setting="controller_default_model" type="text" value="${tasknerveEscapeHtml(settings.controller_default_model || "")}" placeholder="Optional controller default" />
+          </label>
+          <label class="tasknerve-field">
+            <span>Worker default model</span>
+            <input class="tasknerve-input" data-tasknerve-setting="worker_default_model" type="text" value="${tasknerveEscapeHtml(settings.worker_default_model || "")}" placeholder="Optional worker default" />
+          </label>
+          <label class="tasknerve-field">
+            <span>Max active workers</span>
+            <input class="tasknerve-input" data-tasknerve-native-setting="maxActiveWorkers" type="number" min="1" step="1" value="${tasknerveEscapeHtml(nativePrefs.maxActiveWorkers || 4)}" />
+          </label>
+          <label class="tasknerve-field">
+            <span>Low intelligence model</span>
+            <input class="tasknerve-input" data-tasknerve-setting="low_intelligence_model" type="text" value="${tasknerveEscapeHtml(settings.low_intelligence_model || "")}" placeholder="Cheap / fast model" />
+          </label>
+          <label class="tasknerve-field">
+            <span>Medium intelligence model</span>
+            <input class="tasknerve-input" data-tasknerve-setting="medium_intelligence_model" type="text" value="${tasknerveEscapeHtml(settings.medium_intelligence_model || "")}" placeholder="Balanced model" />
+          </label>
+          <label class="tasknerve-field">
+            <span>High intelligence model</span>
+            <input class="tasknerve-input" data-tasknerve-setting="high_intelligence_model" type="text" value="${tasknerveEscapeHtml(settings.high_intelligence_model || "")}" placeholder="Stronger model" />
+          </label>
+          <label class="tasknerve-field">
+            <span>Max intelligence model</span>
+            <input class="tasknerve-input" data-tasknerve-setting="max_intelligence_model" type="text" value="${tasknerveEscapeHtml(settings.max_intelligence_model || "")}" placeholder="Best available model" />
+          </label>
+          <label class="tasknerve-field full">
+            <span>Heartbeat core prompt</span>
+            <textarea class="tasknerve-textarea" data-tasknerve-setting="heartbeat_message_core" placeholder="Project heartbeat core prompt">${tasknerveEscapeHtml(settings.heartbeat_message_core || TASKNERVE_DEFAULT_HEARTBEAT)}</textarea>
+          </label>
+          <label class="tasknerve-field full">
+            <span>Low-queue controller prompt</span>
+            <textarea class="tasknerve-textarea" data-tasknerve-setting="low_queue_controller_prompt" placeholder="Prompt to inject when the queue runs low">${tasknerveEscapeHtml(settings.low_queue_controller_prompt || "")}</textarea>
+          </label>
+          <label class="tasknerve-check">
+            <input data-tasknerve-setting="low_queue_controller_enabled" type="checkbox"${lowQueueChecked} />
+            <span>Auto-prompt the controller when the task list gets low</span>
+          </label>
+          <label class="tasknerve-check">
+            <input data-tasknerve-setting="worker_single_message_mode" type="checkbox"${singleMessageChecked} />
+            <span>Single-message worker queue mode</span>
+          </label>
+          <label class="tasknerve-check">
+            <input data-tasknerve-setting="worker_model_routing_enabled" type="checkbox"${routingChecked} />
+            <span>Enable task-aware worker model routing</span>
+          </label>
+          <label class="tasknerve-check">
+            <input data-tasknerve-native-setting="resourceAwareWorkers" type="checkbox"${resourceAwareChecked} />
+            <span>Resource-aware worker throttling</span>
+          </label>
+          <label class="tasknerve-check">
+            <input data-tasknerve-native-setting="traceCollectionEnabled" type="checkbox"${nativePrefs.traceCollectionEnabled ? " checked" : ""} />
+            <span>Collect project traces for training/export</span>
+          </label>
+          <label class="tasknerve-check">
+            <input data-tasknerve-native-setting="traceAutoCaptureEnabled" type="checkbox"${nativePrefs.traceAutoCaptureEnabled ? " checked" : ""} />
+            <span>Auto-capture controller, worker, task, and doc traces</span>
+          </label>
+          <label class="tasknerve-field">
+            <span>Trace auto-capture interval (seconds)</span>
+            <input class="tasknerve-input" data-tasknerve-native-setting="traceCaptureIntervalSeconds" type="number" min="15" step="15" value="${tasknerveEscapeHtml(nativePrefs.traceCaptureIntervalSeconds || 120)}" />
+          </label>
+        </div>
+        <div class="tasknerve-settings-copy tasknerve-section-divider">
+          ${tasknerveEscapeHtml(tasknerveTraceStatusText(project.key))}
+        </div>
+        <div class="tasknerve-card-actions tasknerve-section-divider">
+          <button type="button" class="tasknerve-button primary" data-tasknerve-project-save="${tasknerveEscapeHtml(project.key)}">Save settings</button>
+          <button type="button" class="tasknerve-button ghost" data-tasknerve-project-trace-capture="${tasknerveEscapeHtml(project.key)}">Capture traces now</button>
+          <button type="button" class="tasknerve-button ghost" data-tasknerve-project-bootstrap="${tasknerveEscapeHtml(project.key)}">${controller ? "Replace controller" : "Create controller"}</button>
+          <button type="button" class="tasknerve-button ghost" data-tasknerve-project-adopt="${tasknerveEscapeHtml(project.key)}">Adopt active threads</button>
+          <button type="button" class="tasknerve-button ghost" data-tasknerve-project-heartbeat="${tasknerveEscapeHtml(project.key)}">Send heartbeats</button>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
 function tasknerveRenderSettings(snapshot) {
   const container = tasknerveById("tasknerveSettingsPage");
   if (!container) {
@@ -3509,155 +5873,40 @@ function tasknerveRenderSettings(snapshot) {
     `;
     return;
   }
+  const search = tasknerveState.settingsSearch || "";
+  const searchActive = !!tasknerveNormalizeText(search);
+  const visibleProjects = projects.filter((project) =>
+    tasknerveProjectMatchesSettingsSearch(project, tasknerveProjectSnapshot(project.key), search),
+  );
   container.innerHTML = `
-    <div class="tasknerve-settings-header">
-      <div>
-        <div class="tasknerve-strip-label">Registered Projects</div>
-        <div class="tasknerve-settings-copy">TaskNerve page is now the project control surface. Use the top-right task chip for day-to-day queue work.</div>
-      </div>
-      <div class="tasknerve-muted">${projects.length} project${projects.length === 1 ? "" : "s"}</div>
+    <div class="tasknerve-settings-toolbar">
+      <label class="tasknerve-field">
+        <span>Search projects</span>
+        <input class="tasknerve-input" id="tasknerveSettingsSearchInput" type="search" value="${tasknerveEscapeHtml(search)}" placeholder="Search by project, repo path, controller, or git origin" />
+      </label>
+      <div class="tasknerve-muted">${visibleProjects.length} of ${projects.length} project${projects.length === 1 ? "" : "s"}</div>
     </div>
-    <div class="tasknerve-settings-grid">
-      ${projects
-        .map((project) => {
-          const projectSnapshot =
-            tasknerveProjectSnapshot(project.key) ||
-            {
-              selected_project: project,
-              tasks: [],
-              codex: {},
-              project_codex_settings: {},
-            };
-          const tasks = tasknerveTasks(projectSnapshot);
-          const settings = tasknerveProjectCodexSettings(projectSnapshot);
-          const nativePrefs = tasknerveNativeProjectPrefs(project.key);
-          const controller = tasknerveControllerBinding(projectSnapshot);
-          const workers = tasknerveWorkerBindings(projectSnapshot);
-          const activeThreads = tasknerveDiscoveredThreads(projectSnapshot);
-          const projectName = project.name || project.key || "project";
-          const openCount = tasks.filter((task) => task.status === "open").length;
-          const claimedCount = tasks.filter((task) => task.status === "claimed").length;
-          const doneCount = tasks.filter((task) => task.status === "done").length;
-          const lowQueueChecked = settings.low_queue_controller_enabled ? " checked" : "";
-          const singleMessageChecked = settings.worker_single_message_mode ? " checked" : "";
-          const routingChecked = settings.worker_model_routing_enabled ? " checked" : "";
-          const resourceAwareChecked = nativePrefs.resourceAwareWorkers ? " checked" : "";
-          const isSelected = tasknerveState.selectedProject === project.key;
-          return `
-            <article class="tasknerve-project-card" data-tasknerve-project-card="${tasknerveEscapeHtml(project.key)}">
-              <div class="tasknerve-project-card-head">
-                <div>
-                  <h2 class="tasknerve-project-card-title">${tasknerveEscapeHtml(projectName)}</h2>
-                  <div class="tasknerve-project-meta">${tasknerveEscapeHtml(project.repo_root || "")}</div>
-                </div>
-                <div class="tasknerve-project-card-actions">
-                  ${isSelected ? '<span class="tasknerve-project-stat">Current project</span>' : ""}
-                  <button type="button" class="tasknerve-button ghost" data-tasknerve-open-tasks="${tasknerveEscapeHtml(project.key)}">Open tasks</button>
-                </div>
-              </div>
-              <div class="tasknerve-project-stats">
-                <div class="tasknerve-project-stat">${tasknerveEscapeHtml(tasknerveRemainingTaskCount(projectSnapshot))} left</div>
-                <div class="tasknerve-project-stat">${tasknerveEscapeHtml(openCount)} open</div>
-                <div class="tasknerve-project-stat">${tasknerveEscapeHtml(claimedCount)} claimed</div>
-                <div class="tasknerve-project-stat">${tasknerveEscapeHtml(doneCount)} done</div>
-                <div class="tasknerve-project-stat">${tasknerveEscapeHtml(workers.length)} workers</div>
-                <div class="tasknerve-project-stat">${tasknerveEscapeHtml(activeThreads.length)} active threads</div>
-              </div>
-              <div class="tasknerve-settings-copy">
-                ${tasknerveEscapeHtml(
-                  controller
-                    ? `Controller ${controller.display_label || controller.thread_id_short || controller.thread_id} is bound for this project.`
-                    : "No controller thread is bound yet.",
-                )}
-              </div>
-              <div class="tasknerve-project-settings-grid">
-                <label class="tasknerve-field">
-                  <span>Git origin URL</span>
-                  <input class="tasknerve-input" data-tasknerve-setting="git_origin_url" type="text" value="${tasknerveEscapeHtml(settings.git_origin_url || settings.actual_git_origin_url || "")}" placeholder="https://github.com/org/repo.git" />
-                </label>
-                <label class="tasknerve-field">
-                  <span>Controller default model</span>
-                  <input class="tasknerve-input" data-tasknerve-setting="controller_default_model" type="text" value="${tasknerveEscapeHtml(settings.controller_default_model || "")}" placeholder="Optional controller default" />
-                </label>
-                <label class="tasknerve-field full">
-                  <span>Heartbeat core prompt</span>
-                  <textarea class="tasknerve-textarea" data-tasknerve-setting="heartbeat_message_core" placeholder="Project heartbeat core prompt">${tasknerveEscapeHtml(settings.heartbeat_message_core || TASKNERVE_DEFAULT_HEARTBEAT)}</textarea>
-                </label>
-                <label class="tasknerve-field full">
-                  <span>Low-queue controller prompt</span>
-                  <textarea class="tasknerve-textarea" data-tasknerve-setting="low_queue_controller_prompt" placeholder="Prompt to inject when the queue runs low">${tasknerveEscapeHtml(settings.low_queue_controller_prompt || "")}</textarea>
-                </label>
-                <label class="tasknerve-check">
-                  <input data-tasknerve-setting="low_queue_controller_enabled" type="checkbox"${lowQueueChecked} />
-                  <span>Auto-prompt the controller when the task list gets low</span>
-                </label>
-                <label class="tasknerve-check">
-                  <input data-tasknerve-setting="worker_single_message_mode" type="checkbox"${singleMessageChecked} />
-                  <span>Single-message worker queue mode</span>
-                </label>
-                <label class="tasknerve-check">
-                  <input data-tasknerve-setting="worker_model_routing_enabled" type="checkbox"${routingChecked} />
-                  <span>Enable task-aware worker model routing</span>
-                </label>
-                <label class="tasknerve-check">
-                  <input data-tasknerve-native-setting="resourceAwareWorkers" type="checkbox"${resourceAwareChecked} />
-                  <span>Resource-aware worker throttling</span>
-                </label>
-                <label class="tasknerve-check">
-                  <input data-tasknerve-native-setting="traceCollectionEnabled" type="checkbox"${nativePrefs.traceCollectionEnabled ? " checked" : ""} />
-                  <span>Collect project traces for training/export</span>
-                </label>
-                <label class="tasknerve-field">
-                  <span>Worker default model</span>
-                  <input class="tasknerve-input" data-tasknerve-setting="worker_default_model" type="text" value="${tasknerveEscapeHtml(settings.worker_default_model || "")}" placeholder="Optional worker default" />
-                </label>
-                <label class="tasknerve-field">
-                  <span>Max active workers</span>
-                  <input class="tasknerve-input" data-tasknerve-native-setting="maxActiveWorkers" type="number" min="1" step="1" value="${tasknerveEscapeHtml(nativePrefs.maxActiveWorkers || 4)}" />
-                </label>
-                <label class="tasknerve-field">
-                  <span>Trace auto-capture interval (seconds)</span>
-                  <input class="tasknerve-input" data-tasknerve-native-setting="traceCaptureIntervalSeconds" type="number" min="15" step="15" value="${tasknerveEscapeHtml(nativePrefs.traceCaptureIntervalSeconds || 120)}" />
-                </label>
-                <label class="tasknerve-check">
-                  <input data-tasknerve-native-setting="traceAutoCaptureEnabled" type="checkbox"${nativePrefs.traceAutoCaptureEnabled ? " checked" : ""} />
-                  <span>Auto-capture controller, worker, task, and doc traces</span>
-                </label>
-                <label class="tasknerve-field">
-                  <span>Low intelligence model</span>
-                  <input class="tasknerve-input" data-tasknerve-setting="low_intelligence_model" type="text" value="${tasknerveEscapeHtml(settings.low_intelligence_model || "")}" placeholder="Cheap / fast model" />
-                </label>
-                <label class="tasknerve-field">
-                  <span>Medium intelligence model</span>
-                  <input class="tasknerve-input" data-tasknerve-setting="medium_intelligence_model" type="text" value="${tasknerveEscapeHtml(settings.medium_intelligence_model || "")}" placeholder="Balanced model" />
-                </label>
-                <label class="tasknerve-field">
-                  <span>High intelligence model</span>
-                  <input class="tasknerve-input" data-tasknerve-setting="high_intelligence_model" type="text" value="${tasknerveEscapeHtml(settings.high_intelligence_model || "")}" placeholder="Stronger model" />
-                </label>
-                <label class="tasknerve-field">
-                  <span>Max intelligence model</span>
-                  <input class="tasknerve-input" data-tasknerve-setting="max_intelligence_model" type="text" value="${tasknerveEscapeHtml(settings.max_intelligence_model || "")}" placeholder="Best available model" />
-                </label>
-              </div>
-              <div class="tasknerve-settings-copy tasknerve-section-divider">
-                ${tasknerveEscapeHtml(tasknerveTraceStatusText(project.key))}
-              </div>
-              <div class="tasknerve-card-actions tasknerve-section-divider">
-                <button type="button" class="tasknerve-button primary" data-tasknerve-project-save="${tasknerveEscapeHtml(project.key)}">Save settings</button>
-                <button type="button" class="tasknerve-button ghost" data-tasknerve-project-window="${tasknerveEscapeHtml(project.key)}">Open window</button>
-                <button type="button" class="tasknerve-button ghost" data-tasknerve-project-trace-capture="${tasknerveEscapeHtml(project.key)}">Capture traces now</button>
-                <button type="button" class="tasknerve-button ghost" data-tasknerve-project-bootstrap="${tasknerveEscapeHtml(project.key)}">${controller ? "Replace controller" : "Create controller"}</button>
-                <button type="button" class="tasknerve-button ghost" data-tasknerve-project-adopt="${tasknerveEscapeHtml(project.key)}">Adopt active threads</button>
-                <button type="button" class="tasknerve-button ghost" data-tasknerve-project-heartbeat="${tasknerveEscapeHtml(project.key)}">Send heartbeats</button>
-              </div>
-            </article>
-          `;
-        })
-        .join("")}
-    </div>
+    ${
+      visibleProjects.length === 0
+        ? `<div class="tasknerve-empty">No projects match "${tasknerveEscapeHtml(search)}".</div>`
+        : `<div class="tasknerve-settings-list">${visibleProjects
+            .map((project) => tasknerveRenderSettingsProjectCard(project, searchActive))
+            .join("")}</div>`
+    }
   `;
 
+  const searchInput = tasknerveById("tasknerveSettingsSearchInput");
+  if (searchInput) {
+    searchInput.addEventListener("input", () => {
+      tasknerveState.settingsSearch = searchInput.value || "";
+      tasknerveRenderSettings(tasknerveState.snapshot);
+    });
+  }
+  container.querySelectorAll("[data-tasknerve-settings-toggle]").forEach((button) => {
+    button.addEventListener("click", () => {
+      tasknerveToggleProjectSettingsExpanded(button.getAttribute("data-tasknerve-settings-toggle"));
+    });
+  });
   container.querySelectorAll("[data-tasknerve-open-tasks]").forEach((button) => {
     button.addEventListener("click", (event) => {
       const projectKey = button.getAttribute("data-tasknerve-open-tasks") || null;
@@ -3665,7 +5914,7 @@ function tasknerveRenderSettings(snapshot) {
         tasknerveState.selectedProject = projectKey;
         tasknerveWriteStorage(TASKNERVE_STORAGE_PROJECT_KEY, projectKey);
       }
-      void tasknerveOpenPanel(event, "tasks");
+      void tasknerveOpenTaskListPanel(event);
     });
   });
   container.querySelectorAll("[data-tasknerve-project-save]").forEach((button) => {
@@ -3723,10 +5972,7 @@ function tasknerveRender() {
   tasknerveRenderSettings(snapshot);
   tasknerveRenderDocumentEditor();
   tasknerveSetPanelMode(tasknerveState.panelMode);
-  tasknerveEnsureTopbarTaskChip(snapshot);
-  tasknerveEnsureBranchChip(snapshot);
-  tasknerveEnsureTerminalTogglePosition(snapshot);
-  tasknerveEnsureSidebarProjectDocuments();
+  tasknerveSyncInjectedChrome();
 }
 
 async function tasknervePostJson(path, payload) {
@@ -3876,8 +6122,14 @@ async function tasknerveApproveTask(taskId) {
 
 function tasknerveCollectProjectCodexSettingsPayload(projectKey = tasknerveState.selectedProject) {
   const readField = (field) => tasknerveProjectCardField(projectKey, field);
+  const gitSyncEveryNTasks = Number(readField("git_sync_every_n_tasks")?.value || 1);
   return {
     git_origin_url: readField("git_origin_url")?.value || "",
+    git_sync_policy: readField("git_sync_policy")?.value || "every_task",
+    git_sync_every_n_tasks:
+      Number.isFinite(gitSyncEveryNTasks) && gitSyncEveryNTasks > 0
+        ? Math.max(1, Math.floor(gitSyncEveryNTasks))
+        : 1,
     heartbeat_message_core: readField("heartbeat_message_core")?.value || "",
     low_queue_controller_enabled: Boolean(readField("low_queue_controller_enabled")?.checked),
     low_queue_controller_prompt: readField("low_queue_controller_prompt")?.value || "",
@@ -4097,7 +6349,10 @@ function tasknerveStopPolling() {
 function tasknerveLayoutPanel() {
   const root = tasknervePanelRoot();
   const shell = root.querySelector(".tasknerve-shell");
-  const reference = tasknerveById(TASKNERVE_NAV_ID) || tasknerveFindSkillsRow();
+  const reference =
+    tasknerveFindSidebarSettingsRow() ||
+    tasknerveById(TASKNERVE_ACCOUNT_MENU_ID) ||
+    tasknerveFindSkillsRow();
   const left = reference
     ? Math.max(Math.round(tasknerveClosestInteractive(reference).getBoundingClientRect().right) + 8, 292)
     : 308;
@@ -4125,11 +6380,11 @@ async function tasknerveOpenPanel(event, mode = "settings") {
   tasknerveState.panelOpen = true;
   root.classList.add("tasknerve-open");
   tasknerveLayoutPanel();
-  const nav = tasknerveById(TASKNERVE_NAV_ID);
-  if (nav) {
-    nav.classList.add("tasknerve-active");
-  }
   tasknerveStartPolling();
+  if (!tasknerveState.snapshot) {
+    tasknerveRenderTransientShell("Loading TaskNerve project state…", "loading");
+  }
+  await tasknerveWaitForBridgeReady().catch(() => false);
   await tasknerveSyncProjectFromHost();
   await tasknerveRefresh(false);
   if (tasknerveState.panelMode === "settings") {
@@ -4156,10 +6411,6 @@ function tasknerveClosePanel() {
   const root = tasknerveById(TASKNERVE_PANEL_ID);
   if (root) {
     root.classList.remove("tasknerve-open");
-  }
-  const nav = tasknerveById(TASKNERVE_NAV_ID);
-  if (nav) {
-    nav.classList.remove("tasknerve-active");
   }
   tasknerveStopPolling();
   tasknerveEnsureSidebarProjectDocuments();
@@ -4203,17 +6454,71 @@ function tasknerveDecorateNavRow(row) {
   }
 }
 
-function tasknerveEnsureNav() {
-  if (tasknerveById(TASKNERVE_NAV_ID)) {
+function tasknerveDecorateAccountMenuRow(row) {
+  row.id = TASKNERVE_ACCOUNT_MENU_ID;
+  row.setAttribute("role", row.getAttribute("role") || "button");
+  row.setAttribute("aria-label", "TaskNerve");
+  row.removeAttribute("href");
+  row.addEventListener("click", (event) => {
+    tasknerveTogglePanel(event, "settings");
+  });
+  row.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      tasknerveTogglePanel(event, "settings");
+    }
+  });
+  const existingIcon = row.querySelector("svg,img");
+  if (existingIcon) {
+    existingIcon.replaceWith(tasknerveCreateIcon());
+  } else {
+    row.insertAdjacentElement("afterbegin", tasknerveCreateIcon());
+  }
+  Array.from(row.childNodes).forEach((child) => {
+    if (child.nodeType === Node.TEXT_NODE && tasknerveNormalizeText(child.textContent)) {
+      child.textContent = "TaskNerve";
+    }
+  });
+  const labels = Array.from(row.querySelectorAll("span,p,div")).filter(
+    (node) => !node.querySelector("svg,img"),
+  );
+  const primaryLabel =
+    labels.find((node) => tasknerveNormalizeText(node.textContent) === "Settings") ||
+    labels.find((node) => tasknerveNormalizeText(node.textContent)) ||
+    null;
+  if (primaryLabel) {
+    primaryLabel.textContent = "TaskNerve";
+  } else if (!tasknerveReplaceLabel(row)) {
+    const label = document.createElement("span");
+    label.textContent = "TaskNerve";
+    row.appendChild(label);
+  }
+}
+
+function tasknerveRemoveInjectedNav() {
+  tasknerveById(TASKNERVE_NAV_ID)?.remove();
+}
+
+function tasknerveEnsureAccountMenuEntry() {
+  const existing = tasknerveById(TASKNERVE_ACCOUNT_MENU_ID);
+  if (existing && !existing.isConnected) {
+    existing.remove();
+  }
+  const settingsRow = tasknerveFindAccountMenuSettingsRow();
+  if (!settingsRow) {
     return;
   }
-  const skillsRow = tasknerveFindSkillsRow();
-  if (!skillsRow || !skillsRow.parentElement) {
+  const container = tasknerveFindAccountMenuContainer(settingsRow);
+  if (!container) {
     return;
   }
-  const cloned = skillsRow.cloneNode(true);
-  tasknerveDecorateNavRow(cloned);
-  skillsRow.insertAdjacentElement("afterend", cloned);
+  let entry = tasknerveById(TASKNERVE_ACCOUNT_MENU_ID);
+  if (!entry) {
+    entry = settingsRow.cloneNode(true);
+    tasknerveDecorateAccountMenuRow(entry);
+  }
+  if (settingsRow.nextElementSibling !== entry) {
+    settingsRow.insertAdjacentElement("afterend", entry);
+  }
 }
 
 function tasknerveBoot() {
@@ -4225,34 +6530,65 @@ function tasknerveBoot() {
     TASKNERVE_STORAGE_NATIVE_PROJECT_PREFS_KEY,
     {},
   );
-  tasknerveEnsureNav();
-  tasknerveLayoutPanel();
+  tasknerveScheduleDomSync();
   void tasknerveSyncProjectFromHost().then(() => tasknerveRefresh(false)).catch(() => {});
   const observer = new MutationObserver(() => {
-    tasknerveEnsureNav();
-    tasknerveLayoutPanel();
-    tasknerveHideCommitControls();
-    tasknerveEnsureTopbarTaskChip(tasknerveState.snapshot);
-    tasknerveEnsureBranchChip(tasknerveState.snapshot);
-    tasknerveEnsureTerminalTogglePosition(tasknerveState.snapshot);
-    tasknerveEnsureSidebarProjectDocuments();
+    tasknerveScheduleDomSync();
   });
   observer.observe(document.body, { childList: true, subtree: true });
-  window.addEventListener("resize", tasknerveLayoutPanel);
+  window.addEventListener("resize", tasknerveScheduleDomSync);
   window.addEventListener("resize", tasknerveCloseBranchMenu);
-  window.addEventListener("resize", () => {
-    tasknerveEnsureTerminalTogglePosition(tasknerveState.snapshot);
+  window.addEventListener("resize", tasknerveHideTooltip);
+  window.addEventListener("scroll", tasknerveHideTooltip, true);
+  document.addEventListener("mouseover", (event) => {
+    const target = event.target?.closest?.("[data-tasknerve-tooltip]");
+    if (!target) {
+      return;
+    }
+    tasknerveShowTooltip(target, event);
+  });
+  document.addEventListener("mousemove", (event) => {
+    if (!tasknerveState.tooltipTarget) {
+      return;
+    }
+    tasknervePositionTooltip(tasknerveState.tooltipTarget, event);
+  });
+  document.addEventListener("mouseout", (event) => {
+    const target = event.target?.closest?.("[data-tasknerve-tooltip]");
+    if (!target) {
+      return;
+    }
+    const related = event.relatedTarget?.closest?.("[data-tasknerve-tooltip]") || null;
+    if (related === target) {
+      return;
+    }
+    if (tasknerveState.tooltipTarget === target) {
+      tasknerveHideTooltip();
+    }
+  });
+  document.addEventListener("focusin", (event) => {
+    const target = event.target?.closest?.("[data-tasknerve-tooltip]");
+    if (target) {
+      tasknerveShowTooltip(target);
+    }
+  });
+  document.addEventListener("focusout", (event) => {
+    const target = event.target?.closest?.("[data-tasknerve-tooltip]");
+    if (target && tasknerveState.tooltipTarget === target) {
+      tasknerveHideTooltip();
+    }
   });
   document.addEventListener("click", (event) => {
     const root = tasknerveById(TASKNERVE_PANEL_ID);
     const shell = root?.querySelector(".tasknerve-shell");
     const menu = tasknerveById(TASKNERVE_BRANCH_MENU_ID);
     const chip = tasknerveById(TASKNERVE_BRANCH_CHIP_ID);
+    tasknerveHideTooltip();
     if (
       tasknerveState.panelOpen &&
       shell &&
       !shell.contains(event.target) &&
-      !tasknerveById(TASKNERVE_NAV_ID)?.contains(event.target) &&
+      !tasknerveById(TASKNERVE_ACCOUNT_MENU_ID)?.contains(event.target) &&
       !tasknerveById(TASKNERVE_TOPBAR_TASK_CHIP_ID)?.contains(event.target)
     ) {
       tasknerveClosePanel();
@@ -4270,6 +6606,7 @@ function tasknerveBoot() {
     if (tasknerveState.panelOpen) {
       tasknerveMaybeRefreshOnInteraction();
     }
+    tasknerveScheduleDomSync();
   });
 }
 

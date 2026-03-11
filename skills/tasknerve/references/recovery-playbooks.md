@@ -1,41 +1,9 @@
-# Recovery Playbooks
+# Archived Reference
 
-## Auth Missing During Push
+This reference file described the deprecated CLI-era TaskNerve workflow.
 
-Symptom:
-- `bridge sync-github` fails with missing credentials.
-
-Recovery:
-1. `tasknerve --repo-root . bridge auth status`
-2. `tasknerve --repo-root . bridge auth login --token "$TASKNERVE_GIT_TOKEN" --helper <helper>`
-3. Retry sync.
-
-## Autostash Pop Conflict After Pull
-
-Symptom:
-- pull succeeded, but autostash pop failed.
-
-Recovery:
-1. Inspect stash list: `git stash list`
-2. Reapply manually: `git stash pop`
-3. Resolve conflicts and checkpoint.
-
-## Lock Conflict On Checkpoint
-
-Symptom:
-- checkpoint blocked by active locks held by another agent.
-
-Recovery:
-1. Inspect locks: `tasknerve --repo-root . lock list`
-2. Coordinate ownership handoff.
-3. Retry checkpoint (or `--ignore-locks` only when explicitly authorized).
-
-## Missing Objects During Checkout
-
-Symptom:
-- checkout reports missing object blobs.
-
-Recovery:
-1. Ensure baseline created via `tasknerve init` before major edits.
-2. Recreate missing state by checkpointing current files where possible.
-3. Retry checkout.
+On `codex/codex-native`, use the native TaskNerve surfaces inside Codex instead:
+- the TaskNerve project/settings page
+- the task drawer
+- project documents inside Codex
+- the native app sync path via `bash /Users/adimus/Documents/taskNerve/install-macos.sh --app "/Applications/Codex TaskNerve.app"`

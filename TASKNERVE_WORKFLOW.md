@@ -6,13 +6,13 @@ reviewer:
   goal: "Review tasknerve for missing functionality, regressions, and multi-agent UX risks."
   guidance:
     - "Prioritize agent ergonomics, recoverability, and deterministic behavior."
-    - "Treat broken CLI or GUI flows as high leverage because they block operator trust."
+    - "Treat broken native TaskNerve or Codex integration flows as high leverage because they block operator trust."
   max_findings: 8
   max_tasks: 6
 task_manager:
   goal: "Generate the next highest-leverage backlog for tasknerve."
   guidance:
-    - "Prefer concrete CLI, GUI, docs, and test tasks."
+    - "Prefer concrete native UI, integration, docs, and test tasks."
     - "Keep the queue focused on features that improve real-world agent workflows."
   max_findings: 4
   max_tasks: 10

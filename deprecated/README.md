@@ -2,16 +2,10 @@
 
 This directory is reserved for code that has already been removed from the live TaskNerve runtime.
 
-Rust is not moved here yet.
+The legacy Rust TaskNerve runtime now lives under [deprecated/rust/](/Users/adimus/Documents/taskNerve/deprecated/rust/).
 
-On `codex/codex-native`, the current app still depends on the Rust runtime for:
-- task and project persistence
-- Codex patch install/sync/uninstall
-- native panel transport and localhost APIs
-- controller and worker orchestration state
+The live Codex TaskNerve path on `codex/codex-native` is the native JS/TS workspace plus the patched Codex desktop bundle.
 
-Moving `src/main.rs` here before the native runtime reaches parity would break the working product.
-
-Use these documents before archiving any Rust runtime code:
+Historical cutover context is documented in:
 - `/Users/adimus/Documents/taskNerve/docs/codex_native_cutover_audit.md`
 - `/Users/adimus/Documents/taskNerve/docs/codex_native_integration_plan.md`

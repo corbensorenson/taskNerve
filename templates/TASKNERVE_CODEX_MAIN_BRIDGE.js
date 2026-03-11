@@ -20,6 +20,7 @@
   const fs = require("node:fs/promises");
   const path = require("node:path");
   const { promisify } = require("node:util");
+  const electron = require("electron");
   const execFileAsync = promisify(execFile);
 
   let tasknerveCpuSample = null;
@@ -31,6 +32,7 @@
     thermal_pressure: null,
   };
   let tasknerveResourceCachePromise = null;
+  let tasknerveDockMenuInitialized = false;
 
   const TASKNERVE_STANDARD_PROJECT_DOCUMENTS = [
     {
@@ -51,6 +53,58 @@
       label: "contributing ideas.md",
       title: "Contributing Ideas",
     },
+  ];
+  const TASKNERVE_WORKER_NAME_PREFIXES = [
+    "Amber",
+    "Arc",
+    "Bramble",
+    "Cinder",
+    "Cloud",
+    "Copper",
+    "Drift",
+    "Ember",
+    "Fable",
+    "Fern",
+    "Glimmer",
+    "Harbor",
+    "Juniper",
+    "Kite",
+    "Lumen",
+    "Moss",
+    "Pebble",
+    "Quill",
+    "Ripple",
+    "Sable",
+    "Thistle",
+    "Velvet",
+    "Willow",
+    "Zephyr",
+  ];
+  const TASKNERVE_WORKER_NAME_SUFFIXES = [
+    "Badger",
+    "Comet",
+    "Falcon",
+    "Fox",
+    "Gadget",
+    "Heron",
+    "Lantern",
+    "Lark",
+    "Maple",
+    "Meteor",
+    "Otter",
+    "Pine",
+    "Raven",
+    "Rocket",
+    "Sparrow",
+    "Sprout",
+    "Starling",
+    "Tinker",
+    "Vortex",
+    "Wanderer",
+    "Whisker",
+    "Wisp",
+    "Yarrow",
+    "Yonder",
   ];
 
   function tasknerveLog(level, message, extra) {
@@ -91,6 +145,75 @@
     }
     const fallback = path.basename(String(projectRoot || "").trim());
     return fallback || "project";
+  }
+
+  function tasknerveHashText(value) {
+    let hash = 2166136261;
+    const input = String(value || "");
+    for (let index = 0; index < input.length; index += 1) {
+      hash ^= input.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0;
+  }
+
+  function tasknerveLooksGenericWorkerLabel(label) {
+    const normalized = String(label || "").trim().toLowerCase();
+    if (!normalized) {
+      return true;
+    }
+    if (
+      normalized === "thread" ||
+      normalized === "untitled thread" ||
+      normalized === "untitled" ||
+      normalized === "new thread"
+    ) {
+      return true;
+    }
+    return /^(agent|worker|thread)\b/.test(normalized);
+  }
+
+  function tasknerveUsedWorkerLabels(state, excludeThreadId = null) {
+    return new Set(
+      (Array.isArray(state?.bindings) ? state.bindings : [])
+        .filter((binding) => !tasknerveIsControllerAgent(binding?.agent_id))
+        .filter((binding) => !excludeThreadId || binding?.thread_id !== excludeThreadId)
+        .map((binding) => tasknerveOptionalText(binding?.label))
+        .filter(Boolean)
+        .map((label) => label.toLowerCase()),
+    );
+  }
+
+  function tasknerveGenerateWorkerLabel(state, projectName, threadId) {
+    const seedBase = `${tasknerveProjectDisplayName("", projectName)}:${threadId || crypto.randomUUID()}`;
+    const prefixStart = tasknerveHashText(`${seedBase}:prefix`) % TASKNERVE_WORKER_NAME_PREFIXES.length;
+    const suffixStart = tasknerveHashText(`${seedBase}:suffix`) % TASKNERVE_WORKER_NAME_SUFFIXES.length;
+    const used = tasknerveUsedWorkerLabels(state, threadId);
+    let fallback = null;
+    for (let attempt = 0; attempt < TASKNERVE_WORKER_NAME_PREFIXES.length * TASKNERVE_WORKER_NAME_SUFFIXES.length; attempt += 1) {
+      const prefix = TASKNERVE_WORKER_NAME_PREFIXES[(prefixStart + attempt) % TASKNERVE_WORKER_NAME_PREFIXES.length];
+      const suffix = TASKNERVE_WORKER_NAME_SUFFIXES[(suffixStart + (attempt * 5)) % TASKNERVE_WORKER_NAME_SUFFIXES.length];
+      const candidate = `${prefix} ${suffix}`;
+      if (!fallback) {
+        fallback = candidate;
+      }
+      if (!used.has(candidate.toLowerCase())) {
+        return candidate;
+      }
+    }
+    let suffixNumber = 2;
+    while (used.has(`${fallback} ${suffixNumber}`.toLowerCase())) {
+      suffixNumber += 1;
+    }
+    return `${fallback} ${suffixNumber}`;
+  }
+
+  function tasknerveResolvedWorkerLabel(state, projectName, threadId, preferredLabel) {
+    const normalized = tasknerveOptionalText(preferredLabel);
+    if (normalized && !tasknerveLooksGenericWorkerLabel(normalized)) {
+      return normalized;
+    }
+    return tasknerveGenerateWorkerLabel(state, projectName, threadId);
   }
 
   function tasknerveProjectDocumentDescriptor(docKey) {
@@ -773,6 +896,525 @@ Use this file to collect inspiration, reference links, patterns worth borrowing,
     return TASKNERVE_ENSURE_WINDOW(TASKNERVE_LOCAL_HOST_CONFIG.id);
   }
 
+  function tasknerveFocusedWindowRef() {
+    try {
+      return electron?.BrowserWindow?.getFocusedWindow?.() || null;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function tasknerveNowUtc() {
+    return new Date().toISOString();
+  }
+
+  function tasknerveTimelineRoot(projectRoot) {
+    return path.join(path.resolve(tasknerveRequiredText(projectRoot, "project_root")), ".tasknerve");
+  }
+
+  function tasknerveTasksStatePath(projectRoot) {
+    return path.join(tasknerveTimelineRoot(projectRoot), "tasks.json");
+  }
+
+  function tasknerveBranchesStatePath(projectRoot) {
+    return path.join(tasknerveTimelineRoot(projectRoot), "branches.json");
+  }
+
+  function tasknerveConfigStatePath(projectRoot) {
+    return path.join(tasknerveTimelineRoot(projectRoot), "config.json");
+  }
+
+  function tasknerveCodexThreadStatePath(projectRoot) {
+    return path.join(tasknerveTimelineRoot(projectRoot), "codex", "threads.json");
+  }
+
+  function tasknerveProjectsRegistryPath() {
+    return path.join(os.homedir(), ".tasknerve", "projects.json");
+  }
+
+  function tasknerveDefaultProjectRegistry() {
+    return {
+      schema_version: "tasknerve.projects.v1",
+      updated_at_utc: tasknerveNowUtc(),
+      default_project: null,
+      projects: [],
+    };
+  }
+
+  function tasknerveDefaultTaskState() {
+    return {
+      schema_version: "tasknerve.tasks.v1",
+      updated_at_utc: tasknerveNowUtc(),
+      tasks: [],
+    };
+  }
+
+  function tasknerveDefaultBranchesState() {
+    return {
+      schema_version: "timeline.branches.v1",
+      active_branch: null,
+      branches: {},
+    };
+  }
+
+  function tasknerveDefaultCodexThreadState() {
+    return {
+      schema_version: "tasknerve.codex.thread_state.v1",
+      updated_at_utc: tasknerveNowUtc(),
+      bindings: [],
+      queued_prompts: [],
+    };
+  }
+
+  async function tasknerveLoadProjectRegistry() {
+    const current = await tasknerveReadJsonFile(tasknerveProjectsRegistryPath());
+    const registry =
+      current && typeof current === "object" ? { ...tasknerveDefaultProjectRegistry(), ...current } : tasknerveDefaultProjectRegistry();
+    registry.projects = Array.isArray(registry.projects) ? registry.projects.slice() : [];
+    registry.projects.sort((left, right) =>
+      String(left?.name || "").localeCompare(String(right?.name || "")),
+    );
+    return registry;
+  }
+
+  async function tasknerveWriteProjectRegistry(registry) {
+    const normalized = {
+      ...tasknerveDefaultProjectRegistry(),
+      ...(registry && typeof registry === "object" ? registry : {}),
+      updated_at_utc: tasknerveNowUtc(),
+    };
+    normalized.projects = Array.isArray(normalized.projects) ? normalized.projects.slice() : [];
+    normalized.projects.sort((left, right) =>
+      String(left?.name || "").localeCompare(String(right?.name || "")),
+    );
+    await tasknerveWritePrettyJson(tasknerveProjectsRegistryPath(), normalized);
+    return normalized;
+  }
+
+  function tasknerveUniqueProjectName(registry, desiredName, projectRoot) {
+    const normalizedDesired = tasknerveRequiredText(desiredName, "project_name");
+    const normalizedRoot = path.resolve(tasknerveRequiredText(projectRoot, "project_root"));
+    const existing = (registry?.projects || []).find(
+      (project) => path.resolve(String(project?.repo_root || "")) === normalizedRoot,
+    );
+    if (existing?.name) {
+      return existing.name;
+    }
+    const taken = new Set(
+      (registry?.projects || [])
+        .map((project) => tasknerveOptionalText(project?.name))
+        .filter(Boolean)
+        .map((name) => name.toLowerCase()),
+    );
+    if (!taken.has(normalizedDesired.toLowerCase())) {
+      return normalizedDesired;
+    }
+    let index = 2;
+    while (taken.has(`${normalizedDesired} ${index}`.toLowerCase())) {
+      index += 1;
+    }
+    return `${normalizedDesired} ${index}`;
+  }
+
+  async function tasknerveLoadTaskState(projectRoot) {
+    const current = await tasknerveReadJsonFile(tasknerveTasksStatePath(projectRoot));
+    const normalized =
+      current && typeof current === "object" ? { ...tasknerveDefaultTaskState(), ...current } : tasknerveDefaultTaskState();
+    normalized.tasks = Array.isArray(normalized.tasks) ? normalized.tasks.slice() : [];
+    return normalized;
+  }
+
+  async function tasknerveWriteTaskState(projectRoot, state) {
+    const normalized = {
+      ...tasknerveDefaultTaskState(),
+      ...(state && typeof state === "object" ? state : {}),
+      updated_at_utc: tasknerveNowUtc(),
+    };
+    normalized.tasks = Array.isArray(normalized.tasks) ? normalized.tasks.slice() : [];
+    await tasknerveWritePrettyJson(tasknerveTasksStatePath(projectRoot), normalized);
+    return normalized;
+  }
+
+  async function tasknerveLoadBranchesState(projectRoot) {
+    const current = await tasknerveReadJsonFile(tasknerveBranchesStatePath(projectRoot));
+    const normalized =
+      current && typeof current === "object"
+        ? { ...tasknerveDefaultBranchesState(), ...current }
+        : tasknerveDefaultBranchesState();
+    if (!normalized.branches || typeof normalized.branches !== "object") {
+      normalized.branches = {};
+    }
+    return normalized;
+  }
+
+  async function tasknerveWriteBranchesState(projectRoot, state) {
+    const normalized = {
+      ...tasknerveDefaultBranchesState(),
+      ...(state && typeof state === "object" ? state : {}),
+    };
+    if (!normalized.branches || typeof normalized.branches !== "object") {
+      normalized.branches = {};
+    }
+    await tasknerveWritePrettyJson(tasknerveBranchesStatePath(projectRoot), normalized);
+    return normalized;
+  }
+
+  async function tasknerveLoadCodexThreadState(projectRoot) {
+    const current = await tasknerveReadJsonFile(tasknerveCodexThreadStatePath(projectRoot));
+    const normalized =
+      current && typeof current === "object"
+        ? { ...tasknerveDefaultCodexThreadState(), ...current }
+        : tasknerveDefaultCodexThreadState();
+    normalized.bindings = Array.isArray(normalized.bindings) ? normalized.bindings.slice() : [];
+    normalized.queued_prompts = Array.isArray(normalized.queued_prompts)
+      ? normalized.queued_prompts.slice()
+      : [];
+    return normalized;
+  }
+
+  async function tasknerveWriteCodexThreadState(projectRoot, state) {
+    const normalized = {
+      ...tasknerveDefaultCodexThreadState(),
+      ...(state && typeof state === "object" ? state : {}),
+      updated_at_utc: tasknerveNowUtc(),
+    };
+    normalized.bindings = Array.isArray(normalized.bindings) ? normalized.bindings.slice() : [];
+    normalized.queued_prompts = Array.isArray(normalized.queued_prompts)
+      ? normalized.queued_prompts.slice()
+      : [];
+    await tasknerveWritePrettyJson(tasknerveCodexThreadStatePath(projectRoot), normalized);
+    return normalized;
+  }
+
+  function tasknerveDefaultProjectCodexSettings() {
+    return {
+      schema_version: "tasknerve.project_codex_settings.v1",
+      updated_at_utc: tasknerveNowUtc(),
+      heartbeat_message_core:
+        "Please continue working on {project_name} project utilizing the taskNerve system. I believe in you, do your absolute best!",
+      low_queue_controller_prompt:
+        "The TaskNerve queue for {project_name} is running low. Review the current repository state, `project_goals.md`, `project_manifest.md`, and the existing TaskNerve backlog. Add the next best development and maintenance tasks, consolidate stale work, and keep the active workers fed with concrete, high-leverage tasks.",
+      low_queue_controller_enabled: true,
+      worker_single_message_mode: true,
+      worker_model_routing_enabled: false,
+      worker_default_model: null,
+      controller_default_model: null,
+      low_intelligence_model: null,
+      medium_intelligence_model: null,
+      high_intelligence_model: null,
+      max_intelligence_model: null,
+      git_origin_url: null,
+      git_sync_policy: "every_task",
+      git_sync_every_n_tasks: 1,
+    };
+  }
+
+  async function tasknerveLoadProjectCodexSettings(projectRoot) {
+    const current = await tasknerveReadJsonFile(
+      path.join(tasknerveTimelineRoot(projectRoot), "codex", "project_settings.json"),
+    );
+    const normalized =
+      current && typeof current === "object"
+        ? { ...tasknerveDefaultProjectCodexSettings(), ...current }
+        : tasknerveDefaultProjectCodexSettings();
+    normalized.updated_at_utc = normalized.updated_at_utc || tasknerveNowUtc();
+    return normalized;
+  }
+
+  async function tasknerveWriteProjectCodexSettings(projectRoot, partialSettings) {
+    const current = await tasknerveLoadProjectCodexSettings(projectRoot);
+    const normalized = {
+      ...current,
+      ...(partialSettings && typeof partialSettings === "object" ? partialSettings : {}),
+      updated_at_utc: tasknerveNowUtc(),
+      schema_version: "tasknerve.project_codex_settings.v1",
+    };
+    await tasknerveWritePrettyJson(
+      path.join(tasknerveTimelineRoot(projectRoot), "codex", "project_settings.json"),
+      normalized,
+    );
+    return normalized;
+  }
+
+  function tasknerveNormalizeProjectEntry(project) {
+    return {
+      key: String(project?.name || ""),
+      name: String(project?.name || ""),
+      repo_root: String(project?.repo_root || ""),
+      is_default: false,
+      is_current_repo: false,
+      is_most_recent: false,
+      last_activity_at_utc: project?.last_activity_at_utc || null,
+      last_opened_at_utc: project?.last_opened_at_utc || null,
+    };
+  }
+
+  async function tasknerveResolveProjectSelection(projectSelector) {
+    const registry = await tasknerveLoadProjectRegistry();
+    const projects = registry.projects.map(tasknerveNormalizeProjectEntry);
+    const token = tasknerveOptionalText(projectSelector);
+    let selected =
+      (token &&
+        projects.find((project) => project.key === token || project.name === token || project.repo_root === token)) ||
+      null;
+    if (!selected && registry.default_project) {
+      selected = projects.find((project) => project.key === registry.default_project) || null;
+    }
+    if (!selected) {
+      selected = projects[0] || null;
+    }
+    if (!selected) {
+      throw new Error("TaskNerve project registry is empty");
+    }
+    selected.is_default = registry.default_project === selected.key;
+    return {
+      registry,
+      projects,
+      selected,
+      repoRoot: selected.repo_root,
+    };
+  }
+
+  function tasknerveDetectGitBranch(projectRoot) {
+    const headPath = path.join(path.resolve(projectRoot), ".git", "HEAD");
+    try {
+      const raw = require("node:fs").readFileSync(headPath, "utf8").trim();
+      const match = raw.match(/^ref:\s+refs\/heads\/(.+)$/);
+      return match ? match[1] : raw || null;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function tasknerveControllerAgentId() {
+    return "agent.controller";
+  }
+
+  function tasknerveIsControllerAgent(agentId) {
+    return String(agentId || "") === tasknerveControllerAgentId();
+  }
+
+  function tasknerveThreadIdShort(threadId) {
+    const normalized = String(threadId || "").trim();
+    return normalized ? normalized.slice(0, 8) : "";
+  }
+
+  function tasknerveExtractTaggedValue(task, prefix) {
+    const tag = (Array.isArray(task?.tags) ? task.tags : []).find((entry) =>
+      String(entry || "").startsWith(`${prefix}:`),
+    );
+    if (!tag) {
+      return null;
+    }
+    const value = String(tag).slice(prefix.length + 1).trim();
+    return value || null;
+  }
+
+  function tasknerveTaskBlockedBy(task, tasksById) {
+    const blocked = [];
+    const dependsOn = Array.isArray(task?.depends_on) ? task.depends_on : [];
+    dependsOn.forEach((taskId) => {
+      const dependency = tasksById.get(taskId);
+      if (!dependency || dependency.status !== "done") {
+        blocked.push(`depends_on:${taskId}`);
+      }
+    });
+    if (task?.awaiting_confirmation) {
+      blocked.push("confirmation");
+    }
+    if (task?.blocked_reason) {
+      blocked.push(`blocked:${task.blocked_reason}`);
+    }
+    return blocked;
+  }
+
+  function tasknerveTaskReady(task, tasksById) {
+    return String(task?.status || "open") === "open" && tasknerveTaskBlockedBy(task, tasksById).length === 0;
+  }
+
+  function tasknerveSortTaskPayloads(tasks) {
+    const statusRank = {
+      open: 0,
+      claimed: 1,
+      blocked: 2,
+      done: 3,
+    };
+    return tasks.slice().sort((left, right) => {
+      const leftRank = statusRank[left.status] ?? 9;
+      const rightRank = statusRank[right.status] ?? 9;
+      if (leftRank !== rightRank) {
+        return leftRank - rightRank;
+      }
+      const priorityDelta = Number(right.priority || 0) - Number(left.priority || 0);
+      if (priorityDelta !== 0) {
+        return priorityDelta;
+      }
+      return String(left.title || "").localeCompare(String(right.title || ""));
+    });
+  }
+
+  function tasknerveTaskPayload(task, tasksById) {
+    const blockedBy = tasknerveTaskBlockedBy(task, tasksById);
+    return {
+      ...task,
+      suggested_intelligence:
+        task?.suggested_intelligence || tasknerveExtractTaggedValue(task, "intelligence"),
+      suggested_model: task?.suggested_model || tasknerveExtractTaggedValue(task, "model"),
+      blocked_by: blockedBy,
+      ready: tasknerveTaskReady(task, tasksById),
+    };
+  }
+
+  function tasknerveNextWorkerAgentId(state, threadId) {
+    const base = `agent.codex.${tasknerveThreadIdShort(threadId).toLowerCase() || crypto.randomUUID().slice(0, 8)}`;
+    if (!state.bindings.some((binding) => binding.agent_id === base)) {
+      return base;
+    }
+    let index = 2;
+    while (state.bindings.some((binding) => binding.agent_id === `${base}.${index}`)) {
+      index += 1;
+    }
+    return `${base}.${index}`;
+  }
+
+  function tasknerveBindingDisplayLabel(binding) {
+    return (
+      tasknerveOptionalText(binding?.label) ||
+      tasknerveOptionalText(binding?.thread_name) ||
+      tasknerveThreadIdShort(binding?.thread_id) ||
+      tasknerveOptionalText(binding?.thread_id) ||
+      "Thread"
+    );
+  }
+
+  function tasknerveCodexSnapshotPayload(state) {
+    const bindings = (Array.isArray(state?.bindings) ? state.bindings : []).map((binding) => ({
+      ...binding,
+      role: tasknerveIsControllerAgent(binding?.agent_id) ? "controller" : "worker",
+      thread_id_short: tasknerveThreadIdShort(binding?.thread_id),
+      display_label: tasknerveBindingDisplayLabel(binding),
+      active: true,
+      queued_pending_count: (state?.queued_prompts || []).filter(
+        (prompt) => prompt?.agent_id === binding?.agent_id && prompt?.status === "pending",
+      ).length,
+      queued_running_count: (state?.queued_prompts || []).filter(
+        (prompt) => prompt?.agent_id === binding?.agent_id && prompt?.status === "running",
+      ).length,
+      discovered_thread: null,
+      worker: null,
+    }));
+    const discoveredThreads = bindings
+      .map((binding) => ({
+        thread_id: binding.thread_id,
+        thread_id_short: binding.thread_id_short,
+        display_label: binding.display_label,
+        thread_name: binding.label || binding.display_label,
+        updated_at_utc: binding.updated_at_utc || binding.created_at_utc || null,
+        updated_at_unix_seconds: binding.updated_at_utc
+          ? Math.floor(new Date(binding.updated_at_utc).getTime() / 1000)
+          : 0,
+      }))
+      .sort((left, right) => Number(right.updated_at_unix_seconds || 0) - Number(left.updated_at_unix_seconds || 0));
+    const controllerBinding =
+      bindings.find((binding) => binding.agent_id === tasknerveControllerAgentId()) || null;
+    const activeWorkerBindings = bindings.filter((binding) => binding.role === "worker");
+    const queuedPrompts = (Array.isArray(state?.queued_prompts) ? state.queued_prompts : [])
+      .slice(-40)
+      .map((prompt) => ({
+        ...prompt,
+        thread_id_short: tasknerveThreadIdShort(prompt?.thread_id),
+      }));
+    return {
+      schema_version: "tasknerve.codex.thread_snapshot.v1",
+      generated_at_utc: tasknerveNowUtc(),
+      controller_agent_id: tasknerveControllerAgentId(),
+      controller_binding: controllerBinding,
+      active_thread_count: discoveredThreads.length,
+      active_worker_count: activeWorkerBindings.length,
+      discovered_threads: discoveredThreads,
+      bindings,
+      active_worker_bindings: activeWorkerBindings,
+      inactive_bindings: [],
+      queued_prompts: queuedPrompts,
+    };
+  }
+
+  async function tasknerveSnapshotPayload(projectSelector) {
+    const { projects, selected, repoRoot } = await tasknerveResolveProjectSelection(projectSelector);
+    const [taskState, branchState, codexState, projectCodexSettings] = await Promise.all([
+      tasknerveLoadTaskState(repoRoot),
+      tasknerveLoadBranchesState(repoRoot),
+      tasknerveLoadCodexThreadState(repoRoot),
+      tasknerveLoadProjectCodexSettings(repoRoot),
+    ]);
+    await Promise.all(
+      TASKNERVE_STANDARD_PROJECT_DOCUMENTS.map((doc) =>
+        tasknerveEnsureProjectDocument(repoRoot, selected.name, doc.key),
+      ),
+    );
+    const tasksById = new Map();
+    const tasks = Array.isArray(taskState.tasks) ? taskState.tasks.slice() : [];
+    tasks.forEach((task) => {
+      tasksById.set(task.task_id, task);
+    });
+    const renderedTasks = tasknerveSortTaskPayloads(
+      tasks.map((task) => tasknerveTaskPayload(task, tasksById)),
+    );
+    return {
+      schema_version: "tasknerve.task.gui.snapshot.v1",
+      generated_at_utc: tasknerveNowUtc(),
+      selected_project: {
+        key: selected.key,
+        name: selected.name,
+        repo_root: selected.repo_root,
+      },
+      projects,
+      timeline_initialized: Boolean(branchState.active_branch),
+      timeline: {
+        timeline_initialized: Boolean(branchState.active_branch),
+        active_branch: branchState.active_branch || null,
+        branches: Object.keys(branchState.branches || {}).sort(),
+        git_branch_hint: tasknerveDetectGitBranch(repoRoot),
+      },
+      policy: {
+        pending_confirmation_count: renderedTasks.filter((task) => task.awaiting_confirmation).length,
+      },
+      project_codex_settings: projectCodexSettings,
+      count: renderedTasks.length,
+      tasks: renderedTasks,
+      codex: tasknerveCodexSnapshotPayload(codexState),
+    };
+  }
+
+  async function tasknerveProjectForThread(threadId) {
+    const registry = await tasknerveLoadProjectRegistry();
+    for (const project of registry.projects) {
+      const state = await tasknerveLoadCodexThreadState(project.repo_root).catch(() => null);
+      if ((state?.bindings || []).some((binding) => binding?.thread_id === threadId)) {
+        return {
+          ok: true,
+          selected_project: {
+            key: project.name,
+            name: project.name,
+            repo_root: project.repo_root,
+          },
+        };
+      }
+    }
+    return {
+      ok: true,
+      selected_project: null,
+    };
+  }
+
+  async function tasknerveWriteTaskMutation(projectSelector, mutate) {
+    const selection = await tasknerveResolveProjectSelection(projectSelector);
+    const taskState = await tasknerveLoadTaskState(selection.repoRoot);
+    const result = await mutate(taskState, selection);
+    await tasknerveWriteTaskState(selection.repoRoot, taskState);
+    return result;
+  }
+
   function tasknerveThreadIdFromRoutePath(routePath) {
     const match = String(routePath || "").match(/^\/local\/([^/?#]+)/);
     if (!match) {
@@ -783,6 +1425,98 @@ Use this file to collect inspiration, reference links, patterns worth borrowing,
     } catch (_error) {
       return match[1];
     }
+  }
+
+  function tasknerveWindowRouteSnapshot(windowRef) {
+    if (
+      !windowRef ||
+      typeof windowRef.isDestroyed === "function" && windowRef.isDestroyed() ||
+      !windowRef.webContents ||
+      typeof windowRef.webContents.getURL !== "function"
+    ) {
+      return null;
+    }
+    try {
+      const windowUrl = windowRef.webContents.getURL() || "";
+      if (!windowUrl) {
+        return null;
+      }
+      const parsedUrl = new URL(windowUrl);
+      const routePath = `${parsedUrl.pathname}${parsedUrl.search || ""}`;
+      return {
+        window_url: windowUrl,
+        route_path: routePath,
+        thread_id: tasknerveThreadIdFromRoutePath(parsedUrl.pathname),
+        project_key: tasknerveOptionalText(parsedUrl.searchParams.get("tasknerveProject")),
+      };
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  async function tasknerveProjectWindowBodyFromWindow(windowRef) {
+    const snapshot = tasknerveWindowRouteSnapshot(windowRef);
+    if (!snapshot) {
+      return null;
+    }
+    let projectKey = snapshot.project_key;
+    if (!projectKey && snapshot.thread_id) {
+      try {
+        const selection = await tasknerveProjectForThread(snapshot.thread_id);
+        projectKey = selection?.selected_project?.key || null;
+      } catch (_error) {
+        projectKey = null;
+      }
+    }
+    const body = {};
+    if (snapshot.route_path) {
+      body.route_path = snapshot.route_path;
+    }
+    if (snapshot.thread_id) {
+      body.thread_id = snapshot.thread_id;
+    }
+    if (projectKey) {
+      body.project_key = projectKey;
+      body.project_name = projectKey;
+    }
+    return Object.keys(body).length > 0 ? body : null;
+  }
+
+  async function tasknerveDefaultProjectWindowBody() {
+    const candidates = [];
+    const focusedWindow = tasknerveFocusedWindowRef();
+    if (focusedWindow) {
+      candidates.push(focusedWindow);
+    }
+    const currentWindow = await Promise.resolve(tasknerveCurrentWindowRef()).catch(() => null);
+    if (currentWindow && !candidates.includes(currentWindow)) {
+      candidates.push(currentWindow);
+    }
+    for (const windowRef of candidates) {
+      const body = await tasknerveProjectWindowBodyFromWindow(windowRef).catch(() => null);
+      if (body) {
+        return body;
+      }
+    }
+    const registry = await tasknerveLoadProjectRegistry().catch(() => null);
+    const projects = Array.isArray(registry?.projects) ? registry.projects.map(tasknerveNormalizeProjectEntry) : [];
+    let selected = null;
+    if (registry?.default_project) {
+      selected = projects.find((project) => project.key === registry.default_project) || null;
+    }
+    if (!selected) {
+      selected = projects[0] || null;
+    }
+    if (!selected) {
+      return {
+        route_path: "/",
+      };
+    }
+    return {
+      route_path: `/?tasknerveProject=${encodeURIComponent(selected.key)}`,
+      project_key: selected.key,
+      project_name: selected.name,
+    };
   }
 
   async function tasknerveHandleHealth() {
@@ -1005,6 +1739,130 @@ Use this file to collect inspiration, reference links, patterns worth borrowing,
         project_name: projectName,
         updated_at: stat?.mtime?.toISOString?.() ?? null,
         content,
+      },
+    };
+  }
+
+  async function tasknerveHandleOpenProjectInVsCode(body) {
+    const projectRoot = path.resolve(
+      tasknerveRequiredText(body.project_root ?? body.projectRoot, "project_root"),
+    );
+    const projectName = tasknerveProjectDisplayName(
+      projectRoot,
+      body.project_name ?? body.projectName,
+    );
+    const stat = await fs.stat(projectRoot);
+    if (!stat.isDirectory()) {
+      throw new Error("project_root must be a directory");
+    }
+    const attempts =
+      process.platform === "darwin"
+        ? [
+            ["open", ["-b", "com.microsoft.VSCode", projectRoot]],
+            ["open", ["-a", "Visual Studio Code", projectRoot]],
+            ["open", ["-a", "Code", projectRoot]],
+            ["code", [projectRoot]],
+          ]
+        : [
+            ["code", [projectRoot]],
+            ["code-insiders", [projectRoot]],
+            ["codium", [projectRoot]],
+          ];
+    let lastError = null;
+    for (const [command, args] of attempts) {
+      try {
+        await execFileAsync(command, args, { timeout: 12000 });
+        return {
+          ok: true,
+          app: "vscode",
+          project_root: projectRoot,
+          project_name: projectName,
+        };
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError || new Error("Unable to launch Visual Studio Code");
+  }
+
+  async function tasknerveHandleRegisterProject(body) {
+    const importExisting = Boolean(body.import_existing ?? body.importExisting);
+    const requestedRoot = path.resolve(
+      tasknerveRequiredText(body.project_root ?? body.projectRoot, "project_root"),
+    );
+    const requestedName = tasknerveOptionalText(body.project_name ?? body.projectName) || path.basename(requestedRoot);
+    if (importExisting) {
+      const stat = await fs.stat(requestedRoot);
+      if (!stat.isDirectory()) {
+        throw new Error("project_root must be an existing directory");
+      }
+    } else {
+      await fs.mkdir(requestedRoot, { recursive: true });
+    }
+    const registry = await tasknerveLoadProjectRegistry();
+    const projectName = tasknerveUniqueProjectName(registry, requestedName, requestedRoot);
+    const now = tasknerveNowUtc();
+    const existingIndex = registry.projects.findIndex(
+      (project) => path.resolve(String(project?.repo_root || "")) === requestedRoot,
+    );
+    const entry = {
+      name: projectName,
+      repo_root: requestedRoot,
+      last_activity_at_utc: now,
+      last_opened_at_utc: now,
+    };
+    if (existingIndex >= 0) {
+      registry.projects.splice(existingIndex, 1, {
+        ...registry.projects[existingIndex],
+        ...entry,
+      });
+    } else {
+      registry.projects.push(entry);
+    }
+    registry.default_project = projectName;
+    await tasknerveWriteProjectRegistry(registry);
+    const branchesState = await tasknerveLoadBranchesState(requestedRoot);
+    if (!branchesState.active_branch) {
+      branchesState.active_branch = "trunk";
+    }
+    if (!branchesState.branches || typeof branchesState.branches !== "object") {
+      branchesState.branches = {};
+    }
+    if (!branchesState.branches[branchesState.active_branch]) {
+      branchesState.branches[branchesState.active_branch] = {
+        name: branchesState.active_branch,
+        head_event_id: null,
+        created_at_utc: now,
+        from_branch: null,
+        from_event_id: null,
+      };
+    }
+    await Promise.all([
+      tasknerveWriteBranchesState(requestedRoot, branchesState),
+      tasknerveLoadTaskState(requestedRoot).then((state) => tasknerveWriteTaskState(requestedRoot, state)),
+      tasknerveLoadCodexThreadState(requestedRoot).then((state) => tasknerveWriteCodexThreadState(requestedRoot, state)),
+      tasknerveLoadProjectCodexSettings(requestedRoot).then((state) => tasknerveWriteProjectCodexSettings(requestedRoot, state)),
+      tasknerveReadNativeProjectSettings(requestedRoot).then((payload) =>
+        tasknerveWriteNativeProjectSettings(requestedRoot, payload.settings),
+      ),
+      Promise.all(
+        TASKNERVE_STANDARD_PROJECT_DOCUMENTS.map((doc) =>
+          tasknerveEnsureProjectDocument(requestedRoot, projectName, doc.key),
+        ),
+      ),
+    ]);
+    return {
+      ok: true,
+      action: importExisting ? "project_import" : "project_create",
+      selected_project: {
+        key: projectName,
+        name: projectName,
+        repo_root: requestedRoot,
+      },
+      project: {
+        key: projectName,
+        name: projectName,
+        repo_root: requestedRoot,
       },
     };
   }
@@ -1334,7 +2192,6 @@ Use this file to collect inspiration, reference links, patterns worth borrowing,
       tasknerveOptionalText(body.project_name ?? body.projectName) ||
       tasknerveOptionalText(body.project_key ?? body.projectKey) ||
       "Project";
-    const electron = require("electron");
     const title =
       tasknerveOptionalText(body.title) ||
       `${projectName} · ${electron?.app?.getName?.() || "Codex TaskNerve"}`;
@@ -1361,6 +2218,611 @@ Use this file to collect inspiration, reference links, patterns worth borrowing,
       project_key: tasknerveOptionalText(body.project_key ?? body.projectKey),
       thread_id: tasknerveOptionalText(body.thread_id ?? body.threadId),
       title,
+    };
+  }
+
+  async function tasknerveHandleDockNewWindow() {
+    const body = await tasknerveDefaultProjectWindowBody();
+    return tasknerveHandleOpenProjectWindow(body || {});
+  }
+
+  function tasknerveInstallDockMenu() {
+    if (tasknerveDockMenuInitialized || process.platform !== "darwin") {
+      return;
+    }
+    const app = electron?.app;
+    const Menu = electron?.Menu;
+    if (
+      !app ||
+      !app.dock ||
+      typeof app.dock.setMenu !== "function" ||
+      !Menu ||
+      typeof Menu.buildFromTemplate !== "function"
+    ) {
+      return;
+    }
+    const menu = Menu.buildFromTemplate([
+      {
+        label: "New Window",
+        click: () => {
+          void tasknerveHandleDockNewWindow().catch((error) => {
+            tasknerveLog("error", "Failed to open TaskNerve window from dock menu", error);
+          });
+        },
+      },
+    ]);
+    app.dock.setMenu(menu);
+    tasknerveDockMenuInitialized = true;
+  }
+
+  if (process.platform === "darwin" && electron?.app?.whenReady) {
+    electron.app
+      .whenReady()
+      .then(() => {
+        tasknerveInstallDockMenu();
+      })
+      .catch((error) => {
+        tasknerveLog("error", "Failed to initialize TaskNerve dock menu", error);
+      });
+  }
+
+  async function tasknerveHandleTasksSnapshot(url) {
+    return tasknerveSnapshotPayload(tasknerveQueryText(url, "project"));
+  }
+
+  async function tasknerveHandleProjectForThread(url) {
+    const threadId = tasknerveRequiredText(tasknerveQueryText(url, "thread_id"), "thread_id");
+    return tasknerveProjectForThread(threadId);
+  }
+
+  async function tasknerveHandleAddTask(url, body) {
+    const projectSelector = tasknerveQueryText(url, "project");
+    const title = tasknerveRequiredText(body.title, "title");
+    return tasknerveWriteTaskMutation(projectSelector, async (taskState, selection) => {
+      const now = tasknerveNowUtc();
+      const task = {
+        task_id: `task_${crypto.randomUUID().replace(/-/g, "")}`,
+        title,
+        detail: tasknerveOptionalText(body.detail) || null,
+        priority: Number.isFinite(Number(body.priority)) ? Math.trunc(Number(body.priority)) : 0,
+        tags: Array.isArray(body.tags) ? body.tags.filter(Boolean) : [],
+        depends_on: Array.isArray(body.depends_on) ? body.depends_on.filter(Boolean) : [],
+        status: "open",
+        created_at_utc: now,
+        updated_at_utc: now,
+        created_by_agent_id: tasknerveOptionalText(body.agent) || "tasknerve.native",
+        claimed_by_agent_id: null,
+        claim_started_at_utc: null,
+        claim_expires_at_utc: null,
+        completed_at_utc: null,
+        completed_by_agent_id: null,
+        completed_summary: null,
+        completion_notes: [],
+        completion_artifacts: [],
+        completion_commands: [],
+        source_key: null,
+        source_plan: null,
+        awaiting_confirmation: false,
+        approved_at_utc: null,
+        approved_by_agent_id: null,
+        blocked_at_utc: null,
+        blocked_by_agent_id: null,
+        blocked_reason: null,
+        canceled_at_utc: null,
+        canceled_by_agent_id: null,
+        canceled_reason: null,
+        progress_entries: [],
+        artifact_entries: [],
+        suggested_intelligence: tasknerveOptionalText(body.suggested_intelligence),
+        suggested_model: tasknerveOptionalText(body.suggested_model),
+      };
+      taskState.tasks.push(task);
+      return {
+        ok: true,
+        action: "add",
+        selected_project: {
+          key: selection.selected.key,
+          name: selection.selected.name,
+          repo_root: selection.selected.repo_root,
+        },
+        task: tasknerveTaskPayload(
+          task,
+          new Map(taskState.tasks.map((entry) => [entry.task_id, entry])),
+        ),
+      };
+    });
+  }
+
+  async function tasknerveHandleEditTask(url, body) {
+    const projectSelector = tasknerveQueryText(url, "project");
+    const taskId = tasknerveRequiredText(body.task_id, "task_id");
+    return tasknerveWriteTaskMutation(projectSelector, async (taskState, selection) => {
+      const task = taskState.tasks.find((entry) => entry.task_id === taskId);
+      if (!task) {
+        throw new Error(`Unknown task: ${taskId}`);
+      }
+      if (body.title !== undefined) {
+        task.title = tasknerveRequiredText(body.title, "title");
+      }
+      if (body.detail !== undefined) {
+        task.detail = tasknerveOptionalText(body.detail);
+      }
+      if (body.priority !== undefined) {
+        task.priority = Number.isFinite(Number(body.priority)) ? Math.trunc(Number(body.priority)) : task.priority;
+      }
+      if (body.tags !== undefined) {
+        task.tags = Array.isArray(body.tags) ? body.tags.filter(Boolean) : [];
+      }
+      if (body.depends_on !== undefined) {
+        task.depends_on = Array.isArray(body.depends_on) ? body.depends_on.filter(Boolean) : [];
+      }
+      if (body.suggested_intelligence !== undefined) {
+        task.suggested_intelligence = tasknerveOptionalText(body.suggested_intelligence);
+      }
+      if (body.suggested_model !== undefined) {
+        task.suggested_model = tasknerveOptionalText(body.suggested_model);
+      }
+      task.updated_at_utc = tasknerveNowUtc();
+      return {
+        ok: true,
+        action: "edit",
+        changed: true,
+        selected_project: {
+          key: selection.selected.key,
+          name: selection.selected.name,
+          repo_root: selection.selected.repo_root,
+        },
+        task: tasknerveTaskPayload(
+          task,
+          new Map(taskState.tasks.map((entry) => [entry.task_id, entry])),
+        ),
+      };
+    });
+  }
+
+  async function tasknerveHandleRemoveTask(url, body) {
+    const projectSelector = tasknerveQueryText(url, "project");
+    const taskId = tasknerveRequiredText(body.task_id, "task_id");
+    return tasknerveWriteTaskMutation(projectSelector, async (taskState, selection) => {
+      const index = taskState.tasks.findIndex((entry) => entry.task_id === taskId);
+      if (index < 0) {
+        throw new Error(`Unknown task: ${taskId}`);
+      }
+      const [task] = taskState.tasks.splice(index, 1);
+      return {
+        ok: true,
+        action: "remove",
+        selected_project: {
+          key: selection.selected.key,
+          name: selection.selected.name,
+          repo_root: selection.selected.repo_root,
+        },
+        task,
+      };
+    });
+  }
+
+  async function tasknerveHandleApproveTask(url, body) {
+    const projectSelector = tasknerveQueryText(url, "project");
+    const taskId = tasknerveOptionalText(body.task_id);
+    return tasknerveWriteTaskMutation(projectSelector, async (taskState, selection) => {
+      const now = tasknerveNowUtc();
+      const approved = taskState.tasks.filter((task) => {
+        const matchesTarget = taskId ? task.task_id === taskId : true;
+        return matchesTarget && task.awaiting_confirmation;
+      });
+      approved.forEach((task) => {
+        task.awaiting_confirmation = false;
+        task.approved_at_utc = now;
+        task.approved_by_agent_id = tasknerveOptionalText(body.agent) || "tasknerve.native";
+        task.updated_at_utc = now;
+      });
+      return {
+        ok: true,
+        action: "approve",
+        selected_project: {
+          key: selection.selected.key,
+          name: selection.selected.name,
+          repo_root: selection.selected.repo_root,
+        },
+        approved_count: approved.length,
+        tasks: approved,
+      };
+    });
+  }
+
+  async function tasknerveHandleSaveProjectSettings(url, body) {
+    const projectSelector = tasknerveQueryText(url, "project");
+    const selection = await tasknerveResolveProjectSelection(projectSelector);
+    const gitSyncPolicy = tasknerveOptionalText(body.git_sync_policy) || "every_task";
+    const gitSyncEveryNTasks = Math.max(
+      1,
+      Math.floor(Number(body.git_sync_every_n_tasks || 1) || 1),
+    );
+    const settings = await tasknerveWriteProjectCodexSettings(selection.repoRoot, {
+      ...body,
+      heartbeat_message_core: body.heartbeat_message_core || undefined,
+      low_queue_controller_prompt: body.low_queue_controller_prompt || undefined,
+      worker_default_model: tasknerveOptionalText(body.worker_default_model),
+      controller_default_model: tasknerveOptionalText(body.controller_default_model),
+      low_intelligence_model: tasknerveOptionalText(body.low_intelligence_model),
+      medium_intelligence_model: tasknerveOptionalText(body.medium_intelligence_model),
+      high_intelligence_model: tasknerveOptionalText(body.high_intelligence_model),
+      max_intelligence_model: tasknerveOptionalText(body.max_intelligence_model),
+      git_origin_url: tasknerveOptionalText(body.git_origin_url),
+      git_sync_policy:
+        gitSyncPolicy === "manual" || gitSyncPolicy === "every_n_tasks"
+          ? gitSyncPolicy
+          : "every_task",
+      git_sync_every_n_tasks: gitSyncEveryNTasks,
+    });
+    const codexState = await tasknerveLoadCodexThreadState(selection.repoRoot);
+    if (settings.heartbeat_message_core) {
+      codexState.bindings = codexState.bindings.map((binding) =>
+        tasknerveIsControllerAgent(binding.agent_id)
+          ? binding
+          : { ...binding, heartbeat_message: settings.heartbeat_message_core, updated_at_utc: tasknerveNowUtc() },
+      );
+      await tasknerveWriteCodexThreadState(selection.repoRoot, codexState);
+    }
+    return {
+      ok: true,
+      action: "project_codex_settings",
+      selected_project: {
+        key: selection.selected.key,
+        name: selection.selected.name,
+        repo_root: selection.selected.repo_root,
+      },
+      changed: true,
+      heartbeat_synced_to_workers: true,
+      git_origin_applied: false,
+      settings,
+    };
+  }
+
+  async function tasknerveHandleSwitchTimelineBranch(url, body) {
+    const projectSelector = tasknerveQueryText(url, "project");
+    const branchName = tasknerveRequiredText(body.branch_name ?? body.branch, "branch_name");
+    const selection = await tasknerveResolveProjectSelection(projectSelector);
+    const state = await tasknerveLoadBranchesState(selection.repoRoot);
+    if (!state.branches || !state.branches[branchName]) {
+      throw new Error(`Timeline branch does not exist: ${branchName}`);
+    }
+    state.active_branch = branchName;
+    await tasknerveWriteBranchesState(selection.repoRoot, state);
+    return {
+      ok: true,
+      action: "timeline_branch_switch",
+      selected_project: {
+        key: selection.selected.key,
+        name: selection.selected.name,
+        repo_root: selection.selected.repo_root,
+      },
+      timeline: {
+        timeline_initialized: true,
+        active_branch: state.active_branch,
+        branches: Object.keys(state.branches).sort(),
+        git_branch_hint: tasknerveDetectGitBranch(selection.repoRoot),
+      },
+    };
+  }
+
+  async function tasknerveHandleCreateTimelineBranch(url, body) {
+    const projectSelector = tasknerveQueryText(url, "project");
+    const branchName = tasknerveRequiredText(body.branch_name ?? body.branch, "branch_name");
+    const selection = await tasknerveResolveProjectSelection(projectSelector);
+    const state = await tasknerveLoadBranchesState(selection.repoRoot);
+    if (state.branches[branchName]) {
+      throw new Error(`Timeline branch already exists: ${branchName}`);
+    }
+    const now = tasknerveNowUtc();
+    state.branches[branchName] = {
+      name: branchName,
+      head_event_id: null,
+      created_at_utc: now,
+      from_branch: state.active_branch || null,
+      from_event_id: null,
+    };
+    state.active_branch = branchName;
+    await tasknerveWriteBranchesState(selection.repoRoot, state);
+    return {
+      ok: true,
+      action: "timeline_branch_create",
+      selected_project: {
+        key: selection.selected.key,
+        name: selection.selected.name,
+        repo_root: selection.selected.repo_root,
+      },
+      timeline: {
+        timeline_initialized: true,
+        active_branch: state.active_branch,
+        branches: Object.keys(state.branches).sort(),
+        git_branch_hint: tasknerveDetectGitBranch(selection.repoRoot),
+      },
+    };
+  }
+
+  async function tasknerveHandleBindThread(url, body) {
+    const projectSelector = tasknerveQueryText(url, "project");
+    const selection = await tasknerveResolveProjectSelection(projectSelector);
+    const state = await tasknerveLoadCodexThreadState(selection.repoRoot);
+    const threadId = tasknerveRequiredText(body.thread_id ?? body.threadId, "thread_id");
+    const controller = Boolean(body.controller);
+    const existingBinding = state.bindings.find((binding) => binding.thread_id === threadId) || null;
+    const agentId = controller
+      ? tasknerveControllerAgentId()
+      : tasknerveOptionalText(existingBinding?.agent_id) || tasknerveNextWorkerAgentId(state, threadId);
+    const label = controller
+      ? tasknerveOptionalText(body.label) || tasknerveOptionalText(existingBinding?.label)
+      : tasknerveResolvedWorkerLabel(
+          state,
+          selection.selected.name,
+          threadId,
+          body.label ?? existingBinding?.label,
+        );
+    const now = tasknerveNowUtc();
+    state.bindings = state.bindings.filter((binding) =>
+      binding.thread_id !== threadId && binding.agent_id !== agentId,
+    );
+    const binding = {
+      agent_id: agentId,
+      thread_id: threadId,
+      label,
+      heartbeat_message: tasknerveOptionalText(body.heartbeat_message ?? body.heartbeatMessage),
+      created_at_utc: now,
+      updated_at_utc: now,
+      last_injected_at_utc: null,
+      last_task_id: null,
+      last_result_excerpt: null,
+      last_error: null,
+    };
+    state.bindings.push(binding);
+    await tasknerveWriteCodexThreadState(selection.repoRoot, state);
+    if (!controller && label) {
+      await tasknerveHandleSetThreadName({ thread_id: threadId, title: label }).catch(() => null);
+    }
+    return {
+      ok: true,
+      action: "codex_bind",
+      selected_project: {
+        key: selection.selected.key,
+        name: selection.selected.name,
+        repo_root: selection.selected.repo_root,
+      },
+      binding,
+      snapshot: tasknerveCodexSnapshotPayload(state),
+    };
+  }
+
+  async function tasknerveHandleUnbindThread(url, body) {
+    const projectSelector = tasknerveQueryText(url, "project");
+    const selection = await tasknerveResolveProjectSelection(projectSelector);
+    const state = await tasknerveLoadCodexThreadState(selection.repoRoot);
+    const agentId = tasknerveRequiredText(body.agent_id ?? body.agentId, "agent_id");
+    const binding = state.bindings.find((entry) => entry.agent_id === agentId) || null;
+    state.bindings = state.bindings.filter((entry) => entry.agent_id !== agentId);
+    await tasknerveWriteCodexThreadState(selection.repoRoot, state);
+    return {
+      ok: true,
+      action: "codex_unbind",
+      selected_project: {
+        key: selection.selected.key,
+        name: selection.selected.name,
+        repo_root: selection.selected.repo_root,
+      },
+      binding,
+      snapshot: tasknerveCodexSnapshotPayload(state),
+    };
+  }
+
+  async function tasknerveHandleBootstrapController(url, body) {
+    const projectSelector = tasknerveQueryText(url, "project");
+    const selection = await tasknerveResolveProjectSelection(projectSelector);
+    const forceNew = Boolean(body.force_new ?? body.forceNew);
+    const openThread = body.open_thread !== false;
+    let state = await tasknerveLoadCodexThreadState(selection.repoRoot);
+    const existing = state.bindings.find((binding) => tasknerveIsControllerAgent(binding.agent_id)) || null;
+    if (existing && !forceNew) {
+      if (openThread && existing.thread_id) {
+        await tasknerveHandleOpenThread({ thread_id: existing.thread_id }).catch(() => null);
+      }
+      return {
+        ok: true,
+        action: "controller_bootstrap",
+        selected_project: {
+          key: selection.selected.key,
+          name: selection.selected.name,
+          repo_root: selection.selected.repo_root,
+        },
+        result: {
+          ok: true,
+          status: "already_bound",
+          opened: !!(openThread && existing.thread_id),
+          binding: existing,
+          snapshot: tasknerveCodexSnapshotPayload(state),
+        },
+      };
+    }
+    const settings = await tasknerveLoadProjectCodexSettings(selection.repoRoot);
+    const thread = await tasknerveHandleStartThread({
+      cwd: selection.repoRoot,
+      model: settings.controller_default_model || null,
+      sandbox: "workspace-write",
+      approval_policy: "never",
+    });
+    const threadId = tasknerveRequiredText(thread.thread_id, "thread_id");
+    const title = `${selection.selected.name}-Controller`;
+    await tasknerveHandleSetThreadName({ thread_id: threadId, title });
+    const now = tasknerveNowUtc();
+    const binding = {
+      agent_id: tasknerveControllerAgentId(),
+      thread_id: threadId,
+      label: title,
+      heartbeat_message: null,
+      created_at_utc: now,
+      updated_at_utc: now,
+      last_injected_at_utc: null,
+      last_task_id: null,
+      last_result_excerpt: null,
+      last_error: null,
+    };
+    state.bindings = state.bindings.filter((entry) => !tasknerveIsControllerAgent(entry.agent_id));
+    state.bindings.push(binding);
+    await tasknerveWriteCodexThreadState(selection.repoRoot, state);
+    const prompt = `Please familiarize yourself with the \`${selection.selected.name}\` project. You are the TaskNerve controller for this repository.\n\nController responsibilities:\n- Understand the current repository state and the project intent.\n- Treat TaskNerve as the source of truth for backlog orchestration and worker coordination.\n- Review project_goals.md, project_manifest.md, and contributing ideas.md.\n- If the goals or manifest are still draft-quality, refine them with the user before expanding the backlog.\n- Once the project contracts are solid enough, populate TaskNerve with concrete development and maintenance tasks and keep worker threads productive.\n- Use the built-in TaskNerve skill when it helps you move faster and stay aligned.\n\nProject root: ${selection.repoRoot}`;
+    const promptResult = await tasknerveHandleStartTurn({
+      thread_id: threadId,
+      prompt,
+      cwd: selection.repoRoot,
+      model: settings.controller_default_model || null,
+      summary: "tasknerve controller bootstrap",
+    });
+    if (openThread) {
+      await tasknerveHandleOpenThread({ thread_id: threadId }).catch(() => null);
+    }
+    state = await tasknerveLoadCodexThreadState(selection.repoRoot);
+    return {
+      ok: true,
+      action: "controller_bootstrap",
+      selected_project: {
+        key: selection.selected.key,
+        name: selection.selected.name,
+        repo_root: selection.selected.repo_root,
+      },
+      result: {
+        ok: true,
+        status: "created",
+        opened: openThread,
+        thread_id: threadId,
+        title,
+        binding,
+        prompt_result: promptResult,
+        snapshot: tasknerveCodexSnapshotPayload(state),
+      },
+    };
+  }
+
+  async function tasknerveHandleAdoptActive(url, body) {
+    const projectSelector = tasknerveQueryText(url, "project");
+    const selection = await tasknerveResolveProjectSelection(projectSelector);
+    const state = await tasknerveLoadCodexThreadState(selection.repoRoot);
+    const hostContext = await tasknerveHandleHostContext();
+    const threadId = tasknerveOptionalText(hostContext?.active_thread_id);
+    if (!threadId) {
+      throw new Error("No active Codex thread is available to adopt");
+    }
+    const existingBinding = state.bindings.find((binding) => binding.thread_id === threadId) || null;
+    const currentThreadRecord = await tasknerveHandleReadThread({
+      thread_id: threadId,
+      include_turns: false,
+    }).catch(() => null);
+    const currentThreadLabel =
+      tasknerveOptionalText(existingBinding?.label) ||
+      tasknerveOptionalText(body.label) ||
+      tasknerveOptionalText(currentThreadRecord?.thread?.title) ||
+      tasknerveOptionalText(currentThreadRecord?.thread?.name);
+    const label = tasknerveResolvedWorkerLabel(
+      state,
+      selection.selected.name,
+      threadId,
+      currentThreadLabel,
+    );
+    const now = tasknerveNowUtc();
+    const binding = {
+      agent_id: tasknerveOptionalText(existingBinding?.agent_id) || tasknerveNextWorkerAgentId(state, threadId),
+      thread_id: threadId,
+      label,
+      heartbeat_message: tasknerveOptionalText(body.heartbeat_message ?? body.heartbeatMessage),
+      created_at_utc: now,
+      updated_at_utc: now,
+      last_injected_at_utc: null,
+      last_task_id: null,
+      last_result_excerpt: null,
+      last_error: null,
+    };
+    state.bindings = state.bindings.filter((entry) => entry.thread_id !== threadId);
+    state.bindings.push(binding);
+    await tasknerveWriteCodexThreadState(selection.repoRoot, state);
+    if (label) {
+      await tasknerveHandleSetThreadName({ thread_id: threadId, title: label }).catch(() => null);
+    }
+    return {
+      ok: true,
+      action: "codex_adopt_active",
+      selected_project: {
+        key: selection.selected.key,
+        name: selection.selected.name,
+        repo_root: selection.selected.repo_root,
+      },
+      result: {
+        ok: true,
+        adopted_count: 1,
+        adopted: [binding],
+        snapshot: tasknerveCodexSnapshotPayload(state),
+      },
+    };
+  }
+
+  async function tasknerveHandleHeartbeatActive(url, body) {
+    const projectSelector = tasknerveQueryText(url, "project");
+    const selection = await tasknerveResolveProjectSelection(projectSelector);
+    const state = await tasknerveLoadCodexThreadState(selection.repoRoot);
+    const settings = await tasknerveLoadProjectCodexSettings(selection.repoRoot);
+    const workers = state.bindings.filter((binding) => !tasknerveIsControllerAgent(binding.agent_id));
+    const heartbeatTemplate =
+      tasknerveOptionalText(body.heartbeat_message ?? body.heartbeatMessage) ||
+      settings.heartbeat_message_core;
+    const prompt = heartbeatTemplate.replaceAll("{project_name}", selection.selected.name);
+    const results = [];
+    for (const binding of workers) {
+      const startTurnResult = await tasknerveHandleStartTurn({
+        thread_id: binding.thread_id,
+        prompt,
+        cwd: selection.repoRoot,
+        model: settings.worker_default_model || null,
+        summary: "tasknerve heartbeat",
+      });
+      binding.last_injected_at_utc = tasknerveNowUtc();
+      binding.last_result_excerpt = "heartbeat sent";
+      binding.updated_at_utc = binding.last_injected_at_utc;
+      state.queued_prompts.push({
+        prompt_id: `prompt_${crypto.randomUUID().replace(/-/g, "")}`,
+        agent_id: binding.agent_id,
+        thread_id: binding.thread_id,
+        kind: "continue_task",
+        prompt,
+        claim_ttl_minutes: Number(body.claim_ttl_minutes || 30),
+        steal_after_minutes: Number(body.steal_after_minutes || 90),
+        exclude_tags: Array.isArray(body.exclude_tags) ? body.exclude_tags : [],
+        model: settings.worker_default_model || null,
+        oss: false,
+        local_provider: null,
+        status: "sent",
+        created_at_utc: binding.last_injected_at_utc,
+        started_at_utc: binding.last_injected_at_utc,
+        finished_at_utc: binding.last_injected_at_utc,
+        task_id: null,
+        result_excerpt: "heartbeat sent",
+        error: null,
+      });
+      results.push(startTurnResult);
+    }
+    state.queued_prompts = state.queued_prompts.slice(-200);
+    await tasknerveWriteCodexThreadState(selection.repoRoot, state);
+    return {
+      ok: true,
+      action: "codex_heartbeat_active",
+      selected_project: {
+        key: selection.selected.key,
+        name: selection.selected.name,
+        repo_root: selection.selected.repo_root,
+      },
+      result: {
+        ok: true,
+        queued_count: results.length,
+        results,
+        snapshot: tasknerveCodexSnapshotPayload(state),
+      },
     };
   }
 
@@ -1398,6 +2860,14 @@ Use this file to collect inspiration, reference links, patterns worth borrowing,
       tasknerveWriteJson(res, 200, await tasknerveHandleSystemResourcesFromUrl(url));
       return;
     }
+    if (req.method === "GET" && url.pathname === "/tasknerve/api/tasks") {
+      tasknerveWriteJson(res, 200, await tasknerveHandleTasksSnapshot(url));
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/tasknerve/api/codex/project-for-thread") {
+      tasknerveWriteJson(res, 200, await tasknerveHandleProjectForThread(url));
+      return;
+    }
     if (req.method !== "POST") {
       tasknerveWriteJson(res, 405, { ok: false, error: "POST required" });
       return;
@@ -1429,6 +2899,12 @@ Use this file to collect inspiration, reference links, patterns worth borrowing,
       case "/tasknerve/project/document/write":
         payload = await tasknerveHandleWriteProjectDocument(body);
         break;
+      case "/tasknerve/project/register":
+        payload = await tasknerveHandleRegisterProject(body);
+        break;
+      case "/tasknerve/project/open-vscode":
+        payload = await tasknerveHandleOpenProjectInVsCode(body);
+        break;
       case "/tasknerve/project/native-settings":
         payload = await tasknerveHandleWriteProjectNativeSettings(body);
         break;
@@ -1437,6 +2913,42 @@ Use this file to collect inspiration, reference links, patterns worth borrowing,
         break;
       case "/tasknerve/system/resources":
         payload = await tasknerveHandleSystemResources(body);
+        break;
+      case "/tasknerve/api/tasks/add":
+        payload = await tasknerveHandleAddTask(url, body);
+        break;
+      case "/tasknerve/api/tasks/edit":
+        payload = await tasknerveHandleEditTask(url, body);
+        break;
+      case "/tasknerve/api/tasks/remove":
+        payload = await tasknerveHandleRemoveTask(url, body);
+        break;
+      case "/tasknerve/api/tasks/approve":
+        payload = await tasknerveHandleApproveTask(url, body);
+        break;
+      case "/tasknerve/api/project/codex-settings":
+        payload = await tasknerveHandleSaveProjectSettings(url, body);
+        break;
+      case "/tasknerve/api/timeline/branch/switch":
+        payload = await tasknerveHandleSwitchTimelineBranch(url, body);
+        break;
+      case "/tasknerve/api/timeline/branch/create":
+        payload = await tasknerveHandleCreateTimelineBranch(url, body);
+        break;
+      case "/tasknerve/api/codex/bind":
+        payload = await tasknerveHandleBindThread(url, body);
+        break;
+      case "/tasknerve/api/codex/unbind":
+        payload = await tasknerveHandleUnbindThread(url, body);
+        break;
+      case "/tasknerve/api/codex/controller/bootstrap":
+        payload = await tasknerveHandleBootstrapController(url, body);
+        break;
+      case "/tasknerve/api/codex/adopt-active":
+        payload = await tasknerveHandleAdoptActive(url, body);
+        break;
+      case "/tasknerve/api/codex/heartbeat-active":
+        payload = await tasknerveHandleHeartbeatActive(url, body);
         break;
       case "/tasknerve/thread/open":
         payload = await tasknerveHandleOpenThread(body);
@@ -1486,12 +2998,13 @@ Use this file to collect inspiration, reference links, patterns worth borrowing,
     globalThis.__TASKNERVE_CODEX_NATIVE_BRIDGE_SERVER__ = server;
   }
 
-  if (m && m.app && typeof m.app.whenReady === "function") {
-    m.app.whenReady().then(tasknerveStartServer).catch((error) => {
+  const tasknerveElectronApp = electron?.app;
+  if (tasknerveElectronApp && typeof tasknerveElectronApp.whenReady === "function") {
+    tasknerveElectronApp.whenReady().then(tasknerveStartServer).catch((error) => {
       tasknerveLog("warn", "Native bridge failed to start", error);
     });
-    if (typeof m.app.on === "function") {
-      m.app.on("will-quit", () => {
+    if (typeof tasknerveElectronApp.on === "function") {
+      tasknerveElectronApp.on("will-quit", () => {
         const server = globalThis.__TASKNERVE_CODEX_NATIVE_BRIDGE_SERVER__;
         if (server && typeof server.close === "function") {
           try {

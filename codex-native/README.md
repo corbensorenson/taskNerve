@@ -1,33 +1,31 @@
 # Codex TaskNerve Native Workspace
 
-This directory is the native cutover target for Codex TaskNerve.
+This is the active TaskNerve runtime workspace.
 
-Goal:
-- move TaskNerve orchestration into TypeScript modules that match Codex's runtime model
-- keep repo-local `.tasknerve/`, `project_goals.md`, and `project_manifest.md` as durable project state
-- stop growing new product behavior in Rust unless it is parity or compatibility work for the current live app
+The product model on `codex/codex-native` is:
+- Codex desktop app as the host shell
+- TaskNerve native services injected into the host runtime
+- repo-local TaskNerve state
+- no supported user-facing TaskNerve CLI
+- no Rust in the live runtime path
 
-Current scope:
-- portable TaskNerve domain contracts
-- zod-backed schemas for repo-local TaskNerve state
-- project Codex settings defaults and model-routing policy
-- task queue helpers for the native panel/runtime
-- controller bootstrap prompt generation
-- repo-local settings and project-registry persistence
-- host-service boundary for Codex-native integration
+## What Lives Here
 
-Style target:
+- TypeScript domain contracts for project/task/settings logic
+- repo-local persistence helpers
+- Codex host-service boundaries
+- native patch/sync tooling for `Codex TaskNerve.app`
+
+## Runtime Shape
+
+TaskNerve should follow Codex's own implementation model as closely as possible:
 - TypeScript-first
-- Node/Electron-compatible modules
-- Vitest test runner
-- zod runtime validation
-- a future main/preload/renderer split that mirrors the installed Codex desktop app
+- Electron-compatible boundaries
+- `zod` for runtime validation
+- Vitest for tests
+- in-app native services instead of a second process or user CLI
 
-This workspace does not replace the live Rust runtime yet. The cutover criteria are tracked in:
-- `/Users/adimus/Documents/taskNerve/docs/codex_native_cutover_audit.md`
-- `/Users/adimus/Documents/taskNerve/docs/codex_native_integration_plan.md`
-
-Run checks:
+## Checks
 
 ```bash
 cd /Users/adimus/Documents/taskNerve/codex-native
@@ -35,3 +33,15 @@ npm install
 npm run typecheck
 npm test
 ```
+
+## Local Sync
+
+```bash
+bash /Users/adimus/Documents/taskNerve/install-macos.sh --app "/Applications/Codex TaskNerve.app"
+```
+
+## References
+
+- [README.md](/Users/adimus/Documents/taskNerve/README.md)
+- [docs/codex_native_cutover_audit.md](/Users/adimus/Documents/taskNerve/docs/codex_native_cutover_audit.md)
+- [docs/codex_native_style_contract.md](/Users/adimus/Documents/taskNerve/docs/codex_native_style_contract.md)

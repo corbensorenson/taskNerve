@@ -14541,6 +14541,7 @@ struct CodexMainBridgeBindings {
     context_resolver: String,
     ensure_window: Option<String>,
     navigate_route: Option<String>,
+    window_manager: Option<String>,
 }
 
 #[cfg(any(test, target_os = "macos"))]
@@ -14603,6 +14604,12 @@ fn find_identifier_after_marker(input: &str, marker: &str) -> Option<String> {
 }
 
 #[cfg(any(test, target_os = "macos"))]
+fn find_identifier_before_marker(input: &str, marker: &str) -> Option<String> {
+    let marker_index = input.find(marker)?;
+    extract_js_identifier_before(input, marker_index)
+}
+
+#[cfg(any(test, target_os = "macos"))]
 fn extract_codex_main_bridge_bindings(input: &str) -> Result<CodexMainBridgeBindings> {
     let local_kind_index =
         find_any_token(input, &["kind:`local`", "kind:'local'", "kind:\"local\""])
@@ -14624,12 +14631,16 @@ fn extract_codex_main_bridge_bindings(input: &str) -> Result<CodexMainBridgeBind
     let ensure_window = find_identifier_after_marker(input, "ensurePrimaryWindowVisible:")
         .or_else(|| find_identifier_after_marker(input, "selectHost:"));
     let navigate_route = find_identifier_after_marker(input, "navigateToRoute:");
+    let window_manager = find_identifier_after_marker(input, "windowManager:")
+        .or_else(|| find_identifier_before_marker(input, ".createWindow({"))
+        .or_else(|| find_identifier_before_marker(input, ".getPrimaryWindow("));
 
     Ok(CodexMainBridgeBindings {
         local_host_config,
         context_resolver,
         ensure_window,
         navigate_route,
+        window_manager,
     })
 }
 
@@ -14697,6 +14708,10 @@ fn render_codex_main_bridge_script(
             .replace(
                 "__TASKNERVE_NAVIGATE_ROUTE__",
                 bindings.navigate_route.as_deref().unwrap_or("null"),
+            )
+            .replace(
+                "__TASKNERVE_WINDOW_MANAGER__",
+                bindings.window_manager.as_deref().unwrap_or("null"),
             ),
         CODEX_MAIN_BRIDGE_END_MARKER
     )

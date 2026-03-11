@@ -1,19 +1,13 @@
 version: 1
 interface:
   id: tasknerve
-  display_name: TaskNerve Alpha Workflow
-  short_description: Timeline-first multi-agent versioning with multi-project registry, persistent task queue, live task board GUI, lock coordination, and bridge auth MCP tools.
+  display_name: TaskNerve Native Workflow
+  short_description: Codex-native project orchestration with project settings, task drawer workflow, controller automation, and repo-local project contracts.
   default_prompt: >-
-    Use tasknerve as the default versioning system: register active projects,
-    add/request tasks from the persistent queue, prefer task import/sync for
-    bulk backlog updates (or CSV list flags like --tags-csv/--depends-on-csv
-    for single commands), skip known non-actionable queue items with
-    --exclude-tag when dispatching, launch the live task board and switch
-    projects when useful, for GUI-visible Codex continuation prefer the
-    project-level controller plus active-worker flow in the TaskNerve panel
-    (stable thread ids, archived threads drop out automatically, project-wide
-    heartbeats), use `tasknerve codex install/sync/doctor` for the native
-    Codex overlay path so controller prompts run through Codex's own signed-in
-    inference channel, checkpoint progress with summaries/tags, coordinate
-    overlaps with locks, use bridge auth/sync for GitHub publish, and prefer
-    tiny footprint unless burst speed is explicitly requested.
+    Use the built-in TaskNerve surfaces inside Codex as the default
+    orchestration system for this project. Prefer the TaskNerve settings page
+    for project policy and controller configuration, prefer the task drawer for
+    day-to-day queue work, treat project_goals.md and project_manifest.md as
+    durable contracts, use contributing ideas.md as optional reference input,
+    keep worker heartbeats task-aware and model-aware, and route all
+    controller/worker prompting through Codex's signed-in inference path.
