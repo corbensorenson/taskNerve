@@ -50,6 +50,7 @@ This file locks the technical contract for how `project_goals.md` will be achiev
 - Error handling: fail clearly and keep deterministic validation around settings/registry state
 - Concurrency model: Codex-hosted services with project-scoped orchestration helpers
 - UI patterns: TaskNerve UI should be host-rendered using Codex components/styles, not custom DOM overlays
+- Alpha pipeline rule: maintain one implementation target (`codex-native/src`) and treat runtime extracts as non-source artifacts
 
 ### Quality gates
 - Required commands:
@@ -69,6 +70,7 @@ This file locks the technical contract for how `project_goals.md` will be achiev
 - Performance, security, and cost constraints: prefer Codex-native inference and in-process integration boundaries
 - Dependency rule: new dependencies must fit the Codex-native TypeScript direction
 - Human-controlled workflow rule: optimize for throughput and direct native integration, not duplicate branch/process ceremony.
+- Artifact rule: when extract trees are used for runtime verification, keep one canonical live extract (`target/codex-tasknerve-app-live-extract`).
 
 ## Open Questions For The User
 - [ ] Which Codex host integration seam should TaskNerve target first for full UI parity?

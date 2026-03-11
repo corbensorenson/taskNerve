@@ -23,6 +23,10 @@ Use this skill when any of the following are true:
 - Do not steer users toward a TaskNerve CLI workflow on this branch.
 - Do not add app-bundle patching, runtime injection, localhost bridge services, or DOM mutation overlays.
 - If a required host surface is missing, document the host gap and implement through typed Codex host-service contracts.
+- Alpha single-target rule: implement product changes in exactly one source path, `codex-native/src`.
+- Do not maintain parallel dev/test runtime trees, duplicate editable bundle copies, or split implementation pipelines for the same user-steered feature.
+- Treat `target/*` extracts and generated bundles as build/runtime artifacts; they are not source-of-truth code.
+- If runtime extract verification is needed, use one canonical extract tree only: `target/codex-tasknerve-app-live-extract` (alias `target/codex-tasknerve-app-src`).
 
 ## Native Workflow
 
@@ -45,6 +49,13 @@ Use this skill when any of the following are true:
 5. Validate native behavior through direct integration flow.
 
 6. Run checks before closing work:
+
+Human-controlled fast path (default when user is actively steering):
+- run only the smallest meaningful checks for touched native modules
+- do not create parallel implementation tracks to satisfy test/process ceremony
+
+Autonomous/hardening path:
+- run full typecheck and test gates before closure
 
 ```bash
 cd /Users/adimus/Documents/taskNerve/codex-native

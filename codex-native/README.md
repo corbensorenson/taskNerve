@@ -19,6 +19,7 @@ Single implementation policy:
 - `src/` is the implementation path.
 - `test/` validates behavior and performance regressions; it is not a parallel runtime target.
 - Treat generated bundle extracts as disposable build/runtime artifacts, not editable source.
+- Until alpha, do not maintain duplicate implementation pipelines for the same change (no split dev/test runtime trees, no duplicate editable bundle copies).
 
 ## Workspace Layout
 

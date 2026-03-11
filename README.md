@@ -15,6 +15,8 @@ Single development target:
 - `codex-native/src` is the only implementation path.
 - `codex-native/test` is verification coverage, not a second runtime branch.
 - Generated/extracted bundle artifacts are not maintained as source-of-truth code.
+- Alpha policy: do not run dual implementation pipelines (no parallel dev/test runtime trees, no duplicate editable bundle copies for the same change).
+- If runtime extracts are needed for verification, keep one canonical live tree: `target/codex-tasknerve-app-live-extract` (alias: `target/codex-tasknerve-app-src`).
 
 ## Integration Surface
 

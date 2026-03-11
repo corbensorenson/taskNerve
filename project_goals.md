@@ -33,6 +33,7 @@ This file locks the user-approved outcomes for TaskNerve. Technical implementati
 - [ ] Keep integration seams explicit, typed, and test-covered.
 - [ ] Keep multi-project workflows fast, low-friction, and visually coherent.
 - [ ] Human-controlled fast path: avoid dual-track workflow overhead (for example separate src/test branch maintenance) for direct user-steered native changes.
+- [ ] Until alpha, keep one implementation pipeline only (`codex-native/src`) and avoid duplicate editable runtime trees.
 - [ ] Autonomous agent path may keep stricter validation/test expansion than the human-controlled fast path.
 
 ## Open Questions For The User

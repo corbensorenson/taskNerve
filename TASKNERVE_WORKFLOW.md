@@ -22,4 +22,5 @@ Use the repository state as the source of truth.
 - Prefer tasks that improve tasknerve's reliability, auditability, and ease of use.
 - Keep suggestions small enough to import cleanly into the queue.
 - Avoid duplicate backlog items when the task system already tracks the work.
+- Keep one alpha implementation pipeline only: `codex-native/src` is source-of-truth; runtime extracts are artifacts.
 - Keep outputs free of secrets, credentials, and personal information.
