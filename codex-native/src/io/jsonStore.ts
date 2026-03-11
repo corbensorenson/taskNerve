@@ -7,7 +7,7 @@ export interface JsonOptionalReadResult<T> {
   raw: string | null;
 }
 
-function formatPrettyJson(value: unknown): string {
+export function formatPrettyJson(value: unknown): string {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 

@@ -2,7 +2,11 @@ import { stat } from "node:fs/promises";
 
 import { SCHEMA_PROJECTS, nowIsoUtc } from "../constants.js";
 import { projectRegistrySchema, type ProjectRegistry } from "../schemas.js";
-import { readJsonOptionalWithRaw, writePrettyJsonIfChanged } from "./jsonStore.js";
+import {
+  formatPrettyJson,
+  readJsonOptionalWithRaw,
+  writePrettyJsonIfChanged,
+} from "./jsonStore.js";
 import { taskNerveProjectsRegistryPath } from "./paths.js";
 
 const FILE_MISSING_MTIME_MS = -1;
@@ -10,6 +14,7 @@ const FILE_MISSING_MTIME_MS = -1;
 interface ProjectRegistryCacheEntry {
   mtimeMs: number;
   value: ProjectRegistry;
+  raw: string;
 }
 
 const projectRegistryCache = new Map<string, ProjectRegistryCacheEntry>();
@@ -56,9 +61,11 @@ export async function loadProjectRegistry(
     const wrote = await writePrettyJsonIfChanged(filePath, normalized, { existingRaw: raw });
     const nextMtimeMs =
       wrote || currentMtimeMs === FILE_MISSING_MTIME_MS ? await fileMtimeMs(filePath) : currentMtimeMs;
+    const nextRaw = wrote ? formatPrettyJson(normalized) : raw ?? formatPrettyJson(normalized);
     projectRegistryCache.set(filePath, {
       mtimeMs: nextMtimeMs,
       value: normalized,
+      raw: nextRaw,
     });
     return normalized;
   })();
@@ -76,11 +83,16 @@ export async function writeProjectRegistry(
   const filePath = taskNerveProjectsRegistryPath(env);
   const normalized = projectRegistrySchema.parse(registry);
   normalized.projects.sort((left, right) => left.name.localeCompare(right.name));
-  await writePrettyJsonIfChanged(filePath, normalized);
-  const nextMtimeMs = await fileMtimeMs(filePath);
+  const currentMtimeMs = await fileMtimeMs(filePath);
+  const cached = projectRegistryCache.get(filePath);
+  const existingRaw = cached && cached.mtimeMs === currentMtimeMs ? cached.raw : undefined;
+  const wrote = await writePrettyJsonIfChanged(filePath, normalized, { existingRaw });
+  const nextMtimeMs =
+    wrote || currentMtimeMs === FILE_MISSING_MTIME_MS ? await fileMtimeMs(filePath) : currentMtimeMs;
   projectRegistryCache.set(filePath, {
     mtimeMs: nextMtimeMs,
     value: normalized,
+    raw: formatPrettyJson(normalized),
   });
   return normalized;
 }

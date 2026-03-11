@@ -10,4 +10,7 @@ export * from "./io/projectRegistryStore.js";
 export * from "./host/codexHostServices.js";
 export * from "./integration/taskNerveService.js";
 export * from "./integration/codexTaskNerveHostRuntime.js";
+export * from "./integration/codexConversationDisplay.js";
+export * from "./integration/codexConversationInteraction.js";
+export * from "./integration/codexConversationChrome.js";
 export * from "./integration/threadDisplay/index.js";

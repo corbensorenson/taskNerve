@@ -28,25 +28,62 @@ export function parseTimestampUtc(value: unknown): string | null {
   return new Date(parsedMs).toISOString();
 }
 
-export function timestampLabel(value: unknown): string {
-  const iso = parseTimestampUtc(value);
-  if (!iso) {
-    return "";
+const TIMESTAMP_DISPLAY_CACHE_LIMIT = 256;
+const timestampDisplayCache = new Map<string, { label: string; tooltip: string }>();
+
+function rememberTimestampDisplay(iso: string, label: string, tooltip: string) {
+  if (timestampDisplayCache.size >= TIMESTAMP_DISPLAY_CACHE_LIMIT) {
+    const oldestKey = timestampDisplayCache.keys().next().value;
+    if (oldestKey) {
+      timestampDisplayCache.delete(oldestKey);
+    }
   }
-  return new Date(iso).toLocaleTimeString([], {
+  timestampDisplayCache.set(iso, { label, tooltip });
+}
+
+export function timestampDisplayFromIso(iso: string | null): {
+  label: string;
+  tooltip: string;
+} {
+  if (!iso) {
+    return {
+      label: "",
+      tooltip: "",
+    };
+  }
+  const cached = timestampDisplayCache.get(iso);
+  if (cached) {
+    return cached;
+  }
+
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) {
+    return {
+      label: "",
+      tooltip: "",
+    };
+  }
+
+  const label = date.toLocaleTimeString([], {
     hour: "numeric",
     minute: "2-digit",
     second: "2-digit",
   });
-}
-
-export function timestampTooltip(value: unknown): string {
-  const iso = parseTimestampUtc(value);
-  if (!iso) {
-    return "";
-  }
-  return new Date(iso).toLocaleString([], {
+  const tooltip = date.toLocaleString([], {
     dateStyle: "medium",
     timeStyle: "medium",
   });
+  rememberTimestampDisplay(iso, label, tooltip);
+  return {
+    label,
+    tooltip,
+  };
+}
+
+export function timestampLabel(value: unknown): string {
+  return timestampDisplayFromIso(parseTimestampUtc(value)).label;
+}
+
+export function timestampTooltip(value: unknown): string {
+  return timestampDisplayFromIso(parseTimestampUtc(value)).tooltip;
 }

@@ -1,9 +1,25 @@
 import { CONTROLLER_AGENT_ID } from "../constants.js";
 import {
   assertCodexHostServices,
+  type CodexHostSubscription,
   type CodexHostServices,
 } from "../host/codexHostServices.js";
 import type { ProjectCodexSettings, TaskRecord } from "../schemas.js";
+import type {
+  CodexConversationChromeSnapshot,
+  CodexConversationChromeStateInput,
+  CodexConversationChromeResourceStats,
+} from "./codexConversationChrome.js";
+import { buildCodexConversationChromeSnapshot } from "./codexConversationChrome.js";
+import type {
+  CodexConversationDisplayOptions,
+  CodexConversationDisplaySnapshot,
+} from "./codexConversationDisplay.js";
+import type {
+  CodexConversationInteractionCommand,
+  CodexConversationInteractionInput,
+  CodexConversationInteractionResult,
+} from "./codexConversationInteraction.js";
 import { createTaskNerveService, type TaskNerveService } from "./taskNerveService.js";
 import type {
   BuildThreadDisplayOptions,
@@ -11,6 +27,7 @@ import type {
 } from "./threadDisplay/index.js";
 
 const HOST_STYLING_CONTEXT_CACHE_TTL_MS = 10_000;
+const CONVERSATION_CHROME_CACHE_TTL_MS = 250;
 
 export interface CodexTaskNerveSnapshotOptions {
   repoRoot: string;
@@ -55,19 +72,90 @@ export interface CodexControllerBootstrapResult {
   prompt: string;
 }
 
+export type CodexConversationChromeAction =
+  | { type: "topbar-task-count-click" }
+  | { type: "footer-terminal-toggle-click" }
+  | { type: "footer-branch-switch"; branch: string };
+
+export interface CodexConversationChromeActionResult {
+  ok: boolean;
+  integration_mode: "codex-native-host";
+  action: CodexConversationChromeAction["type"];
+  task_drawer_open?: boolean;
+  terminal_open?: boolean;
+  branch?: string;
+  error?: string;
+}
+
+export interface CodexHostRefreshSubscription {
+  mode: "host-event-subscription" | "fallback-manual-refresh";
+  dispose: () => void;
+}
+
+export interface ObserveThreadRefreshOptions {
+  threadId?: string | null;
+  onEvent: (event: unknown) => void;
+  onFallbackRefresh?: () => void;
+}
+
+export interface ObserveRepositorySettingsRefreshOptions {
+  onEvent: (event: unknown) => void;
+  onFallbackRefresh?: () => void;
+}
+
 export interface CodexTaskNerveHostRuntime {
   snapshot: (options: CodexTaskNerveSnapshotOptions) => Promise<CodexTaskNerveSnapshot>;
   bootstrapControllerThread: (
     options: CodexControllerBootstrapOptions,
   ) => Promise<CodexControllerBootstrapResult>;
+  conversationDisplaySnapshot: (
+    options: CodexConversationDisplayOptions,
+  ) => Promise<CodexConversationDisplaySnapshot>;
+  conversationInteractionStep: (
+    input: CodexConversationInteractionInput,
+  ) => Promise<CodexConversationInteractionResult>;
+  applyConversationInteraction: (
+    input: CodexConversationInteractionInput,
+  ) => Promise<
+    CodexConversationInteractionResult & {
+      apply_summary: {
+        applied: number;
+        skipped: number;
+      };
+    }
+  >;
   threadDisplaySnapshot: (options: BuildThreadDisplayOptions) => Promise<ThreadDisplaySnapshot>;
+  conversationChromeSnapshot: (
+    options?: CodexConversationChromeStateInput,
+  ) => Promise<CodexConversationChromeSnapshot>;
+  handleConversationChromeAction: (
+    action: CodexConversationChromeAction,
+  ) => Promise<CodexConversationChromeActionResult>;
+  observeThreadRefresh: (
+    options: ObserveThreadRefreshOptions,
+  ) => Promise<CodexHostRefreshSubscription>;
+  observeRepositorySettingsRefresh: (
+    options: ObserveRepositorySettingsRefreshOptions,
+  ) => Promise<CodexHostRefreshSubscription>;
+}
+
+interface NormalizedBranchState {
+  currentBranch: string | null;
+  branches: string[];
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
 }
 
 function parseThreadId(value: unknown): string | null {
-  if (!value || typeof value !== "object") {
+  const payload = asRecord(value);
+  if (!payload) {
     return null;
   }
-  const payload = value as Record<string, unknown>;
   const direct = payload.thread_id;
   if (typeof direct === "string" && direct.trim()) {
     return direct;
@@ -76,18 +164,166 @@ function parseThreadId(value: unknown): string | null {
   if (typeof camel === "string" && camel.trim()) {
     return camel;
   }
-  const nested = payload.thread;
-  if (nested && typeof nested === "object") {
-    const nestedThread = nested as Record<string, unknown>;
-    if (typeof nestedThread.id === "string" && nestedThread.id.trim()) {
-      return nestedThread.id;
+  const nested = asRecord(payload.thread);
+  if (nested) {
+    if (typeof nested.id === "string" && nested.id.trim()) {
+      return nested.id;
     }
-    if (typeof nestedThread.thread_id === "string" && nestedThread.thread_id.trim()) {
-      return nestedThread.thread_id;
+    if (typeof nested.thread_id === "string" && nested.thread_id.trim()) {
+      return nested.thread_id;
     }
   }
   const id = payload.id;
   return typeof id === "string" && id.trim() ? id : null;
+}
+
+function parseTaskCount(value: unknown): number {
+  if (Number.isFinite(value)) {
+    return Math.max(0, Math.round(Number(value)));
+  }
+  if (Array.isArray(value)) {
+    return value.length;
+  }
+  const record = asRecord(value);
+  if (!record) {
+    return 0;
+  }
+  const candidates = [
+    record.taskCount,
+    record.task_count,
+    record.pendingTaskCount,
+    record.pending_task_count,
+    record.count,
+  ];
+  for (const candidate of candidates) {
+    if (Number.isFinite(candidate)) {
+      return Math.max(0, Math.round(Number(candidate)));
+    }
+  }
+  return 0;
+}
+
+function parseOpenState(value: unknown, fallback = false): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  const record = asRecord(value);
+  if (!record) {
+    return fallback;
+  }
+  const candidates = [record.open, record.isOpen, record.drawer_open, record.task_drawer_open];
+  for (const candidate of candidates) {
+    if (typeof candidate === "boolean") {
+      return candidate;
+    }
+  }
+  return fallback;
+}
+
+function parseBranchState(value: unknown): NormalizedBranchState {
+  if (Array.isArray(value)) {
+    const branches = value
+      .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+      .filter(Boolean);
+    return {
+      currentBranch: branches[0] || null,
+      branches,
+    };
+  }
+
+  const record = asRecord(value);
+  if (!record) {
+    return { currentBranch: null, branches: [] };
+  }
+
+  const rawBranches = Array.isArray(record.branches)
+    ? record.branches
+    : Array.isArray(record.branchNames)
+      ? record.branchNames
+      : [];
+  const branches = rawBranches
+    .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+    .filter(Boolean);
+
+  const currentCandidates = [
+    record.current,
+    record.currentBranch,
+    record.current_branch,
+    record.activeBranch,
+    record.active_branch,
+  ];
+  const currentBranch =
+    currentCandidates.find((entry) => typeof entry === "string" && entry.trim()) as
+      | string
+      | undefined;
+
+  return {
+    currentBranch: currentBranch?.trim() || branches[0] || null,
+    branches,
+  };
+}
+
+function parseResourceStats(value: unknown): Partial<CodexConversationChromeResourceStats> {
+  const record = asRecord(value);
+  if (!record) {
+    return {};
+  }
+  return {
+    cpuPercent: Number.isFinite(record.cpuPercent)
+      ? Number(record.cpuPercent)
+      : Number.isFinite(record.cpu_percent)
+        ? Number(record.cpu_percent)
+        : null,
+    gpuPercent: Number.isFinite(record.gpuPercent)
+      ? Number(record.gpuPercent)
+      : Number.isFinite(record.gpu_percent)
+        ? Number(record.gpu_percent)
+        : null,
+    memoryPercent: Number.isFinite(record.memoryPercent)
+      ? Number(record.memoryPercent)
+      : Number.isFinite(record.memory_percent)
+        ? Number(record.memory_percent)
+        : null,
+    thermalPressure:
+      typeof record.thermalPressure === "string" && record.thermalPressure.trim()
+        ? record.thermalPressure.trim()
+        : typeof record.thermal_pressure === "string" && record.thermal_pressure.trim()
+          ? record.thermal_pressure.trim()
+          : null,
+    capturedAtUtc:
+      typeof record.capturedAtUtc === "string" && record.capturedAtUtc.trim()
+        ? record.capturedAtUtc.trim()
+        : typeof record.captured_at_utc === "string" && record.captured_at_utc.trim()
+          ? record.captured_at_utc.trim()
+          : null,
+  };
+}
+
+function normalizeHostSubscriptionDisposer(value: CodexHostSubscription | void): () => void {
+  if (typeof value === "function") {
+    return value;
+  }
+  if (!value || typeof value !== "object") {
+    return () => {};
+  }
+  if ("dispose" in value && typeof value.dispose === "function") {
+    return () => value.dispose();
+  }
+  if ("unsubscribe" in value && typeof value.unsubscribe === "function") {
+    return () => value.unsubscribe();
+  }
+  return () => {};
+}
+
+function hasConversationChromeOverrides(input: CodexConversationChromeStateInput): boolean {
+  return (
+    input.taskCount !== undefined ||
+    input.taskDrawerOpen !== undefined ||
+    input.terminalOpen !== undefined ||
+    input.currentBranch !== undefined ||
+    input.branches !== undefined ||
+    input.resourceStats !== undefined
+  );
 }
 
 export function createCodexTaskNerveHostRuntime(options: {
@@ -101,6 +337,11 @@ export function createCodexTaskNerveHostRuntime(options: {
     fetchedAtMs: number;
   } | null = null;
   let hostStylingContextInflight: Promise<unknown> | null = null;
+  let conversationChromeSnapshotCache: {
+    snapshot: CodexConversationChromeSnapshot;
+    fetchedAtMs: number;
+  } | null = null;
+  let conversationChromeSnapshotInflight: Promise<CodexConversationChromeSnapshot> | null = null;
 
   async function loadHostStylingContext(): Promise<unknown> {
     if (typeof host.getCodexStylingContext !== "function") {
@@ -128,6 +369,159 @@ export function createCodexTaskNerveHostRuntime(options: {
         hostStylingContextInflight = null;
       });
     return hostStylingContextInflight;
+  }
+
+  async function loadTaskCount(override?: number): Promise<number> {
+    if (Number.isFinite(override)) {
+      return parseTaskCount(override);
+    }
+    if (typeof host.readTaskNerveTaskCount !== "function") {
+      return 0;
+    }
+    return parseTaskCount(await host.readTaskNerveTaskCount());
+  }
+
+  async function loadTaskDrawerOpen(override?: boolean): Promise<boolean> {
+    if (typeof override === "boolean") {
+      return override;
+    }
+    if (typeof host.readTaskDrawerState !== "function") {
+      return false;
+    }
+    return parseOpenState(await host.readTaskDrawerState(), false);
+  }
+
+  async function loadTerminalOpen(override?: boolean): Promise<boolean> {
+    if (typeof override === "boolean") {
+      return override;
+    }
+    if (typeof host.readTerminalPanelState !== "function") {
+      return false;
+    }
+    return parseOpenState(await host.readTerminalPanelState(), false);
+  }
+
+  async function loadBranches(overrides: {
+    currentBranch?: string | null;
+    branches?: string[];
+  }): Promise<NormalizedBranchState> {
+    if (overrides.currentBranch || (overrides.branches && overrides.branches.length > 0)) {
+      return {
+        currentBranch: overrides.currentBranch || null,
+        branches: overrides.branches || [],
+      };
+    }
+    if (typeof host.listTaskNerveBranches !== "function") {
+      return { currentBranch: null, branches: [] };
+    }
+    return parseBranchState(await host.listTaskNerveBranches());
+  }
+
+  async function loadResourceStats(
+    override?: Partial<CodexConversationChromeResourceStats> | null,
+  ): Promise<Partial<CodexConversationChromeResourceStats>> {
+    if (override) {
+      return override;
+    }
+    if (typeof host.readTaskNerveResourceStats !== "function") {
+      return {};
+    }
+    return parseResourceStats(await host.readTaskNerveResourceStats());
+  }
+
+  async function subscribeWithFallback(options: {
+    subscribe: unknown;
+    listener: (event: unknown) => void;
+    subscribeArgs?: unknown[];
+    onFallbackRefresh?: () => void;
+  }): Promise<CodexHostRefreshSubscription> {
+    const subscribe =
+      typeof options.subscribe === "function"
+        ? (options.subscribe as (
+            listener: (event: unknown) => void,
+            ...rest: unknown[]
+          ) => Promise<CodexHostSubscription | void> | CodexHostSubscription | void)
+        : null;
+    if (!subscribe) {
+      if (typeof options.onFallbackRefresh === "function") {
+        options.onFallbackRefresh();
+      }
+      return {
+        mode: "fallback-manual-refresh",
+        dispose: () => {},
+      };
+    }
+
+    const subscription = await Promise.resolve(
+      subscribe(options.listener, ...(options.subscribeArgs ?? [])),
+    );
+    return {
+      mode: "host-event-subscription",
+      dispose: normalizeHostSubscriptionDisposer(subscription),
+    };
+  }
+
+  async function loadConversationChromeSnapshot(
+    stateInput: CodexConversationChromeStateInput = {},
+  ): Promise<CodexConversationChromeSnapshot> {
+    const [taskCount, taskDrawerOpen, terminalOpen, branchState, resourceStats] = await Promise.all([
+      loadTaskCount(stateInput.taskCount),
+      loadTaskDrawerOpen(stateInput.taskDrawerOpen),
+      loadTerminalOpen(stateInput.terminalOpen),
+      loadBranches({
+        currentBranch: stateInput.currentBranch,
+        branches: stateInput.branches,
+      }),
+      loadResourceStats(stateInput.resourceStats),
+    ]);
+
+    return buildCodexConversationChromeSnapshot({
+      taskCount,
+      taskDrawerOpen,
+      terminalOpen,
+      currentBranch: branchState.currentBranch,
+      branches: branchState.branches,
+      resourceStats,
+    });
+  }
+
+  function invalidateConversationChromeCache() {
+    conversationChromeSnapshotCache = null;
+  }
+
+  async function applyConversationInteractionCommand(
+    command: CodexConversationInteractionCommand,
+  ): Promise<boolean> {
+    switch (command.type) {
+      case "set-current-turn-key": {
+        if (typeof host.setConversationCurrentTurnKey !== "function") {
+          return false;
+        }
+        await host.setConversationCurrentTurnKey(command.turnKey);
+        return true;
+      }
+
+      case "scroll-to-turn": {
+        if (typeof host.scrollConversationToTurn !== "function") {
+          return false;
+        }
+        await host.scrollConversationToTurn(command.turnKey, {
+          behavior: command.behavior,
+          align: command.align,
+        });
+        return true;
+      }
+
+      case "scroll-to-top": {
+        if (typeof host.scrollConversationToTop !== "function") {
+          return false;
+        }
+        await host.scrollConversationToTop(command.scrollTopPx, {
+          behavior: command.behavior,
+        });
+        return true;
+      }
+    }
   }
 
   return {
@@ -217,6 +611,167 @@ export function createCodexTaskNerveHostRuntime(options: {
 
     threadDisplaySnapshot: async (displayOptions) => {
       return taskNerve.threadDisplaySnapshot(displayOptions);
+    },
+
+    conversationDisplaySnapshot: async (displayOptions) => {
+      return taskNerve.conversationDisplaySnapshot(displayOptions);
+    },
+
+    conversationInteractionStep: async (input) => {
+      return taskNerve.conversationInteractionStep(input);
+    },
+
+    applyConversationInteraction: async (input) => {
+      const interaction = taskNerve.conversationInteractionStep(input);
+      let applied = 0;
+      for (const command of interaction.commands) {
+        if (await applyConversationInteractionCommand(command)) {
+          applied += 1;
+        }
+      }
+      return {
+        ...interaction,
+        apply_summary: {
+          applied,
+          skipped: interaction.commands.length - applied,
+        },
+      };
+    },
+
+    conversationChromeSnapshot: async (stateInput = {}) => {
+      if (hasConversationChromeOverrides(stateInput)) {
+        return loadConversationChromeSnapshot(stateInput);
+      }
+      const now = Date.now();
+      if (
+        conversationChromeSnapshotCache &&
+        now - conversationChromeSnapshotCache.fetchedAtMs < CONVERSATION_CHROME_CACHE_TTL_MS
+      ) {
+        return conversationChromeSnapshotCache.snapshot;
+      }
+      if (conversationChromeSnapshotInflight) {
+        return conversationChromeSnapshotInflight;
+      }
+      conversationChromeSnapshotInflight = loadConversationChromeSnapshot()
+        .then((snapshot) => {
+          conversationChromeSnapshotCache = {
+            snapshot,
+            fetchedAtMs: Date.now(),
+          };
+          return snapshot;
+        })
+        .finally(() => {
+          conversationChromeSnapshotInflight = null;
+        });
+      return conversationChromeSnapshotInflight;
+    },
+
+    handleConversationChromeAction: async (action) => {
+      switch (action.type) {
+        case "topbar-task-count-click": {
+          if (typeof host.openTaskDrawer !== "function") {
+            return {
+              ok: false,
+              integration_mode: "codex-native-host",
+              action: action.type,
+              error: "Codex host method openTaskDrawer is unavailable",
+            };
+          }
+          await host.openTaskDrawer();
+          invalidateConversationChromeCache();
+          return {
+            ok: true,
+            integration_mode: "codex-native-host",
+            action: action.type,
+            task_drawer_open: true,
+          };
+        }
+
+        case "footer-terminal-toggle-click": {
+          if (typeof host.toggleTerminalPanel !== "function") {
+            return {
+              ok: false,
+              integration_mode: "codex-native-host",
+              action: action.type,
+              error: "Codex host method toggleTerminalPanel is unavailable",
+            };
+          }
+          await host.toggleTerminalPanel();
+          invalidateConversationChromeCache();
+          const terminalOpen = await loadTerminalOpen();
+          return {
+            ok: true,
+            integration_mode: "codex-native-host",
+            action: action.type,
+            terminal_open: terminalOpen,
+          };
+        }
+
+        case "footer-branch-switch": {
+          const branch = action.branch.trim();
+          if (!branch) {
+            return {
+              ok: false,
+              integration_mode: "codex-native-host",
+              action: action.type,
+              error: "Branch name is required",
+            };
+          }
+          if (typeof host.switchTaskNerveBranch !== "function") {
+            return {
+              ok: false,
+              integration_mode: "codex-native-host",
+              action: action.type,
+              error: "Codex host method switchTaskNerveBranch is unavailable",
+            };
+          }
+          await host.switchTaskNerveBranch(branch);
+          invalidateConversationChromeCache();
+          return {
+            ok: true,
+            integration_mode: "codex-native-host",
+            action: action.type,
+            branch,
+          };
+        }
+
+      }
+
+      const exhaustive: never = action;
+      throw new Error(`Unsupported conversation chrome action: ${String(exhaustive)}`);
+    },
+
+    observeThreadRefresh: async (observeOptions) => {
+      return subscribeWithFallback({
+        subscribe: host.subscribeThreadEvents,
+        listener: (event) => {
+          invalidateConversationChromeCache();
+          observeOptions.onEvent(event);
+        },
+        subscribeArgs: [{ threadId: observeOptions.threadId ?? null }],
+        onFallbackRefresh: observeOptions.onFallbackRefresh
+          ? () => {
+              invalidateConversationChromeCache();
+              observeOptions.onFallbackRefresh?.();
+            }
+          : undefined,
+      });
+    },
+
+    observeRepositorySettingsRefresh: async (observeOptions) => {
+      return subscribeWithFallback({
+        subscribe: host.subscribeRepositorySettingsEvents,
+        listener: (event) => {
+          invalidateConversationChromeCache();
+          observeOptions.onEvent(event);
+        },
+        onFallbackRefresh: observeOptions.onFallbackRefresh
+          ? () => {
+              invalidateConversationChromeCache();
+              observeOptions.onFallbackRefresh?.();
+            }
+          : undefined,
+      });
     },
   };
 }

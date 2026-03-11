@@ -1,29 +1,30 @@
-import type { PromptNavigationTarget, ThreadDisplayEntry } from "./types.js";
+import type {
+  PromptJumpControls,
+  PromptNavigationTarget,
+  ThreadDisplayEntry,
+} from "./types.js";
 
-function baseTurnKey(value: string): string {
+export function baseTurnKey(value: string): string {
   return value.replace(/^(user|assistant):/i, "").trim();
 }
 
-function uniqueInOrder(values: string[]): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  values.forEach((value) => {
-    if (!value || seen.has(value)) {
-      return;
-    }
-    seen.add(value);
-    result.push(value);
-  });
-  return result;
-}
-
 function userTurnKeys(entries: ThreadDisplayEntry[]): string[] {
-  return uniqueInOrder(
-    entries
-      .filter((entry) => entry.role === "user")
-      .map((entry) => entry.turn_key)
-      .map((turnKey) => (turnKey.startsWith("user:") ? turnKey : `user:${baseTurnKey(turnKey)}`)),
-  );
+  const seen = new Set<string>();
+  const keys: string[] = [];
+  for (const entry of entries) {
+    if (entry.role !== "user") {
+      continue;
+    }
+    const turnKey = entry.turn_key.startsWith("user:")
+      ? entry.turn_key
+      : `user:${baseTurnKey(entry.turn_key)}`;
+    if (!turnKey || seen.has(turnKey)) {
+      continue;
+    }
+    seen.add(turnKey);
+    keys.push(turnKey);
+  }
+  return keys;
 }
 
 function anchorIndex(keys: string[], currentTurnKey?: string | null): number {
@@ -41,6 +42,20 @@ function anchorIndex(keys: string[], currentTurnKey?: string | null): number {
   const base = baseTurnKey(normalizedCurrent);
   const sameTurnIndex = keys.findIndex((key) => baseTurnKey(key) === base);
   return sameTurnIndex >= 0 ? sameTurnIndex : keys.length - 1;
+}
+
+export function buildPromptJumpControls(
+  navigation: PromptNavigationTarget,
+): PromptJumpControls {
+  return {
+    placement: "left-of-send-voice",
+    up_turn_key: navigation.previous_turn_key,
+    down_turn_key: navigation.next_turn_key,
+    can_jump_up: Boolean(navigation.previous_turn_key),
+    can_jump_down: Boolean(navigation.next_turn_key),
+    up_action: "jump-prev-user-message",
+    down_action: "jump-next-user-message",
+  };
 }
 
 export function buildPromptNavigationTarget(

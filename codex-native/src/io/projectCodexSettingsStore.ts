@@ -2,7 +2,11 @@ import { stat } from "node:fs/promises";
 
 import { normalizeProjectCodexSettings } from "../domain/projectCodexSettings.js";
 import { projectCodexSettingsSchema, type ProjectCodexSettings } from "../schemas.js";
-import { readJsonOptionalWithRaw, writePrettyJsonIfChanged } from "./jsonStore.js";
+import {
+  formatPrettyJson,
+  readJsonOptionalWithRaw,
+  writePrettyJsonIfChanged,
+} from "./jsonStore.js";
 import { timelineProjectCodexSettingsPath } from "./paths.js";
 
 const FILE_MISSING_MTIME_MS = -1;
@@ -11,6 +15,7 @@ const CACHE_KEY_SEPARATOR = "::";
 interface ProjectCodexSettingsCacheEntry {
   mtimeMs: number;
   value: ProjectCodexSettings;
+  raw: string;
 }
 
 const projectCodexSettingsCache = new Map<string, ProjectCodexSettingsCacheEntry>();
@@ -37,6 +42,18 @@ function clearProjectCodexSettingsCacheForPath(filePath: string) {
       projectCodexSettingsInflight.delete(key);
     }
   }
+}
+
+function findProjectCodexSettingsCacheForPath(
+  filePath: string,
+): ProjectCodexSettingsCacheEntry | null {
+  const prefix = `${filePath}${CACHE_KEY_SEPARATOR}`;
+  for (const [key, value] of projectCodexSettingsCache.entries()) {
+    if (key.startsWith(prefix)) {
+      return value;
+    }
+  }
+  return null;
 }
 
 async function fileMtimeMs(filePath: string): Promise<number> {
@@ -77,10 +94,12 @@ export async function loadProjectCodexSettings(options: {
     const wrote = await writePrettyJsonIfChanged(filePath, normalized, { existingRaw: raw });
     const nextMtimeMs =
       wrote || currentMtimeMs === FILE_MISSING_MTIME_MS ? await fileMtimeMs(filePath) : currentMtimeMs;
+    const nextRaw = wrote ? formatPrettyJson(normalized) : raw ?? formatPrettyJson(normalized);
     clearProjectCodexSettingsCacheForPath(filePath);
     projectCodexSettingsCache.set(cacheKey, {
       mtimeMs: nextMtimeMs,
       value: normalized,
+      raw: nextRaw,
     });
     return normalized;
   })();
@@ -97,14 +116,20 @@ export async function writeProjectCodexSettings(
 ): Promise<ProjectCodexSettings> {
   const filePath = timelineProjectCodexSettingsPath(repoRoot);
   const normalized = normalizeProjectCodexSettings(settings);
-  await writePrettyJsonIfChanged(filePath, normalized);
-  const nextMtimeMs = await fileMtimeMs(filePath);
+  const currentMtimeMs = await fileMtimeMs(filePath);
+  const cached = findProjectCodexSettingsCacheForPath(filePath);
+  const existingRaw = cached && cached.mtimeMs === currentMtimeMs ? cached.raw : undefined;
+  const wrote = await writePrettyJsonIfChanged(filePath, normalized, { existingRaw });
+  const nextMtimeMs =
+    wrote || currentMtimeMs === FILE_MISSING_MTIME_MS ? await fileMtimeMs(filePath) : currentMtimeMs;
+  const nextRaw = formatPrettyJson(normalized);
   clearProjectCodexSettingsCacheForPath(filePath);
   projectCodexSettingsCache.set(
     settingsCacheKey(filePath, normalizeGitOriginUrl(normalized.git_origin_url)),
     {
       mtimeMs: nextMtimeMs,
       value: normalized,
+      raw: nextRaw,
     },
   );
   return normalized;

@@ -1,7 +1,20 @@
 import type { ThreadActor, ThreadDisplayEntry, ThreadEntryKind } from "./types.js";
-import { parseTimestampUtc, timestampLabel, timestampTooltip } from "./timestamps.js";
+import {
+  parseTimestampUtc,
+  timestampDisplayFromIso,
+} from "./timestamps.js";
 
 const MAX_SCAN_OBJECTS = 8000;
+const MAX_TEXT_SCAN_OBJECTS = 48;
+
+const KNOWN_TURN_ARRAY_PATHS: ReadonlyArray<ReadonlyArray<string>> = [
+  ["conversation", "turns"],
+  ["thread", "turns"],
+  ["turns"],
+  ["conversation", "turn_mapping"],
+  ["turn_mapping"],
+  ["messages"],
+];
 
 interface RawTurnRecord {
   id: unknown;
@@ -19,16 +32,26 @@ interface RawTurnRecord {
   previousTurnId?: unknown;
 }
 
+interface ThreadExtractionCacheEntry {
+  marker: string;
+  entries: ThreadDisplayEntry[];
+}
+
+const threadExtractionCache = new WeakMap<object, ThreadExtractionCacheEntry>();
+
 function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
 function looksLikeTurnRecord(value: unknown): value is RawTurnRecord {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const entry = value as Record<string, unknown>;
-  if (!("id" in entry)) {
+  const entry = asRecord(value);
+  if (!entry || !("id" in entry)) {
     return false;
   }
   return (
@@ -56,14 +79,70 @@ function turnTimestamp(turn: RawTurnRecord): string | null {
   );
 }
 
-function extractTurns(thread: unknown): RawTurnRecord[] {
+function readPath(root: unknown, path: ReadonlyArray<string>): unknown {
+  let current: unknown = root;
+  for (const segment of path) {
+    const record = asRecord(current);
+    if (!record || !(segment in record)) {
+      return null;
+    }
+    current = record[segment];
+  }
+  return current;
+}
+
+function normalizeTurnArray(value: unknown): RawTurnRecord[] {
+  if (Array.isArray(value)) {
+    return value.filter((entry): entry is RawTurnRecord => looksLikeTurnRecord(entry));
+  }
+  const record = asRecord(value);
+  if (!record) {
+    return [];
+  }
+  return Object.values(record)
+    .map((entry) => asRecord(entry)?.turn ?? entry)
+    .filter((entry): entry is RawTurnRecord => looksLikeTurnRecord(entry));
+}
+
+function dedupeSortTurns(turns: RawTurnRecord[]): RawTurnRecord[] {
+  const deduped = new Map<string, RawTurnRecord>();
+  turns.forEach((turn, index) => {
+    const key = normalizeTurnId(turn.id, index);
+    if (!deduped.has(key)) {
+      deduped.set(key, turn);
+      return;
+    }
+    deduped.set(key, { ...deduped.get(key), ...turn });
+  });
+
+  return [...deduped.values()].sort((left, right) => {
+    const leftTime = turnTimestamp(left);
+    const rightTime = turnTimestamp(right);
+    if (leftTime && rightTime && leftTime !== rightTime) {
+      return leftTime.localeCompare(rightTime);
+    }
+    return normalizeTurnId(left.id, 0).localeCompare(normalizeTurnId(right.id, 0));
+  });
+}
+
+function extractTurnsViaKnownPaths(thread: unknown): RawTurnRecord[] {
+  for (const path of KNOWN_TURN_ARRAY_PATHS) {
+    const candidateTurns = normalizeTurnArray(readPath(thread, path));
+    if (candidateTurns.length > 0) {
+      return dedupeSortTurns(candidateTurns);
+    }
+  }
+  return [];
+}
+
+function extractTurnsByScan(thread: unknown): RawTurnRecord[] {
   const queue: unknown[] = [thread];
   const seen = new Set<unknown>();
   const turns: RawTurnRecord[] = [];
   let scanned = 0;
 
-  while (queue.length > 0 && scanned < MAX_SCAN_OBJECTS) {
-    const current = queue.shift();
+  for (let queueIndex = 0; queueIndex < queue.length && scanned < MAX_SCAN_OBJECTS; queueIndex += 1) {
+    const current = queue[queueIndex];
     scanned += 1;
     if (!current || typeof current !== "object" || seen.has(current)) {
       continue;
@@ -94,24 +173,15 @@ function extractTurns(thread: unknown): RawTurnRecord[] {
     return thread.filter((entry): entry is RawTurnRecord => looksLikeTurnRecord(entry));
   }
 
-  const deduped = new Map<string, RawTurnRecord>();
-  turns.forEach((turn, index) => {
-    const key = normalizeTurnId(turn.id, index);
-    if (!deduped.has(key)) {
-      deduped.set(key, turn);
-      return;
-    }
-    deduped.set(key, { ...deduped.get(key), ...turn });
-  });
+  return dedupeSortTurns(turns);
+}
 
-  return [...deduped.values()].sort((left, right) => {
-    const leftTime = turnTimestamp(left);
-    const rightTime = turnTimestamp(right);
-    if (leftTime && rightTime && leftTime !== rightTime) {
-      return leftTime.localeCompare(rightTime);
-    }
-    return normalizeTurnId(left.id, 0).localeCompare(normalizeTurnId(right.id, 0));
-  });
+function extractTurns(thread: unknown): RawTurnRecord[] {
+  const fastPath = extractTurnsViaKnownPaths(thread);
+  if (fastPath.length > 0) {
+    return fastPath;
+  }
+  return extractTurnsByScan(thread);
 }
 
 function compactWhitespace(value: string): string {
@@ -158,22 +228,45 @@ function flattenText(value: unknown): string {
   if (!value || typeof value !== "object") {
     return "";
   }
-  if (Array.isArray(value)) {
-    const combined = value.map((entry) => flattenText(entry)).filter(Boolean).join(" ");
-    return compactWhitespace(combined);
+
+  const queue: unknown[] = [value];
+  const seen = new Set<unknown>();
+  const pieces: string[] = [];
+  let scanned = 0;
+
+  for (
+    let queueIndex = 0;
+    queueIndex < queue.length && scanned < MAX_TEXT_SCAN_OBJECTS;
+    queueIndex += 1
+  ) {
+    const current = queue[queueIndex];
+    scanned += 1;
+
+    const text = stringFromUnknown(current);
+    if (text) {
+      pieces.push(text);
+      continue;
+    }
+    if (!current || typeof current !== "object" || seen.has(current)) {
+      continue;
+    }
+    seen.add(current);
+
+    if (Array.isArray(current)) {
+      current.forEach((entry) => queue.push(entry));
+      continue;
+    }
+
+    const record = current as Record<string, unknown>;
+    const picked = bestTextField(record);
+    if (picked) {
+      pieces.push(picked);
+      continue;
+    }
+    Object.values(record).forEach((entry) => queue.push(entry));
   }
 
-  const record = value as Record<string, unknown>;
-  const picked = bestTextField(record);
-  if (picked) {
-    return picked;
-  }
-
-  const combined = Object.values(record)
-    .map((entry) => flattenText(entry))
-    .filter(Boolean)
-    .join(" ");
-  return compactWhitespace(combined);
+  return compactWhitespace(pieces.join(" "));
 }
 
 function itemType(item: unknown): string {
@@ -253,6 +346,7 @@ function turnEntries(turn: RawTurnRecord, index: number): ThreadDisplayEntry[] {
 
   inputItems.forEach((item, itemIndex) => {
     const entryTimestamp = itemTimestamp(item, baseTimestamp);
+    const timestampDisplay = timestampDisplayFromIso(entryTimestamp);
     entries.push({
       entry_id: `${turnId}:user:${itemIndex + 1}`,
       turn_key: `user:${turnId}`,
@@ -261,13 +355,14 @@ function turnEntries(turn: RawTurnRecord, index: number): ThreadDisplayEntry[] {
       kind: inferKind(item),
       text: summarizeItem(item, "User action"),
       created_at_utc: entryTimestamp,
-      timestamp_label: timestampLabel(entryTimestamp),
-      timestamp_tooltip: timestampTooltip(entryTimestamp),
+      timestamp_label: timestampDisplay.label,
+      timestamp_tooltip: timestampDisplay.tooltip,
     });
   });
 
   outputItems.forEach((item, itemIndex) => {
     const entryTimestamp = itemTimestamp(item, baseTimestamp);
+    const timestampDisplay = timestampDisplayFromIso(entryTimestamp);
     entries.push({
       entry_id: `${turnId}:assistant:${itemIndex + 1}`,
       turn_key: `assistant:${turnId}`,
@@ -276,14 +371,15 @@ function turnEntries(turn: RawTurnRecord, index: number): ThreadDisplayEntry[] {
       kind: inferKind(item),
       text: summarizeItem(item, "Assistant action"),
       created_at_utc: entryTimestamp,
-      timestamp_label: timestampLabel(entryTimestamp),
-      timestamp_tooltip: timestampTooltip(entryTimestamp),
+      timestamp_label: timestampDisplay.label,
+      timestamp_tooltip: timestampDisplay.tooltip,
     });
   });
 
   if (!hasDirectionalItems) {
     genericItems.forEach((item, itemIndex) => {
       const entryTimestamp = itemTimestamp(item, baseTimestamp);
+      const timestampDisplay = timestampDisplayFromIso(entryTimestamp);
       entries.push({
         entry_id: `${turnId}:item:${itemIndex + 1}`,
         turn_key: turnId,
@@ -292,8 +388,8 @@ function turnEntries(turn: RawTurnRecord, index: number): ThreadDisplayEntry[] {
         kind: inferKind(item),
         text: summarizeItem(item, "Thread action"),
         created_at_utc: entryTimestamp,
-        timestamp_label: timestampLabel(entryTimestamp),
-        timestamp_tooltip: timestampTooltip(entryTimestamp),
+        timestamp_label: timestampDisplay.label,
+        timestamp_tooltip: timestampDisplay.tooltip,
       });
     });
   }
@@ -302,6 +398,7 @@ function turnEntries(turn: RawTurnRecord, index: number): ThreadDisplayEntry[] {
     return entries;
   }
 
+  const timestampDisplay = timestampDisplayFromIso(baseTimestamp);
   return [
     {
       entry_id: `${turnId}:fallback`,
@@ -311,13 +408,128 @@ function turnEntries(turn: RawTurnRecord, index: number): ThreadDisplayEntry[] {
       kind: "action",
       text: "Thread action",
       created_at_utc: baseTimestamp,
-      timestamp_label: timestampLabel(baseTimestamp),
-      timestamp_tooltip: timestampTooltip(baseTimestamp),
+      timestamp_label: timestampDisplay.label,
+      timestamp_tooltip: timestampDisplay.tooltip,
     },
   ];
 }
 
-export function extractThreadDisplayEntries(thread: unknown): ThreadDisplayEntry[] {
-  const turns = extractTurns(thread);
-  return turns.flatMap((turn, index) => turnEntries(turn, index));
+function hydrateMissingTimestamps(entries: ThreadDisplayEntry[], generatedAtUtc: string): ThreadDisplayEntry[] {
+  const generated = parseTimestampUtc(generatedAtUtc) || new Date().toISOString();
+  let lastKnown = generated;
+
+  const forward = entries.map((entry) => {
+    const createdAt = parseTimestampUtc(entry.created_at_utc) || lastKnown;
+    lastKnown = createdAt;
+    const timestampDisplay = timestampDisplayFromIso(createdAt);
+    return {
+      ...entry,
+      created_at_utc: createdAt,
+      timestamp_label: entry.timestamp_label || timestampDisplay.label,
+      timestamp_tooltip: entry.timestamp_tooltip || timestampDisplay.tooltip,
+    };
+  });
+
+  let nextKnown = generated;
+  for (let index = forward.length - 1; index >= 0; index -= 1) {
+    const entry = forward[index]!;
+    const createdAt = parseTimestampUtc(entry.created_at_utc) || nextKnown;
+    nextKnown = createdAt;
+    if (entry.timestamp_label && entry.timestamp_tooltip) {
+      continue;
+    }
+    const timestampDisplay = timestampDisplayFromIso(createdAt);
+    forward[index] = {
+      ...entry,
+      created_at_utc: createdAt,
+      timestamp_label: entry.timestamp_label || timestampDisplay.label,
+      timestamp_tooltip: entry.timestamp_tooltip || timestampDisplay.tooltip,
+    };
+  }
+
+  return forward;
+}
+
+const CACHEABLE_TURN_ARRAY_PATHS: ReadonlyArray<ReadonlyArray<string>> = [
+  ["conversation", "turns"],
+  ["thread", "turns"],
+  ["turns"],
+  ["messages"],
+];
+
+function cacheableTurnArray(thread: unknown): unknown[] | null {
+  for (const path of CACHEABLE_TURN_ARRAY_PATHS) {
+    const value = readPath(thread, path);
+    if (Array.isArray(value)) {
+      return value;
+    }
+  }
+  return Array.isArray(thread) ? thread : null;
+}
+
+function fastTurnMarker(value: unknown): string {
+  const record = asRecord(value);
+  if (!record) {
+    return String(value ?? "");
+  }
+  const id = String(record.id ?? "");
+  const timestamp = String(
+    record.updated_at ??
+      record.updatedAt ??
+      record.timestamp ??
+      record.created_at ??
+      record.createdAt ??
+      "",
+  );
+  const inputCount =
+    asArray(record.input_items).length +
+    asArray(record.inputItems).length +
+    asArray(record.content).length;
+  const outputCount = asArray(record.output_items).length + asArray(record.outputItems).length;
+  return `${id}:${timestamp}:${inputCount}:${outputCount}`;
+}
+
+function entriesCacheMarker(thread: unknown, generatedAtUtc: string): string | null {
+  const turns = cacheableTurnArray(thread);
+  if (!turns) {
+    return null;
+  }
+  const generated = parseTimestampUtc(generatedAtUtc) || generatedAtUtc.trim() || "generated";
+  if (turns.length === 0) {
+    return `0:${generated}`;
+  }
+  const middleIndex = Math.floor((turns.length - 1) / 2);
+  return [
+    String(turns.length),
+    fastTurnMarker(turns[0]),
+    fastTurnMarker(turns[middleIndex]),
+    fastTurnMarker(turns[turns.length - 1]),
+    generated,
+  ].join("|");
+}
+
+export function extractThreadDisplayEntries(
+  thread: unknown,
+  generatedAtUtc = new Date().toISOString(),
+): ThreadDisplayEntry[] {
+  const marker = entriesCacheMarker(thread, generatedAtUtc);
+  if (thread && typeof thread === "object" && marker) {
+    const cached = threadExtractionCache.get(thread);
+    if (cached && cached.marker === marker) {
+      return cached.entries;
+    }
+  }
+
+  const sourceTurns = extractTurns(thread);
+  const entries = sourceTurns.flatMap((turn, index) => turnEntries(turn, index));
+  const hydrated = hydrateMissingTimestamps(entries, generatedAtUtc);
+
+  if (thread && typeof thread === "object" && marker) {
+    threadExtractionCache.set(thread, {
+      marker,
+      entries: hydrated,
+    });
+  }
+
+  return hydrated;
 }

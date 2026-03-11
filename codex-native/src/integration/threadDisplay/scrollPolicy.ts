@@ -1,6 +1,7 @@
 import type { ThreadScrollDecision, ThreadViewportState } from "./types.js";
 
 const STICK_TO_BOTTOM_THRESHOLD_PX = 56;
+const PRESERVE_OFFSET_TOP_THRESHOLD_PX = 120;
 
 function nearBottom(viewport: ThreadViewportState): boolean {
   const distanceFromBottom = viewport.scroll_height_px - (viewport.scroll_top_px + viewport.viewport_height_px);
@@ -9,6 +10,10 @@ function nearBottom(viewport: ThreadViewportState): boolean {
 
 function maxScrollTop(viewport: ThreadViewportState): number {
   return Math.max(0, viewport.scroll_height_px - viewport.viewport_height_px);
+}
+
+function nearTop(viewport: ThreadViewportState): boolean {
+  return viewport.scroll_top_px <= PRESERVE_OFFSET_TOP_THRESHOLD_PX;
 }
 
 export function decideThreadScrollBehavior(options: {
@@ -48,6 +53,12 @@ export function decideThreadScrollBehavior(options: {
 
   const delta = nextViewport.scroll_height_px - previousViewport.scroll_height_px;
   if (!Number.isFinite(delta) || delta <= 0) {
+    return { mode: "no-op" };
+  }
+
+  // While users are reading history away from both edges, keep their manual position stable.
+  // Preserve offset only when older history is likely prepended near the top.
+  if (!nearTop(previousViewport)) {
     return { mode: "no-op" };
   }
 

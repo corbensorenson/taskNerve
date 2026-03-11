@@ -5,6 +5,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { createTaskNerveService } from "../src/integration/taskNerveService.js";
+import type { TaskRecord } from "../src/schemas.js";
 
 describe("taskNerve service integration surface", () => {
   it("reports integration health and core capabilities", () => {
@@ -15,6 +16,8 @@ describe("taskNerve service integration surface", () => {
     expect(health.mode).toBe("codex-native-integration");
     expect(health.capabilities).toContain("project_settings");
     expect(health.capabilities).toContain("task_snapshot");
+    expect(health.capabilities).toContain("conversation_display");
+    expect(health.capabilities).toContain("conversation_interaction");
     expect(health.capabilities).toContain("thread_display");
   });
 
@@ -42,6 +45,36 @@ describe("taskNerve service integration surface", () => {
     expect(snapshot.visible_tasks[0]?.task_id).toBe("t-1");
     expect(snapshot.all_stats.total).toBe(2);
     expect(snapshot.user_tags).toEqual(["native"]);
+  });
+
+  it("reuses task snapshot objects for unchanged task/search inputs", () => {
+    const service = createTaskNerveService();
+    const tasks: Array<Partial<TaskRecord>> = [
+      { task_id: "t-2", title: "done", status: "done", priority: 5 },
+      { task_id: "t-1", title: "open", status: "open", priority: 10 },
+    ];
+    const first = service.taskSnapshot(tasks, "open");
+    const second = service.taskSnapshot(tasks, "open");
+    const third = service.taskSnapshot(tasks, "");
+
+    expect(second).toBe(first);
+    expect(third.all_tasks).toBe(first.all_tasks);
+    expect(third.user_tags).toBe(first.user_tags);
+  });
+
+  it("reuses task snapshot objects for content-equivalent cloned task arrays", () => {
+    const service = createTaskNerveService();
+    const tasks: Array<Partial<TaskRecord>> = [
+      { task_id: "t-2", title: "done", status: "done", priority: 5, tags: ["x"] },
+      { task_id: "t-1", title: "open", status: "open", priority: 10, tags: ["y"] },
+    ];
+    const first = service.taskSnapshot(tasks, "open");
+    const cloned = tasks.map((task) => ({ ...task, tags: [...(task.tags || [])] }));
+    const second = service.taskSnapshot(cloned, "open");
+
+    expect(second).toBe(first);
+    expect(second.all_tasks).toBe(first.all_tasks);
+    expect(second.visible_tasks).toBe(first.visible_tasks);
   });
 
   it("resolves model routing and queue behavior via direct service calls", () => {
@@ -98,12 +131,12 @@ describe("taskNerve service integration surface", () => {
       current_turn_key: "assistant:turn-1",
       previous_entry_count: 2,
       previous_viewport: {
-        scroll_top_px: 120,
+        scroll_top_px: 220,
         scroll_height_px: 1000,
         viewport_height_px: 500,
       },
       viewport: {
-        scroll_top_px: 120,
+        scroll_top_px: 220,
         scroll_height_px: 1300,
         viewport_height_px: 500,
       },
@@ -119,8 +152,86 @@ describe("taskNerve service integration surface", () => {
     expect(snapshot.prompt_navigation.previous_turn_key).toBe(null);
     expect(snapshot.prompt_navigation.next_turn_key).toBe("user:turn-2");
 
-    expect(snapshot.scroll_decision.mode).toBe("preserve-offset");
-    expect(snapshot.scroll_decision.scroll_top_px).toBe(420);
+    expect(snapshot.scroll_decision.mode).toBe("no-op");
+    expect(snapshot.jump_controls.placement).toBe("left-of-send-voice");
+    expect(snapshot.jump_controls.up_action).toBe("jump-prev-user-message");
+    expect(snapshot.jump_controls.down_action).toBe("jump-next-user-message");
+  });
+
+  it("builds Codex-style conversation display snapshots with camelCase API", () => {
+    const service = createTaskNerveService();
+    const snapshot = service.conversationDisplaySnapshot({
+      thread: {
+        turns: [
+          {
+            id: "turn-1",
+            created_at: "2026-03-10T11:00:00.000Z",
+            input_items: [{ type: "message", text: "ping" }],
+            output_items: [{ type: "message", text: "pong" }],
+          },
+        ],
+      },
+      currentTurnKey: "assistant:turn-1",
+      viewport: {
+        scroll_top_px: 0,
+        scroll_height_px: 260,
+        viewport_height_px: 200,
+      },
+    });
+
+    expect(snapshot.integrationMode).toBe("codex-native-host");
+    expect(snapshot.entries).toHaveLength(2);
+    expect(snapshot.promptNavigation.userTurnKeys).toEqual(["user:turn-1"]);
+    expect(snapshot.virtualWindow.end_index_exclusive).toBe(2);
+  });
+
+  it("builds conversation interaction commands for jump controls", () => {
+    const service = createTaskNerveService();
+    const snapshot = service.conversationDisplaySnapshot({
+      thread: {
+        turns: [
+          {
+            id: "turn-1",
+            created_at: "2026-03-10T11:00:00.000Z",
+            input_items: [{ type: "message", text: "one" }],
+            output_items: [{ type: "message", text: "a" }],
+          },
+          {
+            id: "turn-2",
+            created_at: "2026-03-10T11:01:00.000Z",
+            input_items: [{ type: "message", text: "two" }],
+            output_items: [{ type: "message", text: "b" }],
+          },
+          {
+            id: "turn-3",
+            created_at: "2026-03-10T11:02:00.000Z",
+            input_items: [{ type: "message", text: "three" }],
+            output_items: [{ type: "message", text: "c" }],
+          },
+        ],
+      },
+      currentTurnKey: "assistant:turn-2",
+    });
+
+    const interaction = service.conversationInteractionStep({
+      snapshot,
+      event: {
+        type: "jump-next-user-message",
+        nowMs: 1000,
+      },
+    });
+
+    expect(interaction.integrationMode).toBe("codex-native-host");
+    expect(interaction.commands).toHaveLength(2);
+    expect(interaction.commands[0]).toMatchObject({
+      type: "set-current-turn-key",
+      turnKey: "user:turn-3",
+    });
+    expect(interaction.commands[1]).toMatchObject({
+      type: "scroll-to-turn",
+      turnKey: "user:turn-3",
+      behavior: "smooth",
+    });
   });
 
   it("loads and writes project settings and registry through the shared IO stores", async () => {

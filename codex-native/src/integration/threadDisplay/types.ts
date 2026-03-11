@@ -20,6 +20,16 @@ export interface PromptNavigationTarget {
   user_turn_keys: string[];
 }
 
+export interface PromptJumpControls {
+  placement: "left-of-send-voice";
+  up_turn_key: string | null;
+  down_turn_key: string | null;
+  can_jump_up: boolean;
+  can_jump_down: boolean;
+  up_action: "jump-prev-user-message";
+  down_action: "jump-next-user-message";
+}
+
 export interface ThreadVirtualWindow {
   start_index: number;
   end_index_exclusive: number;
@@ -46,6 +56,7 @@ export interface BuildThreadDisplayOptions {
   thread: unknown;
   current_turn_key?: string | null;
   focus_turn_key?: string | null;
+  generated_at_utc?: string | null;
   viewport?: ThreadViewportState;
   previous_viewport?: ThreadViewportState;
   previous_entry_count?: number;
@@ -55,8 +66,10 @@ export interface BuildThreadDisplayOptions {
 
 export interface ThreadDisplaySnapshot {
   integration_mode: "codex-native-host";
+  generated_at_utc: string;
   entries: ThreadDisplayEntry[];
   prompt_navigation: PromptNavigationTarget;
+  jump_controls: PromptJumpControls;
   virtual_window: ThreadVirtualWindow;
   scroll_decision: ThreadScrollDecision;
 }
