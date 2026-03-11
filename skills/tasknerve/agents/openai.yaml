@@ -1,13 +1,10 @@
 version: 1
 interface:
   id: tasknerve
-  display_name: TaskNerve Native Workflow
-  short_description: Codex-native project orchestration with project settings, task drawer workflow, controller automation, and repo-local project contracts.
+  display_name: TaskNerve Operator
+  short_description: Run project work through TaskNerve controller/worker orchestration, task drawer flow, and project contract docs.
   default_prompt: >-
-    Use the built-in TaskNerve surfaces inside Codex as the default
-    orchestration system for this project. Prefer the TaskNerve settings page
-    for project policy and controller configuration, prefer the task drawer for
-    day-to-day queue work, treat project_goals.md and project_manifest.md as
-    durable contracts, use contributing ideas.md as optional reference input,
-    keep worker heartbeats task-aware and model-aware, and route all
-    controller/worker prompting through Codex's signed-in inference path.
+    Operate this project through TaskNerve's native workflow in Codex. Use
+    project settings for policy, task drawer for active queue work, keep
+    project_goals.md and project_manifest.md aligned with execution, and keep
+    controller/worker flow clear, responsive, and task-aware.

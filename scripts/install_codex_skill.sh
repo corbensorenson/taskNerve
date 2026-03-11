@@ -3,19 +3,31 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
-SRC_SKILL_DIR="$REPO_ROOT/skills/tasknerve"
-DST_SKILL_DIR="$CODEX_HOME_DIR/skills/tasknerve"
+SRC_SKILLS_ROOT="$REPO_ROOT/skills"
 OVERWRITE="${OVERWRITE:-1}"
 
-if [[ ! -d "$SRC_SKILL_DIR" ]]; then
-  echo "missing source skill directory: $SRC_SKILL_DIR" >&2
+if [[ ! -d "$SRC_SKILLS_ROOT" ]]; then
+  echo "missing source skills directory: $SRC_SKILLS_ROOT" >&2
   exit 1
 fi
 
 mkdir -p "$CODEX_HOME_DIR/skills"
-if [[ "$OVERWRITE" == "1" ]]; then
-  rm -rf "$DST_SKILL_DIR"
-fi
-cp -R "$SRC_SKILL_DIR" "$DST_SKILL_DIR"
 
-echo "Installed tasknerve Codex skill to: $DST_SKILL_DIR"
+installed=0
+for src_dir in "$SRC_SKILLS_ROOT"/*; do
+  [[ -d "$src_dir" ]] || continue
+  skill_id="$(basename "$src_dir")"
+  [[ "$skill_id" == .* ]] && continue
+  dst_dir="$CODEX_HOME_DIR/skills/$skill_id"
+  if [[ "$OVERWRITE" == "1" ]]; then
+    rm -rf "$dst_dir"
+  fi
+  cp -R "$src_dir" "$dst_dir"
+  echo "Installed Codex skill: $skill_id -> $dst_dir"
+  installed=$((installed + 1))
+done
+
+if [[ "$installed" -eq 0 ]]; then
+  echo "no skills found under: $SRC_SKILLS_ROOT" >&2
+  exit 1
+fi

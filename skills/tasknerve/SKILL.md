@@ -1,37 +1,35 @@
 ---
 name: tasknerve
-description: Codex-native multi-agent project orchestration. Use when work should be coordinated through TaskNerve tasks, controller policy, project documents, and native Codex threads.
+description: Use TaskNerve inside Codex to run project work through controller/worker queues, project settings, and repo-local TaskNerve contracts.
 ---
 
-# TaskNerve Skill
+# TaskNerve Skill (Use)
 
-Use this skill when project work should be managed through native TaskNerve surfaces in Codex.
+Use this skill when the user wants to operate project work through TaskNerve's native Codex workflow.
+
+If you want, I can next add a tiny “skill routing” note so requests automatically prefer tasknerve-creator for platform/dev work and tasknerve for orchestration/use.
 
 ## Activation Criteria
 
 Use this skill when any of the following are true:
-- The user wants to coordinate multiple Codex threads on one project.
-- The user wants TaskNerve tasks, controller behavior, heartbeats, or worker routing changed.
-- The user wants `project_goals.md`, `project_manifest.md`, or `contributing ideas.md` refined as project contracts.
-- The user wants TaskNerve traces, project settings, or project-specific automation behavior adjusted.
-- The user wants Codex-native TaskNerve integration work.
+- The user wants to coordinate controller and worker threads on a project.
+- The user wants to manage TaskNerve queue flow, heartbeats, or handoffs.
+- The user wants project-level TaskNerve settings adjusted.
+- The user wants `project_goals.md`, `project_manifest.md`, or `contributing ideas.md` kept aligned with active work.
+- The user wants day-to-day TaskNerve operation, triage, and orchestration.
+
+Use `tasknerve-creator` instead when the request is to build/modify TaskNerve itself.
 
 ## Runtime Rules
 
-- The live TaskNerve path on `codex/codex-native` is TypeScript inside Codex host runtime seams.
-- The archived Rust runtime is reference-only and not part of the live path.
-- Do not steer users toward a TaskNerve CLI workflow on this branch.
-- Do not add app-bundle patching, runtime injection, localhost bridge services, or DOM mutation overlays.
-- If a required host surface is missing, document the host gap and implement through typed Codex host-service contracts.
-- Alpha single-target rule: implement product changes in exactly one source path, `codex-native/src`.
-- Do not maintain parallel dev/test runtime trees, duplicate editable bundle copies, or split implementation pipelines for the same user-steered feature.
-- Treat `target/*` extracts and generated bundles as build/runtime artifacts; they are not source-of-truth code.
-- If runtime extract verification is needed, use one canonical extract tree only: `target/codex-tasknerve-app-live-extract` (alias `target/codex-tasknerve-app-src`).
+- Operate through native Codex TaskNerve surfaces first.
+- Keep orchestration state repo-local and project-contract driven.
+- Do not introduce alternate runtime paths while performing usage/orchestration work.
 
 ## Native Workflow
 
-1. Work from active Codex project context.
-2. Treat TaskNerve as orchestration layer:
+1. Work from the active project and current Codex thread context.
+2. Treat TaskNerve as the project orchestration layer:
 - the TaskNerve page is for project settings and per-project policies
 - the task drawer is the primary queue interaction surface
 - the controller thread owns backlog shaping, maintenance passes, and worker orchestration
@@ -41,28 +39,8 @@ Use this skill when any of the following are true:
 - [project_manifest.md](/Users/adimus/Documents/taskNerve/project_manifest.md)
 - [contributing ideas.md](/Users/adimus/Documents/taskNerve/contributing%20ideas.md)
 
-4. Keep new logic in modular native paths:
-- [codex-native/src/integration/](/Users/adimus/Documents/taskNerve/codex-native/src/integration)
-- [codex-native/src/domain/](/Users/adimus/Documents/taskNerve/codex-native/src/domain)
-- [codex-native/src/io/](/Users/adimus/Documents/taskNerve/codex-native/src/io)
-
-5. Validate native behavior through direct integration flow.
-
-6. Run checks before closing work:
-
-Human-controlled fast path (default when user is actively steering):
-- run only the smallest meaningful checks for touched native modules
-- do not create parallel implementation tracks to satisfy test/process ceremony
-
-Autonomous/hardening path:
-- run full typecheck and test gates before closure
-
-```bash
-cd /Users/adimus/Documents/taskNerve/codex-native
-npm install
-npm run typecheck
-npm test
-```
+4. Keep workers fed with concrete, ready work and avoid idle churn.
+5. Capture user-facing state clearly: active project, controller ownership, queue health, and blockers.
 
 ## Controller Contract
 

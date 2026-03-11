@@ -59,11 +59,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SRC_SKILL_DIR="$REPO_ROOT/skills/tasknerve"
-DEST_SKILL_DIR="$DEST_ROOT/tasknerve"
+SRC_SKILLS_ROOT="$REPO_ROOT/skills"
 
-if [[ ! -d "$SRC_SKILL_DIR" ]]; then
-  echo "missing source skill: $SRC_SKILL_DIR" >&2
+if [[ ! -d "$SRC_SKILLS_ROOT" ]]; then
+  echo "missing source skills root: $SRC_SKILLS_ROOT" >&2
   exit 1
 fi
 
@@ -73,16 +72,27 @@ if [[ ! -w "$DEST_ROOT" ]]; then
   echo "choose a writable path with --dest or rerun with appropriate permissions" >&2
   exit 1
 fi
-if [[ -e "$DEST_SKILL_DIR" ]]; then
-  if [[ "$OVERWRITE" -eq 1 ]]; then
-    rm -rf "$DEST_SKILL_DIR"
-  else
-    echo "destination exists: $DEST_SKILL_DIR (use --overwrite)" >&2
-    exit 1
+published=0
+for src_dir in "$SRC_SKILLS_ROOT"/*; do
+  [[ -d "$src_dir" ]] || continue
+  skill_id="$(basename "$src_dir")"
+  [[ "$skill_id" == .* ]] && continue
+  dest_skill_dir="$DEST_ROOT/$skill_id"
+  if [[ -e "$dest_skill_dir" ]]; then
+    if [[ "$OVERWRITE" -eq 1 ]]; then
+      rm -rf "$dest_skill_dir"
+    else
+      echo "destination exists: $dest_skill_dir (use --overwrite)" >&2
+      exit 1
+    fi
   fi
+  cp -R "$src_dir" "$dest_skill_dir"
+  chmod -R a+rX "$dest_skill_dir"
+  echo "Published shared skill: $skill_id -> $dest_skill_dir"
+  published=$((published + 1))
+done
+
+if [[ "$published" -eq 0 ]]; then
+  echo "no skills found under: $SRC_SKILLS_ROOT" >&2
+  exit 1
 fi
-
-cp -R "$SRC_SKILL_DIR" "$DEST_SKILL_DIR"
-chmod -R a+rX "$DEST_SKILL_DIR"
-
-echo "Published shared skill to: $DEST_SKILL_DIR"

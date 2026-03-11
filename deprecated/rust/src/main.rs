@@ -14690,6 +14690,15 @@ fn render_codex_main_bridge_script(
     host: &str,
     port: u16,
 ) -> String {
+    let window_manager_binding = bindings
+        .window_manager
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter(|value| *value != "null")
+        .filter(|value| !value.starts_with("__TASKNERVE_"))
+        .filter(|value| *value != "TASKNERVE_WINDOW_MANAGER")
+        .unwrap_or("null");
     format!(
         "{}\n{}\n{}",
         CODEX_MAIN_BRIDGE_START_MARKER,
@@ -14711,7 +14720,7 @@ fn render_codex_main_bridge_script(
             )
             .replace(
                 "__TASKNERVE_WINDOW_MANAGER__",
-                bindings.window_manager.as_deref().unwrap_or("null"),
+                window_manager_binding,
             ),
         CODEX_MAIN_BRIDGE_END_MARKER
     )
@@ -36418,6 +36427,7 @@ anyhow = "1"
                 context_resolver: "CC".to_string(),
                 ensure_window: Some("EE".to_string()),
                 navigate_route: Some("FF".to_string()),
+                window_manager: Some("L9".to_string()),
             }
         );
     }
@@ -36439,10 +36449,28 @@ anyhow = "1"
         assert!(output.contains("const TASKNERVE_CONTEXT_RESOLVER = CC;"));
         assert!(output.contains("const TASKNERVE_ENSURE_WINDOW = EE;"));
         assert!(output.contains("const TASKNERVE_NAVIGATE_ROUTE = FF;"));
+        assert!(output.contains("const TASKNERVE_WINDOW_MANAGER = L9;"));
         assert!(output.contains("const TASKNERVE_BRIDGE_HOST = \"127.0.0.1\";"));
         assert!(output.contains("const TASKNERVE_BRIDGE_PORT = 7791;"));
         assert!(output.contains(CODEX_MAIN_BRIDGE_START_MARKER));
         assert!(output.contains("//# sourceMappingURL=main.js.map"));
+    }
+
+    #[test]
+    fn patch_codex_main_js_sanitizes_window_manager_placeholder_binding() {
+        let input = concat!(
+            "var AA={id:q1,display_name:n1,kind:`local`};",
+            "var BB=new Map,CC=x=>{let y=BB.get(x.id);if(y)return y;let z=new hne({hostProcess:qre,host:x});return BB.set(x.id,z),L9.registerContext(x.id,z),z},",
+            "DD=CC(AA);",
+            "MENU=tj({ensurePrimaryWindowVisible:EE,navigateToRoute:(win,path)=>noop(win,path),selectHost:GG,navigateToRoute:FF});",
+            "EE=async id=>{let win=__TASKNERVE_WINDOW_MANAGER__.getPrimaryWindow(id);if(win)return win;return null};",
+            "GG=async id=>{return id};",
+            "function FF(win,path,state){L9.sendMessageToWindow(win,{type:`navigate-to-route`,path:path,state:state})}",
+            "\n//# sourceMappingURL=main.js.map\n"
+        );
+        let output = patch_codex_main_js(input, "127.0.0.1", 7791).expect("patch main");
+        assert!(output.contains("const TASKNERVE_WINDOW_MANAGER = null;"));
+        assert!(!output.contains("__TASKNERVE_WINDOW_MANAGER__;"));
     }
 
     #[test]

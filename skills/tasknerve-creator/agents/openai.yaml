@@ -1,0 +1,10 @@
+version: 1
+interface:
+  id: tasknerve-creator
+  display_name: TaskNerve Creator
+  short_description: Build and optimize TaskNerve native runtime, UI integration, architecture, and skill definitions.
+  default_prompt: >-
+    Work as the TaskNerve platform engineer. Make native TaskNerve changes in
+    codex-native/src, keep one implementation path, prioritize responsiveness
+    and low overhead, avoid patch/injection workflows as normal architecture,
+    and keep TaskNerve skills split cleanly between usage and creator intent.
