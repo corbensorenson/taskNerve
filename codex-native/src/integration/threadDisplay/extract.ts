@@ -37,9 +37,15 @@ interface ThreadExtractionCacheEntry {
   entries: ThreadDisplayEntry[];
 }
 
+interface TurnEntriesCacheEntry {
+  marker: string;
+  entries: ThreadDisplayEntry[];
+}
+
 const threadExtractionCache = new WeakMap<object, ThreadExtractionCacheEntry>();
 const turnArrayExtractionCache = new WeakMap<unknown[], ThreadExtractionCacheEntry>();
 const turnMappingExtractionCache = new WeakMap<Record<string, unknown>, ThreadExtractionCacheEntry>();
+const turnEntriesCache = new WeakMap<object, TurnEntriesCacheEntry>();
 
 function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
@@ -321,6 +327,63 @@ function summarizeItem(item: unknown, fallbackPrefix: string): string {
   return `${fallbackPrefix}: action`;
 }
 
+function boundedProbe(value: string): string {
+  return compactWhitespace(value).slice(0, 64);
+}
+
+function itemQuickProbe(item: unknown): string {
+  const primitive = stringFromUnknown(item);
+  if (primitive) {
+    return boundedProbe(primitive);
+  }
+
+  const record = asRecord(item);
+  if (!record) {
+    return "";
+  }
+
+  const type = itemType(item);
+  const preferredKeys = [
+    "text",
+    "message",
+    "name",
+    "title",
+    "detail",
+    "reason",
+    "status",
+    "label",
+    "summary",
+  ] as const;
+  for (const key of preferredKeys) {
+    const text = stringFromUnknown(record[key]);
+    if (text) {
+      return boundedProbe(type ? `${type}:${text}` : text);
+    }
+  }
+
+  const content = asArray(record.content);
+  if (content.length > 0) {
+    const first = stringFromUnknown(content[0]);
+    const last = stringFromUnknown(content[content.length - 1]);
+    const composed = [type, first, last].filter(Boolean).join(":");
+    if (composed) {
+      return boundedProbe(composed);
+    }
+    return boundedProbe(`${type || "content"}:${content.length}`);
+  }
+
+  return boundedProbe(type);
+}
+
+function listQuickProbe(items: unknown[]): string {
+  if (items.length === 0) {
+    return "0";
+  }
+  const first = itemQuickProbe(items[0]);
+  const last = itemQuickProbe(items[items.length - 1]);
+  return boundedProbe(`${items.length}:${first}|${last}`);
+}
+
 function itemTimestamp(item: unknown, fallback: string | null): string | null {
   if (!item || typeof item !== "object") {
     return fallback;
@@ -414,6 +477,36 @@ function turnEntries(turn: RawTurnRecord, index: number): ThreadDisplayEntry[] {
       timestamp_tooltip: timestampDisplay.tooltip,
     },
   ];
+}
+
+function turnEntriesMarker(turn: RawTurnRecord, index: number): string {
+  const turnId = normalizeTurnId(turn.id, index);
+  const timestamp = turnTimestamp(turn) || "";
+  const inputItems = asArray(turn.input_items).concat(asArray(turn.inputItems));
+  const outputItems = asArray(turn.output_items).concat(asArray(turn.outputItems));
+  const genericItems = asArray(turn.items);
+  return [
+    turnId,
+    timestamp,
+    listQuickProbe(inputItems),
+    listQuickProbe(outputItems),
+    listQuickProbe(genericItems),
+  ].join("|");
+}
+
+function turnEntriesWithCache(turn: RawTurnRecord, index: number): ThreadDisplayEntry[] {
+  const turnObject = asRecord(turn);
+  if (!turnObject) {
+    return turnEntries(turn, index);
+  }
+  const marker = turnEntriesMarker(turn, index);
+  const cached = turnEntriesCache.get(turnObject);
+  if (cached && cached.marker === marker) {
+    return cached.entries;
+  }
+  const entries = turnEntries(turn, index);
+  turnEntriesCache.set(turnObject, { marker, entries });
+  return entries;
 }
 
 function hydrateMissingTimestamps(entries: ThreadDisplayEntry[], generatedAtUtc: string): ThreadDisplayEntry[] {
@@ -513,12 +606,21 @@ function fastTurnMarker(value: unknown): string {
       record.createdAt ??
       "",
   );
-  const inputCount =
-    asArray(record.input_items).length +
-    asArray(record.inputItems).length +
-    asArray(record.content).length;
-  const outputCount = asArray(record.output_items).length + asArray(record.outputItems).length;
-  return `${id}:${timestamp}:${inputCount}:${outputCount}`;
+  const inputItems = asArray(record.input_items).concat(asArray(record.inputItems));
+  const contentItems = asArray(record.content);
+  const outputItems = asArray(record.output_items).concat(asArray(record.outputItems));
+  const genericItems = asArray(record.items);
+  const inputLikeItems = inputItems.length > 0 ? inputItems : contentItems;
+  return [
+    id,
+    timestamp,
+    String(inputLikeItems.length),
+    String(outputItems.length),
+    String(genericItems.length),
+    listQuickProbe(inputLikeItems),
+    listQuickProbe(outputItems),
+    listQuickProbe(genericItems),
+  ].join(":");
 }
 
 function mappingTurnValue(value: unknown): unknown {
@@ -600,7 +702,14 @@ export function extractThreadDisplayEntries(
   }
 
   const sourceTurns = extractTurns(thread);
-  const entries = sourceTurns.flatMap((turn, index) => turnEntries(turn, index));
+  const entries: ThreadDisplayEntry[] = [];
+  for (let index = 0; index < sourceTurns.length; index += 1) {
+    const turn = sourceTurns[index]!;
+    const turnEntryList = turnEntriesWithCache(turn, index);
+    for (let entryIndex = 0; entryIndex < turnEntryList.length; entryIndex += 1) {
+      entries.push(turnEntryList[entryIndex]!);
+    }
+  }
   const hydrated = hydrateMissingTimestamps(entries, generatedAtUtc);
 
   if (thread && typeof thread === "object" && marker) {

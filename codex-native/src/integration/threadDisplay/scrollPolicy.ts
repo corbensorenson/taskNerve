@@ -1,6 +1,7 @@
 import type { ThreadScrollDecision, ThreadViewportState } from "./types.js";
 
-const STICK_TO_BOTTOM_THRESHOLD_PX = 56;
+// Keep this tight so "almost at bottom" readers are not force-pulled downward.
+const STICK_TO_BOTTOM_THRESHOLD_PX = 24;
 const PRESERVE_OFFSET_TOP_THRESHOLD_PX = 120;
 
 function nearBottom(viewport: ThreadViewportState): boolean {

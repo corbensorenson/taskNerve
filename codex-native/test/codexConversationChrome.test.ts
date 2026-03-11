@@ -20,6 +20,15 @@ describe("codex conversation chrome", () => {
     expect(snapshot.topbar.commitButton.visible).toBe(false);
     expect(snapshot.topbar.terminalToggle.visible).toBe(false);
     expect(snapshot.topbar.taskCountButton.opens).toBe("task-drawer");
+    expect(snapshot.topbar.sidebarCollapsedProjectActions.visible).toBe(true);
+    expect(snapshot.topbar.sidebarCollapsedProjectActions.showWhen).toBe("sidebar-collapsed");
+    expect(snapshot.topbar.sidebarCollapsedProjectActions.placement).toBe("top-left");
+    expect(snapshot.topbar.sidebarCollapsedProjectActions.importProjectButton.action).toBe(
+      "topbar-import-project-click",
+    );
+    expect(snapshot.topbar.sidebarCollapsedProjectActions.newProjectButton.action).toBe(
+      "topbar-new-project-click",
+    );
 
     expect(snapshot.footer.terminalToggle.visible).toBe(true);
     expect(snapshot.footer.terminalToggle.location).toBe("footer");
@@ -41,6 +50,12 @@ describe("codex conversation chrome", () => {
     const snapshot = buildCodexConversationChromeSnapshot();
 
     expect(snapshot.topbar.taskCountButton.label).toBe("0 tasks left");
+    expect(snapshot.topbar.sidebarCollapsedProjectActions.importProjectButton.label).toBe(
+      "Import existing project",
+    );
+    expect(snapshot.topbar.sidebarCollapsedProjectActions.newProjectButton.label).toBe(
+      "Add new project",
+    );
     expect(snapshot.footer.branchSelector.currentBranch).toBe("tasknerve/main");
     expect(snapshot.footer.resourceStats.cpuPercent).toBeNull();
     expect(snapshot.footer.resourceStats.gpuPercent).toBeNull();

@@ -49,6 +49,45 @@ describe("thread display integration", () => {
     expect(decision.mode).toBe("no-op");
   });
 
+  it("does not auto-stick when the user is slightly above the tail", () => {
+    const decision = decideThreadScrollBehavior({
+      previousEntryCount: 3,
+      nextEntryCount: 4,
+      previousViewport: {
+        scroll_top_px: 350,
+        scroll_height_px: 900,
+        viewport_height_px: 520,
+      },
+      nextViewport: {
+        scroll_top_px: 350,
+        scroll_height_px: 1040,
+        viewport_height_px: 520,
+      },
+    });
+
+    expect(decision.mode).toBe("no-op");
+  });
+
+  it("keeps tail-follow behavior when the user is truly at the bottom", () => {
+    const decision = decideThreadScrollBehavior({
+      previousEntryCount: 3,
+      nextEntryCount: 4,
+      previousViewport: {
+        scroll_top_px: 372,
+        scroll_height_px: 900,
+        viewport_height_px: 520,
+      },
+      nextViewport: {
+        scroll_top_px: 372,
+        scroll_height_px: 1040,
+        viewport_height_px: 520,
+      },
+    });
+
+    expect(decision.mode).toBe("stick-to-bottom");
+    expect(decision.scroll_top_px).toBe(520);
+  });
+
   it("preserves visual offset when history is prepended near the top", () => {
     const decision = decideThreadScrollBehavior({
       previousEntryCount: 20,
@@ -286,6 +325,56 @@ describe("thread display integration", () => {
 
     expect(second).not.toBe(first);
     expect(second).toHaveLength(4);
+  });
+
+  it("reuses unchanged turn entry objects when a later turn is appended", () => {
+    const thread = {
+      conversation: {
+        turns: [
+          {
+            id: "t1",
+            created_at: "2026-03-10T09:00:00.000Z",
+            input_items: [{ type: "message", text: "one" }],
+            output_items: [{ type: "message", text: "a" }],
+          },
+        ],
+      },
+    };
+
+    const first = extractThreadDisplayEntries(thread, "2026-03-10T09:05:00.000Z");
+    thread.conversation.turns.push({
+      id: "t2",
+      created_at: "2026-03-10T09:01:00.000Z",
+      input_items: [{ type: "message", text: "two" }],
+      output_items: [{ type: "message", text: "b" }],
+    });
+    const second = extractThreadDisplayEntries(thread, "2026-03-10T09:05:00.000Z");
+
+    expect(second[0]).toBe(first[0]);
+    expect(second[1]).toBe(first[1]);
+    expect(second).toHaveLength(4);
+  });
+
+  it("invalidates turn-level cache when message text mutates in place", () => {
+    const thread = {
+      conversation: {
+        turns: [
+          {
+            id: "t1",
+            created_at: "2026-03-10T09:00:00.000Z",
+            input_items: [{ type: "message", text: "one" }],
+            output_items: [{ type: "message", text: "original" }],
+          },
+        ],
+      },
+    };
+
+    const first = extractThreadDisplayEntries(thread, "2026-03-10T09:05:00.000Z");
+    thread.conversation.turns[0].output_items[0].text = "updated";
+    const second = extractThreadDisplayEntries(thread, "2026-03-10T09:05:00.000Z");
+
+    expect(second).not.toBe(first);
+    expect(second[1]?.text).toContain("updated");
   });
 
   it("reuses extracted entries when wrapper objects change but turn array stays stable", () => {

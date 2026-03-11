@@ -77,6 +77,7 @@ function mockHostServices() {
     setConversationCurrentTurnKey: vi.fn(async () => ({ ok: true })),
     scrollConversationToTurn: vi.fn(async () => ({ ok: true })),
     scrollConversationToTop: vi.fn(async () => ({ ok: true })),
+    addWorkspaceRootOption: vi.fn(async () => ({ ok: true })),
   };
 }
 
@@ -566,6 +567,12 @@ describe("codex TaskNerve host runtime", () => {
     expect(snapshot.topbar.terminalToggle.visible).toBe(false);
     expect(snapshot.topbar.taskCountButton.taskCount).toBe(12);
     expect(snapshot.topbar.taskCountButton.action).toBe("topbar-task-count-click");
+    expect(snapshot.topbar.sidebarCollapsedProjectActions.importProjectButton.action).toBe(
+      "topbar-import-project-click",
+    );
+    expect(snapshot.topbar.sidebarCollapsedProjectActions.newProjectButton.action).toBe(
+      "topbar-new-project-click",
+    );
 
     expect(snapshot.footer.terminalToggle.visible).toBe(true);
     expect(snapshot.footer.terminalToggle.location).toBe("footer");
@@ -599,6 +606,27 @@ describe("codex TaskNerve host runtime", () => {
     expect(result.ok).toBe(true);
     expect(result.task_drawer_open).toBe(true);
     expect(host.openTaskDrawer).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes collapsed topbar project actions through native host project methods", async () => {
+    const host = mockHostServices();
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    const importResult = await runtime.handleConversationChromeAction({
+      type: "topbar-import-project-click",
+    });
+    expect(importResult.ok).toBe(true);
+    expect(host.addWorkspaceRootOption).toHaveBeenCalledWith({
+      mode: "import-existing",
+    });
+
+    const newResult = await runtime.handleConversationChromeAction({
+      type: "topbar-new-project-click",
+    });
+    expect(newResult.ok).toBe(true);
+    expect(host.addWorkspaceRootOption).toHaveBeenLastCalledWith({
+      mode: "new-project",
+    });
   });
 
   it("switches branches and toggles terminal from footer actions", async () => {

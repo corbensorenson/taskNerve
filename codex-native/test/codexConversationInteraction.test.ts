@@ -68,12 +68,12 @@ describe("codex conversation interaction", () => {
       currentTurnKey: "assistant:turn-1",
       previousEntryCount: 1,
       previousViewport: {
-        scroll_top_px: 350,
+        scroll_top_px: 372,
         scroll_height_px: 900,
         viewport_height_px: 520,
       },
       viewport: {
-        scroll_top_px: 350,
+        scroll_top_px: 372,
         scroll_height_px: 1040,
         viewport_height_px: 520,
       },
@@ -84,7 +84,7 @@ describe("codex conversation interaction", () => {
       event: {
         type: "display-updated",
         viewport: {
-          scroll_top_px: 350,
+          scroll_top_px: 372,
           scroll_height_px: 1040,
           viewport_height_px: 520,
         },
@@ -117,12 +117,12 @@ describe("codex conversation interaction", () => {
       currentTurnKey: "assistant:turn-1",
       previousEntryCount: 1,
       previousViewport: {
-        scroll_top_px: 350,
+        scroll_top_px: 372,
         scroll_height_px: 900,
         viewport_height_px: 520,
       },
       viewport: {
-        scroll_top_px: 350,
+        scroll_top_px: 372,
         scroll_height_px: 1040,
         viewport_height_px: 520,
       },
@@ -133,7 +133,7 @@ describe("codex conversation interaction", () => {
       event: {
         type: "user-scroll-end",
         viewport: {
-          scroll_top_px: 350,
+          scroll_top_px: 372,
           scroll_height_px: 1040,
           viewport_height_px: 520,
         },
@@ -154,7 +154,7 @@ describe("codex conversation interaction", () => {
       event: {
         type: "display-updated",
         viewport: {
-          scroll_top_px: 350,
+          scroll_top_px: 372,
           scroll_height_px: 1040,
           viewport_height_px: 520,
         },
