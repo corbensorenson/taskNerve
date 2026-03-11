@@ -20,6 +20,43 @@ function normalizeBoolean(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
 
+function normalizeInt(value: unknown, fallback: number, min = 0): number {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.max(min, Math.round(Number(value)));
+}
+
+function normalizeIntArray(value: unknown, min = 0, maxLen = 64): number[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const normalized = value
+    .map((entry) => (Number.isFinite(entry) ? Math.max(min, Math.round(Number(entry))) : null))
+    .filter((entry): entry is number => entry !== null);
+  if (normalized.length <= maxLen) {
+    return normalized;
+  }
+  return normalized.slice(normalized.length - maxLen);
+}
+
+function normalizeStringArray(value: unknown, maxLen = 32): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const normalized = [
+    ...new Set(
+      value
+        .map((entry) => normalizeOptionalText(entry))
+        .filter((entry): entry is string => Boolean(entry)),
+    ),
+  ];
+  if (normalized.length <= maxLen) {
+    return normalized;
+  }
+  return normalized.slice(0, maxLen);
+}
+
 export function normalizeIntelligence(value: unknown): (typeof INTELLIGENCE_LEVELS)[number] | null {
   const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
   return INTELLIGENCE_LEVELS.includes(
@@ -48,6 +85,19 @@ export function defaultProjectCodexSettings(options: {
     high_intelligence_model: null,
     max_intelligence_model: null,
     git_origin_url: normalizeOptionalText(options.gitOriginUrl),
+    git_auto_sync_enabled: true,
+    git_tasks_per_push_target: 4,
+    git_min_push_interval_minutes: 10,
+    git_preferred_branch: null,
+    git_auto_sync_allowed_branches: [],
+    git_done_task_count_at_last_push: 0,
+    git_last_push_at_utc: null,
+    git_tasks_before_push_history: [],
+    ci_auto_task_enabled: true,
+    ci_failure_task_priority: 9,
+    ci_default_assignee_agent_id: null,
+    ci_last_sync_at_utc: null,
+    ci_last_failed_job_count: 0,
   });
 }
 
@@ -87,6 +137,42 @@ export function normalizeProjectCodexSettings(
     max_intelligence_model: normalizeOptionalText(value.max_intelligence_model),
     git_origin_url:
       normalizeOptionalText(value.git_origin_url) ?? normalizeOptionalText(options.gitOriginUrl),
+    git_auto_sync_enabled: normalizeBoolean(
+      value.git_auto_sync_enabled,
+      defaults.git_auto_sync_enabled,
+    ),
+    git_tasks_per_push_target: normalizeInt(
+      value.git_tasks_per_push_target,
+      defaults.git_tasks_per_push_target,
+      1,
+    ),
+    git_min_push_interval_minutes: normalizeInt(
+      value.git_min_push_interval_minutes,
+      defaults.git_min_push_interval_minutes,
+      0,
+    ),
+    git_preferred_branch: normalizeOptionalText(value.git_preferred_branch),
+    git_auto_sync_allowed_branches: normalizeStringArray(value.git_auto_sync_allowed_branches, 64),
+    git_done_task_count_at_last_push: normalizeInt(
+      value.git_done_task_count_at_last_push,
+      defaults.git_done_task_count_at_last_push,
+      0,
+    ),
+    git_last_push_at_utc: normalizeOptionalText(value.git_last_push_at_utc),
+    git_tasks_before_push_history: normalizeIntArray(value.git_tasks_before_push_history, 0, 64),
+    ci_auto_task_enabled: normalizeBoolean(value.ci_auto_task_enabled, defaults.ci_auto_task_enabled),
+    ci_failure_task_priority: normalizeInt(
+      value.ci_failure_task_priority,
+      defaults.ci_failure_task_priority,
+      0,
+    ),
+    ci_default_assignee_agent_id: normalizeOptionalText(value.ci_default_assignee_agent_id),
+    ci_last_sync_at_utc: normalizeOptionalText(value.ci_last_sync_at_utc),
+    ci_last_failed_job_count: normalizeInt(
+      value.ci_last_failed_job_count,
+      defaults.ci_last_failed_job_count,
+      0,
+    ),
   });
 }
 

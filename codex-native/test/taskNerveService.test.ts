@@ -18,6 +18,7 @@ describe("taskNerve service integration surface", () => {
     expect(health.capabilities).toContain("task_snapshot");
     expect(health.capabilities).toContain("conversation_display");
     expect(health.capabilities).toContain("conversation_interaction");
+    expect(health.capabilities).toContain("project_git_sync");
     expect(health.capabilities).toContain("thread_display");
   });
 
@@ -75,6 +76,74 @@ describe("taskNerve service integration surface", () => {
     expect(second).toBe(first);
     expect(second.all_tasks).toBe(first.all_tasks);
     expect(second.visible_tasks).toBe(first.visible_tasks);
+  });
+
+  it("filters task snapshots by claimed agent, tags, and dependencies", () => {
+    const service = createTaskNerveService();
+    const tasks: Array<Partial<TaskRecord>> = [
+      {
+        task_id: "t-1",
+        title: "wire telemetry",
+        status: "open",
+        priority: 10,
+        claimed_by_agent_id: "agent.alpha",
+        tags: ["ops", "telemetry"],
+        depends_on: ["bootstrap-core"],
+      },
+      {
+        task_id: "t-2",
+        title: "navigation perf",
+        status: "open",
+        priority: 9,
+        claimed_by_agent_id: "agent.beta",
+        tags: ["ui", "perf-hotpath"],
+        depends_on: ["thread-display-cache"],
+      },
+    ];
+
+    const byClaimedAgent = service.taskSnapshot(tasks, "agent.beta");
+    const byTag = service.taskSnapshot(tasks, "perf-hotpath");
+    const byDependency = service.taskSnapshot(tasks, "bootstrap-core");
+
+    expect(byClaimedAgent.visible_tasks.map((task) => task.task_id)).toEqual(["t-2"]);
+    expect(byTag.visible_tasks.map((task) => task.task_id)).toEqual(["t-2"]);
+    expect(byDependency.visible_tasks.map((task) => task.task_id)).toEqual(["t-1"]);
+  });
+
+  it("reuses normalized search results for equivalent query text", () => {
+    const service = createTaskNerveService();
+    const tasks: Array<Partial<TaskRecord>> = [
+      { task_id: "t-1", title: "Open item", status: "open", priority: 10 },
+      { task_id: "t-2", title: "Closed item", status: "done", priority: 1 },
+    ];
+
+    const first = service.taskSnapshot(tasks, "open");
+    const second = service.taskSnapshot(tasks, "  OPEN  ");
+
+    expect(second).not.toBe(first);
+    expect(second.search).toBe("  OPEN  ");
+    expect(second.visible_tasks).toBe(first.visible_tasks);
+    expect(second.visible_stats).toBe(first.visible_stats);
+  });
+
+  it("does not reuse snapshots when quick task markers match but interior tasks changed", () => {
+    const service = createTaskNerveService();
+    const tasks: Array<Partial<TaskRecord>> = [
+      { task_id: "t-1", title: "a", status: "open", priority: 10, tags: ["x"] },
+      { task_id: "t-2", title: "b", status: "open", priority: 9, tags: ["x"] },
+      { task_id: "t-3", title: "c", status: "open", priority: 8, tags: ["x"] },
+      { task_id: "t-4", title: "d", status: "open", priority: 7, tags: ["x"] },
+      { task_id: "t-5", title: "e", status: "open", priority: 6, tags: ["x"] },
+    ];
+    const first = service.taskSnapshot(tasks, "probe");
+
+    const changedInterior = tasks.map((task, index) =>
+      index === 1 ? { ...task, title: "probe task" } : { ...task },
+    );
+    const second = service.taskSnapshot(changedInterior, "probe");
+
+    expect(second).not.toBe(first);
+    expect(second.visible_tasks.map((task) => task.task_id)).toEqual(["t-2"]);
   });
 
   it("resolves model routing and queue behavior via direct service calls", () => {
@@ -232,6 +301,54 @@ describe("taskNerve service integration surface", () => {
       turnKey: "user:turn-3",
       behavior: "smooth",
     });
+  });
+
+  it("builds git sync snapshots with average tasks-before-push metrics", () => {
+    const service = createTaskNerveService();
+    const snapshot = service.projectGitSyncSnapshot({
+      settings: {
+        git_auto_sync_enabled: true,
+        git_tasks_per_push_target: 3,
+        git_done_task_count_at_last_push: 1,
+        git_tasks_before_push_history: [2, 4, 3],
+      },
+      tasks: [
+        { task_id: "t1", title: "done 1", status: "done" },
+        { task_id: "t2", title: "done 2", status: "done" },
+        { task_id: "t3", title: "done 3", status: "done" },
+      ],
+      git_state: {
+        branch: "tasknerve/main",
+        ahead_count: 2,
+        behind_count: 0,
+        clean: true,
+      },
+      now_iso: "2026-03-11T04:00:00.000Z",
+    });
+
+    expect(snapshot.task_metrics.done_tasks_since_last_push).toBe(2);
+    expect(snapshot.task_metrics.average_tasks_before_push).toBe(3);
+    expect(snapshot.recommendation.action).toBe("no-op");
+  });
+
+  it("records push tracking in project settings after successful push", () => {
+    const service = createTaskNerveService();
+    const next = service.projectSettingsAfterGitPush({
+      settings: {
+        git_done_task_count_at_last_push: 1,
+        git_tasks_before_push_history: [2, 3],
+      },
+      tasks: [
+        { task_id: "t1", title: "done 1", status: "done" },
+        { task_id: "t2", title: "done 2", status: "done" },
+        { task_id: "t3", title: "done 3", status: "done" },
+      ],
+      pushed_at_utc: "2026-03-11T04:05:00.000Z",
+    });
+
+    expect(next.git_done_task_count_at_last_push).toBe(3);
+    expect(next.git_last_push_at_utc).toBe("2026-03-11T04:05:00.000Z");
+    expect(next.git_tasks_before_push_history).toEqual([2, 3, 2]);
   });
 
   it("loads and writes project settings and registry through the shared IO stores", async () => {

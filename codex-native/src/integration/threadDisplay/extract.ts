@@ -38,6 +38,7 @@ interface ThreadExtractionCacheEntry {
 }
 
 const threadExtractionCache = new WeakMap<object, ThreadExtractionCacheEntry>();
+const turnArrayExtractionCache = new WeakMap<unknown[], ThreadExtractionCacheEntry>();
 
 function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
@@ -415,6 +416,21 @@ function turnEntries(turn: RawTurnRecord, index: number): ThreadDisplayEntry[] {
 }
 
 function hydrateMissingTimestamps(entries: ThreadDisplayEntry[], generatedAtUtc: string): ThreadDisplayEntry[] {
+  let hasMissingTimestampData = false;
+  for (const entry of entries) {
+    if (
+      !parseTimestampUtc(entry.created_at_utc) ||
+      !entry.timestamp_label ||
+      !entry.timestamp_tooltip
+    ) {
+      hasMissingTimestampData = true;
+      break;
+    }
+  }
+  if (!hasMissingTimestampData) {
+    return entries;
+  }
+
   const generated = parseTimestampUtc(generatedAtUtc) || new Date().toISOString();
   let lastKnown = generated;
 
@@ -513,9 +529,19 @@ export function extractThreadDisplayEntries(
   generatedAtUtc = new Date().toISOString(),
 ): ThreadDisplayEntry[] {
   const marker = entriesCacheMarker(thread, generatedAtUtc);
+  const turnArray = marker ? cacheableTurnArray(thread) : null;
   if (thread && typeof thread === "object" && marker) {
     const cached = threadExtractionCache.get(thread);
     if (cached && cached.marker === marker) {
+      return cached.entries;
+    }
+  }
+  if (turnArray && marker) {
+    const cached = turnArrayExtractionCache.get(turnArray);
+    if (cached && cached.marker === marker) {
+      if (thread && typeof thread === "object") {
+        threadExtractionCache.set(thread, cached);
+      }
       return cached.entries;
     }
   }
@@ -525,10 +551,14 @@ export function extractThreadDisplayEntries(
   const hydrated = hydrateMissingTimestamps(entries, generatedAtUtc);
 
   if (thread && typeof thread === "object" && marker) {
-    threadExtractionCache.set(thread, {
+    const cacheEntry = {
       marker,
       entries: hydrated,
-    });
+    };
+    threadExtractionCache.set(thread, cacheEntry);
+    if (turnArray) {
+      turnArrayExtractionCache.set(turnArray, cacheEntry);
+    }
   }
 
   return hydrated;

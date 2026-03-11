@@ -67,6 +67,49 @@ describe("native repo-local stores", () => {
     expect(reloaded.controller_default_model).toBe("gpt-5-codex-controller");
   });
 
+  it("upgrades persisted git origin when discovered after initial load", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-native-repo-"));
+    const first = await loadProjectCodexSettings({
+      repoRoot,
+    });
+    expect(first.git_origin_url).toBeNull();
+
+    const filePath = timelineProjectCodexSettingsPath(repoRoot);
+    const firstStat = await stat(filePath);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    const second = await loadProjectCodexSettings({
+      repoRoot,
+      gitOriginUrl: "git@github.com:acme/discovered.git",
+    });
+    const secondStat = await stat(filePath);
+
+    expect(second.git_origin_url).toBe("git@github.com:acme/discovered.git");
+    expect(secondStat.mtimeMs).toBeGreaterThan(firstStat.mtimeMs);
+  });
+
+  it("keeps persisted git origin stable across subsequent loads with different origin hints", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-native-repo-"));
+    const first = await loadProjectCodexSettings({
+      repoRoot,
+      gitOriginUrl: "git@github.com:acme/primary.git",
+    });
+    expect(first.git_origin_url).toBe("git@github.com:acme/primary.git");
+
+    const filePath = timelineProjectCodexSettingsPath(repoRoot);
+    const firstStat = await stat(filePath);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    const second = await loadProjectCodexSettings({
+      repoRoot,
+      gitOriginUrl: "git@github.com:acme/secondary.git",
+    });
+    const secondStat = await stat(filePath);
+
+    expect(second.git_origin_url).toBe("git@github.com:acme/primary.git");
+    expect(secondStat.mtimeMs).toBe(firstStat.mtimeMs);
+  });
+
   it("loads and persists the global project registry", async () => {
     const taskNerveHome = await mkdtemp(path.join(os.tmpdir(), "tasknerve-native-home-"));
     const env = { ...process.env, TASKNERVE_HOME: taskNerveHome };

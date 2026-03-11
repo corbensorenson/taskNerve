@@ -26,6 +26,11 @@ function mockHostServices() {
     toggleTerminalPanel: vi.fn(async () => ({ ok: true })),
     subscribeThreadEvents: vi.fn(),
     subscribeRepositorySettingsEvents: vi.fn(),
+    subscribeTaskNerveTaskCountEvents: vi.fn(),
+    subscribeTaskDrawerStateEvents: vi.fn(),
+    subscribeTerminalPanelStateEvents: vi.fn(),
+    subscribeTaskNerveBranchEvents: vi.fn(),
+    subscribeTaskNerveResourceStatsEvents: vi.fn(),
     listTaskNerveBranches: vi.fn(async () => ({
       current_branch: "tasknerve/main",
       branches: ["tasknerve/main", "feature/ab-test"],
@@ -38,6 +43,18 @@ function mockHostServices() {
       thermal_pressure: "nominal",
       captured_at_utc: "2026-03-11T03:40:00.000Z",
     })),
+    readRepositoryGitState: vi.fn(async () => ({
+      branch: "tasknerve/main",
+      remote: "origin",
+      ahead_count: 2,
+      behind_count: 1,
+      changed_file_count: 0,
+      staged_file_count: 0,
+      untracked_file_count: 0,
+      clean: true,
+    })),
+    pullRepository: vi.fn(async () => ({ ok: true })),
+    pushRepository: vi.fn(async () => ({ ok: true })),
     setConversationCurrentTurnKey: vi.fn(async () => ({ ok: true })),
     scrollConversationToTurn: vi.fn(async () => ({ ok: true })),
     scrollConversationToTop: vi.fn(async () => ({ ok: true })),
@@ -100,6 +117,58 @@ describe("codex TaskNerve host runtime", () => {
     expect(host.startTurn).toHaveBeenCalledTimes(1);
     expect(host.pinThread).toHaveBeenCalledWith("thread-controller");
     expect(host.openThread).toHaveBeenCalledWith("thread-controller");
+  });
+
+  it("builds per-project git sync snapshots with cadence metrics", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-git-sync-runtime-"));
+    const host = mockHostServices();
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    const snapshot = await runtime.projectGitSyncSnapshot({
+      repoRoot,
+      tasks: [
+        { task_id: "t1", title: "done one", status: "done" },
+        { task_id: "t2", title: "done two", status: "done" },
+        { task_id: "t3", title: "open three", status: "open" },
+      ],
+      nowIsoUtc: "2026-03-11T04:00:00.000Z",
+    });
+
+    expect(snapshot.integration_mode).toBe("codex-native-host");
+    expect(snapshot.repository.branch).toBe("tasknerve/main");
+    expect(snapshot.task_metrics.done_task_count).toBe(2);
+    expect(snapshot.task_metrics.done_tasks_since_last_push).toBe(2);
+    expect(snapshot.task_metrics.average_tasks_before_push).toBe(null);
+  });
+
+  it("runs smart git sync through host pull/push and updates per-project push tracking", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-git-sync-run-"));
+    const host = mockHostServices();
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    const result = await runtime.syncProjectGit({
+      repoRoot,
+      tasks: [
+        { task_id: "t1", title: "done one", status: "done" },
+        { task_id: "t2", title: "done two", status: "done" },
+        { task_id: "t3", title: "done three", status: "done" },
+        { task_id: "t4", title: "done four", status: "done" },
+      ],
+      mode: "smart",
+      nowIsoUtc: "2026-03-11T04:10:00.000Z",
+    });
+
+    expect(result.plan_reason).toBe("smart-pull-then-push");
+    expect(result.executed.pull).toBe(true);
+    expect(result.executed.push).toBe(true);
+    expect(host.pullRepository).toHaveBeenCalledWith({
+      repoRoot,
+      autostash: true,
+    });
+    expect(host.pushRepository).toHaveBeenCalledWith({
+      repoRoot,
+    });
+    expect(result.after.push_tracking.tasks_before_push_history.at(-1)).toBe(4);
   });
 
   it("exposes thread display snapshots through the host runtime integration surface", async () => {
@@ -304,7 +373,7 @@ describe("codex TaskNerve host runtime", () => {
     expect(host.switchTaskNerveBranch).toHaveBeenCalledWith("feature/ab-test");
   });
 
-  it("invalidates conversation chrome cache after chrome actions", async () => {
+  it("invalidates snapshot cache after chrome actions without re-reading fresh state caches", async () => {
     const host = mockHostServices();
     const runtime = createCodexTaskNerveHostRuntime({ host });
 
@@ -316,7 +385,200 @@ describe("codex TaskNerve host runtime", () => {
       type: "topbar-task-count-click",
     });
     await runtime.conversationChromeSnapshot();
+    expect(host.readTaskNerveTaskCount).toHaveBeenCalledTimes(1);
+  });
+
+  it("reuses state read caches across rapid chrome invalidations", async () => {
+    const host = mockHostServices();
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    await runtime.conversationChromeSnapshot();
+    expect(host.readTaskNerveTaskCount).toHaveBeenCalledTimes(1);
+    expect(host.readTaskNerveResourceStats).toHaveBeenCalledTimes(1);
+
+    await runtime.handleConversationChromeAction({
+      type: "topbar-task-count-click",
+    });
+    await runtime.conversationChromeSnapshot();
+
+    expect(host.readTaskNerveTaskCount).toHaveBeenCalledTimes(1);
+    expect(host.readTaskNerveResourceStats).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not force chrome cache invalidation on thread refresh events", async () => {
+    const host = mockHostServices();
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    await runtime.conversationChromeSnapshot();
+    await runtime.conversationChromeSnapshot();
+    expect(host.readTaskNerveTaskCount).toHaveBeenCalledTimes(1);
+
+    host.subscribeThreadEvents.mockImplementation((listener) => {
+      listener({ type: "thread-updated", threadId: "thread-1" });
+      return { dispose: vi.fn() };
+    });
+    await runtime.observeThreadRefresh({
+      threadId: "thread-1",
+      onEvent: vi.fn(),
+    });
+
+    await runtime.conversationChromeSnapshot();
+    expect(host.readTaskNerveTaskCount).toHaveBeenCalledTimes(1);
+  });
+
+  it("invalidates chrome cache on repository settings refresh events", async () => {
+    const host = mockHostServices();
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    await runtime.conversationChromeSnapshot();
+    await runtime.conversationChromeSnapshot();
+    expect(host.readTaskNerveTaskCount).toHaveBeenCalledTimes(1);
+
+    host.subscribeRepositorySettingsEvents.mockImplementation((listener) => {
+      listener({ type: "repo-settings-updated" });
+      return { dispose: vi.fn() };
+    });
+    await runtime.observeRepositorySettingsRefresh({
+      onEvent: vi.fn(),
+    });
+
+    await runtime.conversationChromeSnapshot();
     expect(host.readTaskNerveTaskCount).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses optional chrome subscriptions to keep chrome mostly event-driven", async () => {
+    const host = mockHostServices();
+    const taskCountDispose = vi.fn();
+    const drawerDispose = vi.fn();
+    const terminalDispose = vi.fn();
+    const branchDispose = vi.fn();
+    const resourceDispose = vi.fn();
+    host.subscribeTaskNerveTaskCountEvents.mockImplementation((listener) => {
+      listener({ task_count: 21 });
+      return { dispose: taskCountDispose };
+    });
+    host.subscribeTaskDrawerStateEvents.mockImplementation((listener) => {
+      listener({ open: true });
+      return { dispose: drawerDispose };
+    });
+    host.subscribeTerminalPanelStateEvents.mockImplementation((listener) => {
+      listener({ open: false });
+      return { dispose: terminalDispose };
+    });
+    host.subscribeTaskNerveBranchEvents.mockImplementation((listener) => {
+      listener({ current_branch: "feature/perf", branches: ["feature/perf", "tasknerve/main"] });
+      return { dispose: branchDispose };
+    });
+    host.subscribeTaskNerveResourceStatsEvents.mockImplementation((listener) => {
+      listener({ cpu_percent: 33, gpu_percent: 9, memory_percent: 44 });
+      return { dispose: resourceDispose };
+    });
+
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+    const onEvent = vi.fn();
+    const subscription = await runtime.observeConversationChromeRefresh({
+      onEvent,
+    });
+
+    expect(subscription.mode).toBe("host-event-subscription");
+    expect(onEvent).toHaveBeenCalledTimes(5);
+
+    const snapshot = await runtime.conversationChromeSnapshot();
+    expect(snapshot.topbar.taskCountButton.taskCount).toBe(21);
+    expect(snapshot.taskDrawer.open).toBe(true);
+    expect(snapshot.footer.terminalToggle.active).toBe(false);
+    expect(snapshot.footer.branchSelector.currentBranch).toBe("feature/perf");
+    expect(snapshot.footer.resourceStats.cpuPercent).toBe(33);
+    expect(snapshot.footer.resourceStats.gpuPercent).toBe(9);
+    expect(snapshot.footer.resourceStats.memoryPercent).toBe(44);
+
+    expect(host.readTaskNerveTaskCount).not.toHaveBeenCalled();
+    expect(host.readTaskDrawerState).not.toHaveBeenCalled();
+    expect(host.readTerminalPanelState).not.toHaveBeenCalled();
+    expect(host.listTaskNerveBranches).not.toHaveBeenCalled();
+    expect(host.readTaskNerveResourceStats).not.toHaveBeenCalled();
+
+    subscription.dispose();
+    expect(taskCountDispose).toHaveBeenCalledTimes(1);
+    expect(drawerDispose).toHaveBeenCalledTimes(1);
+    expect(terminalDispose).toHaveBeenCalledTimes(1);
+    expect(branchDispose).toHaveBeenCalledTimes(1);
+    expect(resourceDispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("suppresses duplicate parsed chrome events to reduce churn", async () => {
+    const host = mockHostServices();
+    const taskCountDispose = vi.fn();
+    host.subscribeTaskNerveTaskCountEvents.mockImplementation((listener) => {
+      listener({ task_count: 21 });
+      listener({ task_count: 21 });
+      return { dispose: taskCountDispose };
+    });
+    Reflect.deleteProperty(host, "subscribeTaskDrawerStateEvents");
+    Reflect.deleteProperty(host, "subscribeTerminalPanelStateEvents");
+    Reflect.deleteProperty(host, "subscribeTaskNerveBranchEvents");
+    Reflect.deleteProperty(host, "subscribeTaskNerveResourceStatsEvents");
+
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+    const onEvent = vi.fn();
+    const subscription = await runtime.observeConversationChromeRefresh({
+      onEvent,
+    });
+
+    expect(subscription.mode).toBe("host-event-subscription");
+    expect(onEvent).toHaveBeenCalledTimes(1);
+
+    const snapshot = await runtime.conversationChromeSnapshot();
+    expect(snapshot.topbar.taskCountButton.taskCount).toBe(21);
+    expect(host.readTaskNerveTaskCount).not.toHaveBeenCalled();
+
+    subscription.dispose();
+    expect(taskCountDispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts explicit empty branch state events without forcing host branch reads", async () => {
+    const host = mockHostServices();
+    const branchDispose = vi.fn();
+    host.subscribeTaskNerveBranchEvents.mockImplementation((listener) => {
+      listener({ branches: [] });
+      return { dispose: branchDispose };
+    });
+    Reflect.deleteProperty(host, "subscribeTaskNerveTaskCountEvents");
+    Reflect.deleteProperty(host, "subscribeTaskDrawerStateEvents");
+    Reflect.deleteProperty(host, "subscribeTerminalPanelStateEvents");
+    Reflect.deleteProperty(host, "subscribeTaskNerveResourceStatsEvents");
+
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+    const subscription = await runtime.observeConversationChromeRefresh({
+      onEvent: vi.fn(),
+    });
+
+    const snapshot = await runtime.conversationChromeSnapshot();
+    expect(snapshot.footer.branchSelector.currentBranch).toBe("tasknerve/main");
+    expect(host.listTaskNerveBranches).not.toHaveBeenCalled();
+
+    subscription.dispose();
+    expect(branchDispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to manual refresh when optional chrome subscriptions are unavailable", async () => {
+    const host = mockHostServices();
+    Reflect.deleteProperty(host, "subscribeTaskNerveTaskCountEvents");
+    Reflect.deleteProperty(host, "subscribeTaskDrawerStateEvents");
+    Reflect.deleteProperty(host, "subscribeTerminalPanelStateEvents");
+    Reflect.deleteProperty(host, "subscribeTaskNerveBranchEvents");
+    Reflect.deleteProperty(host, "subscribeTaskNerveResourceStatsEvents");
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+    const onFallbackRefresh = vi.fn();
+
+    const subscription = await runtime.observeConversationChromeRefresh({
+      onEvent: vi.fn(),
+      onFallbackRefresh,
+    });
+
+    expect(subscription.mode).toBe("fallback-manual-refresh");
+    expect(onFallbackRefresh).toHaveBeenCalledTimes(1);
+    subscription.dispose();
   });
 
   it("uses host thread subscriptions for event-driven refresh when available", async () => {

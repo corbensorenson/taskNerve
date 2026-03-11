@@ -62,6 +62,18 @@ export interface CodexConversationChromeSnapshot {
 
 const DEFAULT_BRANCH = "tasknerve/main";
 
+interface ChromeSnapshotMemo {
+  taskCount: number;
+  taskDrawerOpen: boolean;
+  terminalOpen: boolean;
+  currentBranch: string;
+  branches: string[];
+  resourceStats: CodexConversationChromeResourceStats;
+  snapshot: CodexConversationChromeSnapshot;
+}
+
+let lastChromeSnapshotMemo: ChromeSnapshotMemo | null = null;
+
 function normalizeTaskCount(value: unknown): number {
   if (!Number.isFinite(value)) {
     return 0;
@@ -79,6 +91,34 @@ function taskCountLabel(taskCount: number): string {
 function normalizeBranchList(currentBranch: string, branches: string[]): string[] {
   const normalized = [...new Set([currentBranch, ...branches].map((entry) => String(entry || "").trim()).filter(Boolean))];
   return normalized.length > 0 ? normalized : [currentBranch];
+}
+
+function sameStringArray(left: string[], right: string[]): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function sameResourceStats(
+  left: CodexConversationChromeResourceStats,
+  right: CodexConversationChromeResourceStats,
+): boolean {
+  return (
+    left.cpuPercent === right.cpuPercent &&
+    left.gpuPercent === right.gpuPercent &&
+    left.memoryPercent === right.memoryPercent &&
+    left.thermalPressure === right.thermalPressure &&
+    left.capturedAtUtc === right.capturedAtUtc
+  );
 }
 
 function normalizeResourceStats(
@@ -101,14 +141,29 @@ export function buildCodexConversationChromeSnapshot(
   input: CodexConversationChromeStateInput = {},
 ): CodexConversationChromeSnapshot {
   const taskCount = normalizeTaskCount(input.taskCount);
+  const taskDrawerOpen = Boolean(input.taskDrawerOpen);
+  const terminalOpen = Boolean(input.terminalOpen);
   const currentBranch =
     typeof input.currentBranch === "string" && input.currentBranch.trim()
       ? input.currentBranch.trim()
       : DEFAULT_BRANCH;
   const branches = normalizeBranchList(currentBranch, input.branches || []);
   const resourceStats = normalizeResourceStats(input.resourceStats);
+  const previousMemo = lastChromeSnapshotMemo;
 
-  return {
+  if (
+    previousMemo &&
+    previousMemo.taskCount === taskCount &&
+    previousMemo.taskDrawerOpen === taskDrawerOpen &&
+    previousMemo.terminalOpen === terminalOpen &&
+    previousMemo.currentBranch === currentBranch &&
+    sameStringArray(previousMemo.branches, branches) &&
+    sameResourceStats(previousMemo.resourceStats, resourceStats)
+  ) {
+    return previousMemo.snapshot;
+  }
+
+  const snapshot: CodexConversationChromeSnapshot = {
     integrationMode: "codex-native-host",
     topbar: {
       commitButton: {
@@ -130,7 +185,7 @@ export function buildCodexConversationChromeSnapshot(
       terminalToggle: {
         visible: true,
         location: "footer",
-        active: Boolean(input.terminalOpen),
+        active: terminalOpen,
         action: "footer-terminal-toggle-click",
       },
       branchSelector: {
@@ -149,7 +204,19 @@ export function buildCodexConversationChromeSnapshot(
       },
     },
     taskDrawer: {
-      open: Boolean(input.taskDrawerOpen),
+      open: taskDrawerOpen,
     },
   };
+
+  lastChromeSnapshotMemo = {
+    taskCount,
+    taskDrawerOpen,
+    terminalOpen,
+    currentBranch,
+    branches,
+    resourceStats,
+    snapshot,
+  };
+
+  return snapshot;
 }

@@ -96,6 +96,75 @@ describe("thread display integration", () => {
     expect(window.estimated_total_height_px).toBe(21600);
   });
 
+  it("keeps measured virtualization windows stable across interleaved threads", () => {
+    const entriesA = Array.from({ length: 80 }, (_unused, index) => ({
+      entry_id: `a-${index}`,
+      turn_key: `assistant:a-${index}`,
+      turn_id: `a-${index}`,
+      role: "assistant" as const,
+      kind: "message" as const,
+      text: `entry a ${index}`,
+      created_at_utc: null,
+      timestamp_label: "",
+      timestamp_tooltip: "",
+    }));
+    const entriesB = Array.from({ length: 80 }, (_unused, index) => ({
+      entry_id: `b-${index}`,
+      turn_key: `assistant:b-${index}`,
+      turn_id: `b-${index}`,
+      role: "assistant" as const,
+      kind: "message" as const,
+      text: `entry b ${index}`,
+      created_at_utc: null,
+      timestamp_label: "",
+      timestamp_tooltip: "",
+    }));
+
+    const measuredA: Record<string, number> = {
+      "a-0": 120,
+      "a-1": 140,
+      "a-2": 88,
+    };
+    const measuredB: Record<string, number> = {
+      "b-0": 150,
+      "b-1": 96,
+      "b-2": 132,
+    };
+
+    const firstA = buildThreadVirtualWindow({
+      entries: entriesA,
+      measuredHeightsPx: measuredA,
+      defaultRowHeightPx: 100,
+      viewport: {
+        scroll_top_px: 900,
+        scroll_height_px: 8000,
+        viewport_height_px: 600,
+      },
+    });
+    buildThreadVirtualWindow({
+      entries: entriesB,
+      measuredHeightsPx: measuredB,
+      defaultRowHeightPx: 100,
+      viewport: {
+        scroll_top_px: 1100,
+        scroll_height_px: 8000,
+        viewport_height_px: 600,
+      },
+    });
+    const secondA = buildThreadVirtualWindow({
+      entries: entriesA,
+      measuredHeightsPx: measuredA,
+      defaultRowHeightPx: 100,
+      viewport: {
+        scroll_top_px: 900,
+        scroll_height_px: 8000,
+        viewport_height_px: 600,
+      },
+    });
+
+    expect(secondA).toEqual(firstA);
+  });
+
   it("builds prompt-history navigation targets for up/down controls", () => {
     const snapshot = buildThreadDisplaySnapshot({
       thread: {
@@ -196,5 +265,86 @@ describe("thread display integration", () => {
 
     expect(second).not.toBe(first);
     expect(second).toHaveLength(4);
+  });
+
+  it("reuses extracted entries when wrapper objects change but turn array stays stable", () => {
+    const turns = [
+      {
+        id: "t1",
+        created_at: "2026-03-10T09:00:00.000Z",
+        input_items: [{ type: "message", text: "one" }],
+        output_items: [{ type: "message", text: "a" }],
+      },
+      {
+        id: "t2",
+        created_at: "2026-03-10T09:01:00.000Z",
+        input_items: [{ type: "message", text: "two" }],
+        output_items: [{ type: "message", text: "b" }],
+      },
+    ];
+
+    const first = extractThreadDisplayEntries(
+      {
+        conversation: {
+          turns,
+        },
+      },
+      "2026-03-10T09:05:00.000Z",
+    );
+    const second = extractThreadDisplayEntries(
+      {
+        thread: {
+          turns,
+        },
+      },
+      "2026-03-10T09:05:00.000Z",
+    );
+
+    expect(second).toBe(first);
+  });
+
+  it("reuses per-thread snapshots across interleaved thread rendering", () => {
+    const threadA = {
+      conversation: {
+        turns: [
+          {
+            id: "a1",
+            created_at: "2026-03-10T10:00:00.000Z",
+            input_items: [{ type: "message", text: "hello a" }],
+            output_items: [{ type: "message", text: "world a" }],
+          },
+        ],
+      },
+    };
+    const threadB = {
+      conversation: {
+        turns: [
+          {
+            id: "b1",
+            created_at: "2026-03-10T10:01:00.000Z",
+            input_items: [{ type: "message", text: "hello b" }],
+            output_items: [{ type: "message", text: "world b" }],
+          },
+        ],
+      },
+    };
+
+    const firstA = buildThreadDisplaySnapshot({
+      thread: threadA,
+      generated_at_utc: "2026-03-10T10:05:00.000Z",
+      current_turn_key: "assistant:a1",
+    });
+    buildThreadDisplaySnapshot({
+      thread: threadB,
+      generated_at_utc: "2026-03-10T10:05:00.000Z",
+      current_turn_key: "assistant:b1",
+    });
+    const secondA = buildThreadDisplaySnapshot({
+      thread: threadA,
+      generated_at_utc: "2026-03-10T10:05:00.000Z",
+      current_turn_key: "assistant:a1",
+    });
+
+    expect(secondA).toBe(firstA);
   });
 });

@@ -10,7 +10,6 @@ import {
 import { timelineProjectCodexSettingsPath } from "./paths.js";
 
 const FILE_MISSING_MTIME_MS = -1;
-const CACHE_KEY_SEPARATOR = "::";
 
 interface ProjectCodexSettingsCacheEntry {
   mtimeMs: number;
@@ -24,36 +23,6 @@ const projectCodexSettingsInflight = new Map<string, Promise<ProjectCodexSetting
 function normalizeGitOriginUrl(gitOriginUrl: string | null | undefined): string | null {
   const text = typeof gitOriginUrl === "string" ? gitOriginUrl.trim() : "";
   return text || null;
-}
-
-function settingsCacheKey(filePath: string, gitOriginUrl: string | null): string {
-  return `${filePath}${CACHE_KEY_SEPARATOR}${gitOriginUrl || ""}`;
-}
-
-function clearProjectCodexSettingsCacheForPath(filePath: string) {
-  const prefix = `${filePath}${CACHE_KEY_SEPARATOR}`;
-  for (const key of projectCodexSettingsCache.keys()) {
-    if (key.startsWith(prefix)) {
-      projectCodexSettingsCache.delete(key);
-    }
-  }
-  for (const key of projectCodexSettingsInflight.keys()) {
-    if (key.startsWith(prefix)) {
-      projectCodexSettingsInflight.delete(key);
-    }
-  }
-}
-
-function findProjectCodexSettingsCacheForPath(
-  filePath: string,
-): ProjectCodexSettingsCacheEntry | null {
-  const prefix = `${filePath}${CACHE_KEY_SEPARATOR}`;
-  for (const [key, value] of projectCodexSettingsCache.entries()) {
-    if (key.startsWith(prefix)) {
-      return value;
-    }
-  }
-  return null;
 }
 
 async function fileMtimeMs(filePath: string): Promise<number> {
@@ -74,17 +43,37 @@ export async function loadProjectCodexSettings(options: {
 }): Promise<ProjectCodexSettings> {
   const filePath = timelineProjectCodexSettingsPath(options.repoRoot);
   const normalizedGitOriginUrl = normalizeGitOriginUrl(options.gitOriginUrl);
-  const cacheKey = settingsCacheKey(filePath, normalizedGitOriginUrl);
-  const inflight = projectCodexSettingsInflight.get(cacheKey);
+  const inflight = projectCodexSettingsInflight.get(filePath);
   if (inflight) {
     return inflight;
   }
 
   const promise = (async () => {
     const currentMtimeMs = await fileMtimeMs(filePath);
-    const cached = projectCodexSettingsCache.get(cacheKey);
+    const cached = projectCodexSettingsCache.get(filePath);
     if (cached && cached.mtimeMs === currentMtimeMs) {
-      return cached.value;
+      const cachedGitOriginUrl = normalizeGitOriginUrl(cached.value.git_origin_url);
+      if (!normalizedGitOriginUrl || cachedGitOriginUrl) {
+        return cached.value;
+      }
+
+      const upgraded = normalizeProjectCodexSettings(cached.value, {
+        gitOriginUrl: normalizedGitOriginUrl,
+      });
+      const wrote = await writePrettyJsonIfChanged(filePath, upgraded, {
+        existingRaw: cached.raw,
+      });
+      if (!wrote) {
+        return cached.value;
+      }
+      const nextMtimeMs = await fileMtimeMs(filePath);
+      const nextRaw = formatPrettyJson(upgraded);
+      projectCodexSettingsCache.set(filePath, {
+        mtimeMs: nextMtimeMs,
+        value: upgraded,
+        raw: nextRaw,
+      });
+      return upgraded;
     }
 
     const { value: current, raw } = await readJsonOptionalWithRaw(filePath, projectCodexSettingsSchema);
@@ -95,8 +84,7 @@ export async function loadProjectCodexSettings(options: {
     const nextMtimeMs =
       wrote || currentMtimeMs === FILE_MISSING_MTIME_MS ? await fileMtimeMs(filePath) : currentMtimeMs;
     const nextRaw = wrote ? formatPrettyJson(normalized) : raw ?? formatPrettyJson(normalized);
-    clearProjectCodexSettingsCacheForPath(filePath);
-    projectCodexSettingsCache.set(cacheKey, {
+    projectCodexSettingsCache.set(filePath, {
       mtimeMs: nextMtimeMs,
       value: normalized,
       raw: nextRaw,
@@ -104,9 +92,9 @@ export async function loadProjectCodexSettings(options: {
     return normalized;
   })();
 
-  projectCodexSettingsInflight.set(cacheKey, promise);
+  projectCodexSettingsInflight.set(filePath, promise);
   return promise.finally(() => {
-    projectCodexSettingsInflight.delete(cacheKey);
+    projectCodexSettingsInflight.delete(filePath);
   });
 }
 
@@ -117,21 +105,17 @@ export async function writeProjectCodexSettings(
   const filePath = timelineProjectCodexSettingsPath(repoRoot);
   const normalized = normalizeProjectCodexSettings(settings);
   const currentMtimeMs = await fileMtimeMs(filePath);
-  const cached = findProjectCodexSettingsCacheForPath(filePath);
+  const cached = projectCodexSettingsCache.get(filePath);
   const existingRaw = cached && cached.mtimeMs === currentMtimeMs ? cached.raw : undefined;
   const wrote = await writePrettyJsonIfChanged(filePath, normalized, { existingRaw });
   const nextMtimeMs =
     wrote || currentMtimeMs === FILE_MISSING_MTIME_MS ? await fileMtimeMs(filePath) : currentMtimeMs;
   const nextRaw = formatPrettyJson(normalized);
-  clearProjectCodexSettingsCacheForPath(filePath);
-  projectCodexSettingsCache.set(
-    settingsCacheKey(filePath, normalizeGitOriginUrl(normalized.git_origin_url)),
-    {
-      mtimeMs: nextMtimeMs,
-      value: normalized,
-      raw: nextRaw,
-    },
-  );
+  projectCodexSettingsCache.set(filePath, {
+    mtimeMs: nextMtimeMs,
+    value: normalized,
+    raw: nextRaw,
+  });
   return normalized;
 }
 

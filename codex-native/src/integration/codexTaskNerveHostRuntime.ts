@@ -20,6 +20,11 @@ import type {
   CodexConversationInteractionInput,
   CodexConversationInteractionResult,
 } from "./codexConversationInteraction.js";
+import {
+  planCodexProjectGitSync,
+} from "./codexProjectGitSync.js";
+import type { ProjectGitSyncSnapshot } from "../domain/projectGitSync.js";
+import type { ProjectCiTaskSyncPlan } from "../domain/projectCiSync.js";
 import { createTaskNerveService, type TaskNerveService } from "./taskNerveService.js";
 import type {
   BuildThreadDisplayOptions,
@@ -28,6 +33,10 @@ import type {
 
 const HOST_STYLING_CONTEXT_CACHE_TTL_MS = 10_000;
 const CONVERSATION_CHROME_CACHE_TTL_MS = 250;
+const CHROME_STATE_CACHE_TTL_MS = 1_000;
+const RESOURCE_STATS_CACHE_TTL_MS = 1_000;
+const PROJECT_GIT_STATE_CACHE_TTL_MS = 2_500;
+const PROJECT_CI_FAILURE_CACHE_TTL_MS = 7_500;
 
 export interface CodexTaskNerveSnapshotOptions {
   repoRoot: string;
@@ -72,6 +81,62 @@ export interface CodexControllerBootstrapResult {
   prompt: string;
 }
 
+export interface CodexProjectGitSyncSnapshotOptions {
+  repoRoot: string;
+  tasks?: Partial<TaskRecord>[];
+  nowIsoUtc?: string | null;
+  gitState?: unknown;
+}
+
+export interface CodexProjectGitSyncRunOptions {
+  repoRoot: string;
+  tasks?: Partial<TaskRecord>[];
+  mode?: "smart" | "pull" | "push";
+  autostash?: boolean;
+  force?: boolean;
+  nowIsoUtc?: string | null;
+}
+
+export interface CodexProjectGitSyncRunResult {
+  integration_mode: "codex-native-host";
+  mode: "smart" | "pull" | "push";
+  executed: {
+    pull: boolean;
+    push: boolean;
+  };
+  plan_reason: ReturnType<typeof planCodexProjectGitSync>["reason"];
+  before: ProjectGitSyncSnapshot;
+  after: ProjectGitSyncSnapshot;
+  warnings: string[];
+}
+
+export interface CodexProjectCiSyncSnapshotOptions {
+  repoRoot: string;
+  tasks?: Partial<TaskRecord>[];
+  ciFailures?: unknown;
+  availableAgentIds?: string[];
+  nowIsoUtc?: string | null;
+}
+
+export interface CodexProjectCiSyncRunOptions {
+  repoRoot: string;
+  tasks?: Partial<TaskRecord>[];
+  ciFailures?: unknown;
+  availableAgentIds?: string[];
+  persistTasks?: boolean;
+  dispatch?: boolean;
+  nowIsoUtc?: string | null;
+}
+
+export interface CodexProjectCiSyncRunResult {
+  integration_mode: "codex-native-host";
+  before: ProjectCiTaskSyncPlan;
+  settings: ProjectCodexSettings;
+  persisted_task_upserts: number;
+  dispatched_task_ids: string[];
+  warnings: string[];
+}
+
 export type CodexConversationChromeAction =
   | { type: "topbar-task-count-click" }
   | { type: "footer-terminal-toggle-click" }
@@ -103,11 +168,36 @@ export interface ObserveRepositorySettingsRefreshOptions {
   onFallbackRefresh?: () => void;
 }
 
+export type CodexConversationChromeRefreshSource =
+  | "task-count"
+  | "task-drawer"
+  | "terminal-panel"
+  | "branch-state"
+  | "resource-stats";
+
+export interface CodexConversationChromeRefreshEvent {
+  source: CodexConversationChromeRefreshSource;
+  payload: unknown;
+}
+
+export interface ObserveConversationChromeRefreshOptions {
+  onEvent: (event: CodexConversationChromeRefreshEvent) => void;
+  onFallbackRefresh?: () => void;
+}
+
 export interface CodexTaskNerveHostRuntime {
   snapshot: (options: CodexTaskNerveSnapshotOptions) => Promise<CodexTaskNerveSnapshot>;
   bootstrapControllerThread: (
     options: CodexControllerBootstrapOptions,
   ) => Promise<CodexControllerBootstrapResult>;
+  projectGitSyncSnapshot: (
+    options: CodexProjectGitSyncSnapshotOptions,
+  ) => Promise<ProjectGitSyncSnapshot>;
+  syncProjectGit: (options: CodexProjectGitSyncRunOptions) => Promise<CodexProjectGitSyncRunResult>;
+  projectCiSyncSnapshot: (
+    options: CodexProjectCiSyncSnapshotOptions,
+  ) => Promise<ProjectCiTaskSyncPlan>;
+  syncProjectCi: (options: CodexProjectCiSyncRunOptions) => Promise<CodexProjectCiSyncRunResult>;
   conversationDisplaySnapshot: (
     options: CodexConversationDisplayOptions,
   ) => Promise<CodexConversationDisplaySnapshot>;
@@ -136,6 +226,9 @@ export interface CodexTaskNerveHostRuntime {
   ) => Promise<CodexHostRefreshSubscription>;
   observeRepositorySettingsRefresh: (
     options: ObserveRepositorySettingsRefreshOptions,
+  ) => Promise<CodexHostRefreshSubscription>;
+  observeConversationChromeRefresh: (
+    options: ObserveConversationChromeRefreshOptions,
   ) => Promise<CodexHostRefreshSubscription>;
 }
 
@@ -203,6 +296,32 @@ function parseTaskCount(value: unknown): number {
   return 0;
 }
 
+function parseTaskCountMaybe(value: unknown): number | null {
+  if (Number.isFinite(value)) {
+    return Math.max(0, Math.round(Number(value)));
+  }
+  if (Array.isArray(value)) {
+    return value.length;
+  }
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+  const candidates = [
+    record.taskCount,
+    record.task_count,
+    record.pendingTaskCount,
+    record.pending_task_count,
+    record.count,
+  ];
+  for (const candidate of candidates) {
+    if (Number.isFinite(candidate)) {
+      return Math.max(0, Math.round(Number(candidate)));
+    }
+  }
+  return null;
+}
+
 function parseOpenState(value: unknown, fallback = false): boolean {
   if (typeof value === "boolean") {
     return value;
@@ -218,6 +337,23 @@ function parseOpenState(value: unknown, fallback = false): boolean {
     }
   }
   return fallback;
+}
+
+function parseOpenStateMaybe(value: unknown): boolean | null {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+  const candidates = [record.open, record.isOpen, record.drawer_open, record.task_drawer_open];
+  for (const candidate of candidates) {
+    if (typeof candidate === "boolean") {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 function parseBranchState(value: unknown): NormalizedBranchState {
@@ -263,6 +399,113 @@ function parseBranchState(value: unknown): NormalizedBranchState {
   };
 }
 
+function parseBranchStatePatch(value: unknown): Partial<NormalizedBranchState> | null {
+  if (Array.isArray(value)) {
+    const branches = value
+      .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+      .filter(Boolean);
+    return {
+      currentBranch: branches[0] || null,
+      branches,
+    };
+  }
+
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  let branches: string[] | undefined;
+  if (Array.isArray(record.branches)) {
+    branches = record.branches
+      .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+      .filter(Boolean);
+  } else if (Array.isArray(record.branchNames)) {
+    branches = record.branchNames
+      .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+      .filter(Boolean);
+  }
+
+  let currentBranch: string | null | undefined;
+  const currentCandidates = [
+    record.current,
+    record.currentBranch,
+    record.current_branch,
+    record.activeBranch,
+    record.active_branch,
+  ];
+  for (const candidate of currentCandidates) {
+    if (typeof candidate === "string") {
+      const normalized = candidate.trim();
+      currentBranch = normalized || null;
+      break;
+    }
+  }
+
+  if (branches === undefined && currentBranch === undefined) {
+    return null;
+  }
+
+  const patch: Partial<NormalizedBranchState> = {};
+  if (branches !== undefined) {
+    patch.branches = branches;
+    if (currentBranch === undefined) {
+      patch.currentBranch = branches[0] || null;
+    }
+  }
+  if (currentBranch !== undefined) {
+    patch.currentBranch = currentBranch;
+  }
+  return patch;
+}
+
+function parseStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return [...new Set(value.map((entry) => String(entry || "").trim()).filter(Boolean))];
+}
+
+function parseAgentIds(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return parseStringArray(value);
+  }
+  const record = asRecord(value);
+  if (!record) {
+    return [];
+  }
+
+  const candidateArrays = [record.agent_ids, record.agentIds, record.agents, record.workers];
+  for (const candidate of candidateArrays) {
+    if (!Array.isArray(candidate)) {
+      continue;
+    }
+    const normalized = candidate
+      .map((entry) => {
+        if (typeof entry === "string") {
+          return entry.trim();
+        }
+        const asEntryRecord = asRecord(entry);
+        if (!asEntryRecord) {
+          return "";
+        }
+        const idCandidates = [asEntryRecord.id, asEntryRecord.agent_id, asEntryRecord.agentId];
+        for (const id of idCandidates) {
+          if (typeof id === "string" && id.trim()) {
+            return id.trim();
+          }
+        }
+        return "";
+      })
+      .filter(Boolean);
+    if (normalized.length > 0) {
+      return [...new Set(normalized)];
+    }
+  }
+
+  return [];
+}
+
 function parseResourceStats(value: unknown): Partial<CodexConversationChromeResourceStats> {
   const record = asRecord(value);
   if (!record) {
@@ -297,6 +540,72 @@ function parseResourceStats(value: unknown): Partial<CodexConversationChromeReso
           ? record.captured_at_utc.trim()
           : null,
   };
+}
+
+function parseResourceStatsPatch(
+  value: unknown,
+): Partial<CodexConversationChromeResourceStats> | null {
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  const patch: Partial<CodexConversationChromeResourceStats> = {};
+
+  if ("cpuPercent" in record || "cpu_percent" in record) {
+    const candidate = record.cpuPercent ?? record.cpu_percent;
+    patch.cpuPercent = Number.isFinite(candidate) ? Number(candidate) : null;
+  }
+  if ("gpuPercent" in record || "gpu_percent" in record) {
+    const candidate = record.gpuPercent ?? record.gpu_percent;
+    patch.gpuPercent = Number.isFinite(candidate) ? Number(candidate) : null;
+  }
+  if ("memoryPercent" in record || "memory_percent" in record) {
+    const candidate = record.memoryPercent ?? record.memory_percent;
+    patch.memoryPercent = Number.isFinite(candidate) ? Number(candidate) : null;
+  }
+  if ("thermalPressure" in record || "thermal_pressure" in record) {
+    const candidate = record.thermalPressure ?? record.thermal_pressure;
+    patch.thermalPressure =
+      typeof candidate === "string" && candidate.trim() ? candidate.trim() : null;
+  }
+  if ("capturedAtUtc" in record || "captured_at_utc" in record) {
+    const candidate = record.capturedAtUtc ?? record.captured_at_utc;
+    patch.capturedAtUtc = typeof candidate === "string" && candidate.trim() ? candidate.trim() : null;
+  }
+
+  return Object.keys(patch).length > 0 ? patch : null;
+}
+
+function sameStringArray(left: string[] | undefined, right: string[] | undefined): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (!left || !right) {
+    return !left && !right;
+  }
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function sameResourceStats(
+  left: Partial<CodexConversationChromeResourceStats> | null | undefined,
+  right: Partial<CodexConversationChromeResourceStats> | null | undefined,
+): boolean {
+  return (
+    (left?.cpuPercent ?? undefined) === (right?.cpuPercent ?? undefined) &&
+    (left?.gpuPercent ?? undefined) === (right?.gpuPercent ?? undefined) &&
+    (left?.memoryPercent ?? undefined) === (right?.memoryPercent ?? undefined) &&
+    (left?.thermalPressure ?? undefined) === (right?.thermalPressure ?? undefined) &&
+    (left?.capturedAtUtc ?? undefined) === (right?.capturedAtUtc ?? undefined)
+  );
 }
 
 function normalizeHostSubscriptionDisposer(value: CodexHostSubscription | void): () => void {
@@ -342,6 +651,74 @@ export function createCodexTaskNerveHostRuntime(options: {
     fetchedAtMs: number;
   } | null = null;
   let conversationChromeSnapshotInflight: Promise<CodexConversationChromeSnapshot> | null = null;
+  let taskCountCache: {
+    value: number;
+    fetchedAtMs: number;
+  } | null = null;
+  let taskCountInflight: Promise<number> | null = null;
+  let taskDrawerOpenCache: {
+    value: boolean;
+    fetchedAtMs: number;
+  } | null = null;
+  let taskDrawerOpenInflight: Promise<boolean> | null = null;
+  let terminalOpenCache: {
+    value: boolean;
+    fetchedAtMs: number;
+  } | null = null;
+  let terminalOpenInflight: Promise<boolean> | null = null;
+  let branchStateCache: {
+    value: NormalizedBranchState;
+    fetchedAtMs: number;
+  } | null = null;
+  let branchStateInflight: Promise<NormalizedBranchState> | null = null;
+  let resourceStatsCache: {
+    value: Partial<CodexConversationChromeResourceStats>;
+    fetchedAtMs: number;
+  } | null = null;
+  let resourceStatsInflight: Promise<Partial<CodexConversationChromeResourceStats>> | null = null;
+  const projectGitStateCache = new Map<
+    string,
+    {
+      value: unknown;
+      fetchedAtMs: number;
+    }
+  >();
+  const projectGitStateInflight = new Map<string, Promise<unknown>>();
+  const projectCiFailureCache = new Map<
+    string,
+    {
+      value: unknown;
+      fetchedAtMs: number;
+    }
+  >();
+  const projectCiFailureInflight = new Map<string, Promise<unknown>>();
+  const conversationChromeEventState: CodexConversationChromeStateInput = {};
+
+  function mergedConversationChromeStateInput(
+    input: CodexConversationChromeStateInput = {},
+  ): CodexConversationChromeStateInput {
+    return {
+      taskCount:
+        input.taskCount !== undefined ? input.taskCount : conversationChromeEventState.taskCount,
+      taskDrawerOpen:
+        input.taskDrawerOpen !== undefined
+          ? input.taskDrawerOpen
+          : conversationChromeEventState.taskDrawerOpen,
+      terminalOpen:
+        input.terminalOpen !== undefined
+          ? input.terminalOpen
+          : conversationChromeEventState.terminalOpen,
+      currentBranch:
+        input.currentBranch !== undefined
+          ? input.currentBranch
+          : conversationChromeEventState.currentBranch,
+      branches: input.branches !== undefined ? input.branches : conversationChromeEventState.branches,
+      resourceStats:
+        input.resourceStats !== undefined
+          ? input.resourceStats
+          : conversationChromeEventState.resourceStats,
+    };
+  }
 
   async function loadHostStylingContext(): Promise<unknown> {
     if (typeof host.getCodexStylingContext !== "function") {
@@ -371,50 +748,156 @@ export function createCodexTaskNerveHostRuntime(options: {
     return hostStylingContextInflight;
   }
 
-  async function loadTaskCount(override?: number): Promise<number> {
+  async function loadTaskCount(
+    override?: number,
+    options?: { forceRefresh?: boolean },
+  ): Promise<number> {
     if (Number.isFinite(override)) {
       return parseTaskCount(override);
     }
     if (typeof host.readTaskNerveTaskCount !== "function") {
       return 0;
     }
-    return parseTaskCount(await host.readTaskNerveTaskCount());
+    const forceRefresh = options?.forceRefresh === true;
+    const now = Date.now();
+    if (
+      !forceRefresh &&
+      taskCountCache &&
+      now - taskCountCache.fetchedAtMs < CHROME_STATE_CACHE_TTL_MS
+    ) {
+      return taskCountCache.value;
+    }
+    if (!forceRefresh && taskCountInflight) {
+      return taskCountInflight;
+    }
+    taskCountInflight = Promise.resolve(host.readTaskNerveTaskCount())
+      .then((value) => {
+        const normalized = parseTaskCount(value);
+        taskCountCache = {
+          value: normalized,
+          fetchedAtMs: Date.now(),
+        };
+        return normalized;
+      })
+      .finally(() => {
+        taskCountInflight = null;
+      });
+    return taskCountInflight;
   }
 
-  async function loadTaskDrawerOpen(override?: boolean): Promise<boolean> {
+  async function loadTaskDrawerOpen(
+    override?: boolean,
+    options?: { forceRefresh?: boolean },
+  ): Promise<boolean> {
     if (typeof override === "boolean") {
       return override;
     }
     if (typeof host.readTaskDrawerState !== "function") {
       return false;
     }
-    return parseOpenState(await host.readTaskDrawerState(), false);
+    const forceRefresh = options?.forceRefresh === true;
+    const now = Date.now();
+    if (
+      !forceRefresh &&
+      taskDrawerOpenCache &&
+      now - taskDrawerOpenCache.fetchedAtMs < CHROME_STATE_CACHE_TTL_MS
+    ) {
+      return taskDrawerOpenCache.value;
+    }
+    if (!forceRefresh && taskDrawerOpenInflight) {
+      return taskDrawerOpenInflight;
+    }
+    taskDrawerOpenInflight = Promise.resolve(host.readTaskDrawerState())
+      .then((value) => {
+        const normalized = parseOpenState(value, false);
+        taskDrawerOpenCache = {
+          value: normalized,
+          fetchedAtMs: Date.now(),
+        };
+        return normalized;
+      })
+      .finally(() => {
+        taskDrawerOpenInflight = null;
+      });
+    return taskDrawerOpenInflight;
   }
 
-  async function loadTerminalOpen(override?: boolean): Promise<boolean> {
+  async function loadTerminalOpen(
+    override?: boolean,
+    options?: { forceRefresh?: boolean },
+  ): Promise<boolean> {
     if (typeof override === "boolean") {
       return override;
     }
     if (typeof host.readTerminalPanelState !== "function") {
       return false;
     }
-    return parseOpenState(await host.readTerminalPanelState(), false);
+    const forceRefresh = options?.forceRefresh === true;
+    const now = Date.now();
+    if (
+      !forceRefresh &&
+      terminalOpenCache &&
+      now - terminalOpenCache.fetchedAtMs < CHROME_STATE_CACHE_TTL_MS
+    ) {
+      return terminalOpenCache.value;
+    }
+    if (!forceRefresh && terminalOpenInflight) {
+      return terminalOpenInflight;
+    }
+    terminalOpenInflight = Promise.resolve(host.readTerminalPanelState())
+      .then((value) => {
+        const normalized = parseOpenState(value, false);
+        terminalOpenCache = {
+          value: normalized,
+          fetchedAtMs: Date.now(),
+        };
+        return normalized;
+      })
+      .finally(() => {
+        terminalOpenInflight = null;
+      });
+    return terminalOpenInflight;
   }
 
   async function loadBranches(overrides: {
     currentBranch?: string | null;
     branches?: string[];
+    forceRefresh?: boolean;
   }): Promise<NormalizedBranchState> {
-    if (overrides.currentBranch || (overrides.branches && overrides.branches.length > 0)) {
-      return {
-        currentBranch: overrides.currentBranch || null,
-        branches: overrides.branches || [],
-      };
+    if (overrides.currentBranch !== undefined || overrides.branches !== undefined) {
+      return parseBranchState({
+        currentBranch: overrides.currentBranch ?? null,
+        branches: overrides.branches ?? [],
+      });
     }
     if (typeof host.listTaskNerveBranches !== "function") {
       return { currentBranch: null, branches: [] };
     }
-    return parseBranchState(await host.listTaskNerveBranches());
+    const forceRefresh = overrides.forceRefresh === true;
+    const now = Date.now();
+    if (
+      !forceRefresh &&
+      branchStateCache &&
+      now - branchStateCache.fetchedAtMs < CHROME_STATE_CACHE_TTL_MS
+    ) {
+      return branchStateCache.value;
+    }
+    if (!forceRefresh && branchStateInflight) {
+      return branchStateInflight;
+    }
+    branchStateInflight = Promise.resolve(host.listTaskNerveBranches())
+      .then((value) => {
+        const normalized = parseBranchState(value);
+        branchStateCache = {
+          value: normalized,
+          fetchedAtMs: Date.now(),
+        };
+        return normalized;
+      })
+      .finally(() => {
+        branchStateInflight = null;
+      });
+    return branchStateInflight;
   }
 
   async function loadResourceStats(
@@ -426,7 +909,98 @@ export function createCodexTaskNerveHostRuntime(options: {
     if (typeof host.readTaskNerveResourceStats !== "function") {
       return {};
     }
-    return parseResourceStats(await host.readTaskNerveResourceStats());
+    const now = Date.now();
+    if (resourceStatsCache && now - resourceStatsCache.fetchedAtMs < RESOURCE_STATS_CACHE_TTL_MS) {
+      return resourceStatsCache.value;
+    }
+    if (resourceStatsInflight) {
+      return resourceStatsInflight;
+    }
+    resourceStatsInflight = Promise.resolve(host.readTaskNerveResourceStats())
+      .then((value) => {
+        const normalized = parseResourceStats(value);
+        resourceStatsCache = {
+          value: normalized,
+          fetchedAtMs: Date.now(),
+        };
+        return normalized;
+      })
+      .finally(() => {
+        resourceStatsInflight = null;
+      });
+    return resourceStatsInflight;
+  }
+
+  function invalidateProjectGitStateCache(repoRoot?: string | null) {
+    const key = typeof repoRoot === "string" ? repoRoot.trim() : "";
+    if (key) {
+      projectGitStateCache.delete(key);
+      projectGitStateInflight.delete(key);
+      return;
+    }
+    projectGitStateCache.clear();
+    projectGitStateInflight.clear();
+  }
+
+  async function loadProjectGitState(repoRoot: string, override?: unknown): Promise<unknown> {
+    if (override !== undefined) {
+      return override;
+    }
+    if (typeof host.readRepositoryGitState !== "function") {
+      return null;
+    }
+    const key = repoRoot.trim();
+    if (!key) {
+      return null;
+    }
+    const now = Date.now();
+    const cached = projectGitStateCache.get(key);
+    if (cached && now - cached.fetchedAtMs < PROJECT_GIT_STATE_CACHE_TTL_MS) {
+      return cached.value;
+    }
+    const inflight = projectGitStateInflight.get(key);
+    if (inflight) {
+      return inflight;
+    }
+
+    const promise = Promise.resolve(host.readRepositoryGitState({ repoRoot: key }))
+      .then((value) => {
+        projectGitStateCache.set(key, {
+          value,
+          fetchedAtMs: Date.now(),
+        });
+        return value;
+      })
+      .finally(() => {
+        projectGitStateInflight.delete(key);
+      });
+    projectGitStateInflight.set(key, promise);
+    return promise;
+  }
+
+  async function loadProjectGitSyncContext(options: {
+    repoRoot: string;
+    tasks?: Partial<TaskRecord>[];
+    nowIsoUtc?: string | null;
+    gitState?: unknown;
+  }): Promise<{
+    settings: ProjectCodexSettings;
+    snapshot: ProjectGitSyncSnapshot;
+  }> {
+    const settings = await taskNerve.loadProjectSettings({
+      repoRoot: options.repoRoot,
+    });
+    const gitState = await loadProjectGitState(options.repoRoot, options.gitState);
+    const snapshot = taskNerve.projectGitSyncSnapshot({
+      settings,
+      tasks: options.tasks,
+      git_state: gitState,
+      now_iso: options.nowIsoUtc ?? undefined,
+    });
+    return {
+      settings,
+      snapshot,
+    };
   }
 
   async function subscribeWithFallback(options: {
@@ -461,6 +1035,27 @@ export function createCodexTaskNerveHostRuntime(options: {
     };
   }
 
+  async function subscribeOptional(options: {
+    subscribe: unknown;
+    listener: (event: unknown) => void;
+    subscribeArgs?: unknown[];
+  }): Promise<(() => void) | null> {
+    const subscribe =
+      typeof options.subscribe === "function"
+        ? (options.subscribe as (
+            listener: (event: unknown) => void,
+            ...rest: unknown[]
+          ) => Promise<CodexHostSubscription | void> | CodexHostSubscription | void)
+        : null;
+    if (!subscribe) {
+      return null;
+    }
+    const subscription = await Promise.resolve(
+      subscribe(options.listener, ...(options.subscribeArgs ?? [])),
+    );
+    return normalizeHostSubscriptionDisposer(subscription);
+  }
+
   async function loadConversationChromeSnapshot(
     stateInput: CodexConversationChromeStateInput = {},
   ): Promise<CodexConversationChromeSnapshot> {
@@ -485,8 +1080,113 @@ export function createCodexTaskNerveHostRuntime(options: {
     });
   }
 
-  function invalidateConversationChromeCache() {
+  function invalidateConversationChromeCache(options?: { clearReadCaches?: boolean }) {
     conversationChromeSnapshotCache = null;
+    if (options?.clearReadCaches) {
+      taskCountCache = null;
+      taskCountInflight = null;
+      taskDrawerOpenCache = null;
+      taskDrawerOpenInflight = null;
+      terminalOpenCache = null;
+      terminalOpenInflight = null;
+      branchStateCache = null;
+      branchStateInflight = null;
+      resourceStatsCache = null;
+      resourceStatsInflight = null;
+    }
+  }
+
+  function applyConversationChromeEventPatch(
+    patch: Partial<CodexConversationChromeStateInput>,
+  ): boolean {
+    let changed = false;
+    let branchStateChanged = false;
+    const nowMs = Date.now();
+
+    if (
+      patch.taskCount !== undefined &&
+      patch.taskCount !== conversationChromeEventState.taskCount
+    ) {
+      conversationChromeEventState.taskCount = patch.taskCount;
+      taskCountCache = {
+        value: parseTaskCount(patch.taskCount),
+        fetchedAtMs: nowMs,
+      };
+      changed = true;
+    }
+
+    if (
+      patch.taskDrawerOpen !== undefined &&
+      patch.taskDrawerOpen !== conversationChromeEventState.taskDrawerOpen
+    ) {
+      conversationChromeEventState.taskDrawerOpen = patch.taskDrawerOpen;
+      taskDrawerOpenCache = {
+        value: Boolean(patch.taskDrawerOpen),
+        fetchedAtMs: nowMs,
+      };
+      changed = true;
+    }
+
+    if (
+      patch.terminalOpen !== undefined &&
+      patch.terminalOpen !== conversationChromeEventState.terminalOpen
+    ) {
+      conversationChromeEventState.terminalOpen = patch.terminalOpen;
+      terminalOpenCache = {
+        value: Boolean(patch.terminalOpen),
+        fetchedAtMs: nowMs,
+      };
+      changed = true;
+    }
+
+    if (
+      patch.currentBranch !== undefined &&
+      patch.currentBranch !== conversationChromeEventState.currentBranch
+    ) {
+      conversationChromeEventState.currentBranch = patch.currentBranch;
+      branchStateChanged = true;
+      changed = true;
+    }
+
+    if (
+      patch.branches !== undefined &&
+      !sameStringArray(patch.branches, conversationChromeEventState.branches)
+    ) {
+      conversationChromeEventState.branches = patch.branches;
+      branchStateChanged = true;
+      changed = true;
+    }
+
+    if (branchStateChanged) {
+      branchStateCache = {
+        value: parseBranchState({
+          currentBranch: conversationChromeEventState.currentBranch ?? null,
+          branches: conversationChromeEventState.branches ?? [],
+        }),
+        fetchedAtMs: nowMs,
+      };
+    }
+
+    if (patch.resourceStats !== undefined) {
+      const previousStats = conversationChromeEventState.resourceStats ?? undefined;
+      const nextStats = {
+        ...(previousStats ?? {}),
+        ...(patch.resourceStats ?? {}),
+      };
+      if (!sameResourceStats(previousStats, nextStats)) {
+        conversationChromeEventState.resourceStats = nextStats;
+        resourceStatsCache = {
+          value: nextStats,
+          fetchedAtMs: nowMs,
+        };
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      invalidateConversationChromeCache();
+    }
+    return changed;
   }
 
   async function applyConversationInteractionCommand(
@@ -547,6 +1247,88 @@ export function createCodexTaskNerveHostRuntime(options: {
         repo_root: snapshotOptions.repoRoot,
         settings,
         task_snapshot: taskSnapshot,
+      };
+    },
+
+    projectGitSyncSnapshot: async (projectOptions) => {
+      const context = await loadProjectGitSyncContext({
+        repoRoot: projectOptions.repoRoot,
+        tasks: projectOptions.tasks,
+        nowIsoUtc: projectOptions.nowIsoUtc,
+        gitState: projectOptions.gitState,
+      });
+      return context.snapshot;
+    },
+
+    syncProjectGit: async (syncOptions) => {
+      const context = await loadProjectGitSyncContext({
+        repoRoot: syncOptions.repoRoot,
+        tasks: syncOptions.tasks,
+        nowIsoUtc: syncOptions.nowIsoUtc,
+      });
+      const plan = planCodexProjectGitSync({
+        mode: syncOptions.mode,
+        snapshot: context.snapshot,
+      });
+      const warnings: string[] = [];
+      let pulled = false;
+      let pushed = false;
+      let effectiveSettings = context.settings;
+
+      if (plan.should_pull) {
+        if (typeof host.pullRepository !== "function") {
+          warnings.push("Codex host method pullRepository is unavailable");
+        } else {
+          await host.pullRepository({
+            repoRoot: syncOptions.repoRoot,
+            autostash: syncOptions.autostash ?? true,
+          });
+          pulled = true;
+          invalidateProjectGitStateCache(syncOptions.repoRoot);
+        }
+      }
+
+      const pushBlockedReason =
+        plan.mode === "smart" ? context.snapshot.recommendation.push_blocked_reason : null;
+      if (plan.should_push && pushBlockedReason) {
+        warnings.push(`Push skipped: ${pushBlockedReason}`);
+      } else if (plan.should_push) {
+        if (typeof host.pushRepository !== "function") {
+          warnings.push("Codex host method pushRepository is unavailable");
+        } else {
+          await host.pushRepository({
+            repoRoot: syncOptions.repoRoot,
+          });
+          pushed = true;
+          effectiveSettings = taskNerve.projectSettingsAfterGitPush({
+            settings: effectiveSettings,
+            tasks: syncOptions.tasks,
+            pushed_at_utc: syncOptions.nowIsoUtc ?? undefined,
+          });
+          await taskNerve.writeProjectSettings(syncOptions.repoRoot, effectiveSettings);
+          invalidateProjectGitStateCache(syncOptions.repoRoot);
+        }
+      }
+
+      const afterGitState = await loadProjectGitState(syncOptions.repoRoot);
+      const after = taskNerve.projectGitSyncSnapshot({
+        settings: effectiveSettings,
+        tasks: syncOptions.tasks,
+        git_state: afterGitState,
+        now_iso: syncOptions.nowIsoUtc ?? undefined,
+      });
+
+      return {
+        integration_mode: "codex-native-host",
+        mode: plan.mode,
+        executed: {
+          pull: pulled,
+          push: pushed,
+        },
+        plan_reason: plan.reason,
+        before: context.snapshot,
+        after,
+        warnings,
       };
     },
 
@@ -639,8 +1421,9 @@ export function createCodexTaskNerveHostRuntime(options: {
     },
 
     conversationChromeSnapshot: async (stateInput = {}) => {
+      const effectiveStateInput = mergedConversationChromeStateInput(stateInput);
       if (hasConversationChromeOverrides(stateInput)) {
-        return loadConversationChromeSnapshot(stateInput);
+        return loadConversationChromeSnapshot(effectiveStateInput);
       }
       const now = Date.now();
       if (
@@ -652,7 +1435,7 @@ export function createCodexTaskNerveHostRuntime(options: {
       if (conversationChromeSnapshotInflight) {
         return conversationChromeSnapshotInflight;
       }
-      conversationChromeSnapshotInflight = loadConversationChromeSnapshot()
+      conversationChromeSnapshotInflight = loadConversationChromeSnapshot(effectiveStateInput)
         .then((snapshot) => {
           conversationChromeSnapshotCache = {
             snapshot,
@@ -678,7 +1461,7 @@ export function createCodexTaskNerveHostRuntime(options: {
             };
           }
           await host.openTaskDrawer();
-          invalidateConversationChromeCache();
+          applyConversationChromeEventPatch({ taskDrawerOpen: true });
           return {
             ok: true,
             integration_mode: "codex-native-host",
@@ -697,8 +1480,8 @@ export function createCodexTaskNerveHostRuntime(options: {
             };
           }
           await host.toggleTerminalPanel();
-          invalidateConversationChromeCache();
-          const terminalOpen = await loadTerminalOpen();
+          const terminalOpen = await loadTerminalOpen(undefined, { forceRefresh: true });
+          applyConversationChromeEventPatch({ terminalOpen });
           return {
             ok: true,
             integration_mode: "codex-native-host",
@@ -726,7 +1509,14 @@ export function createCodexTaskNerveHostRuntime(options: {
             };
           }
           await host.switchTaskNerveBranch(branch);
-          invalidateConversationChromeCache();
+          const branches = conversationChromeEventState.branches;
+          applyConversationChromeEventPatch({
+            currentBranch: branch,
+            branches:
+              branches && branches.length > 0
+                ? [branch, ...branches.filter((entry) => entry !== branch)]
+                : undefined,
+          });
           return {
             ok: true,
             integration_mode: "codex-native-host",
@@ -744,17 +1534,13 @@ export function createCodexTaskNerveHostRuntime(options: {
     observeThreadRefresh: async (observeOptions) => {
       return subscribeWithFallback({
         subscribe: host.subscribeThreadEvents,
+        // Thread events can be very chatty; avoid forcing chrome re-reads unless
+        // callers explicitly request snapshots after the short TTL window.
         listener: (event) => {
-          invalidateConversationChromeCache();
           observeOptions.onEvent(event);
         },
         subscribeArgs: [{ threadId: observeOptions.threadId ?? null }],
-        onFallbackRefresh: observeOptions.onFallbackRefresh
-          ? () => {
-              invalidateConversationChromeCache();
-              observeOptions.onFallbackRefresh?.();
-            }
-          : undefined,
+        onFallbackRefresh: observeOptions.onFallbackRefresh,
       });
     },
 
@@ -762,16 +1548,110 @@ export function createCodexTaskNerveHostRuntime(options: {
       return subscribeWithFallback({
         subscribe: host.subscribeRepositorySettingsEvents,
         listener: (event) => {
-          invalidateConversationChromeCache();
+          invalidateConversationChromeCache({ clearReadCaches: true });
           observeOptions.onEvent(event);
         },
         onFallbackRefresh: observeOptions.onFallbackRefresh
           ? () => {
-              invalidateConversationChromeCache();
+              invalidateConversationChromeCache({ clearReadCaches: true });
               observeOptions.onFallbackRefresh?.();
             }
           : undefined,
       });
+    },
+
+    observeConversationChromeRefresh: async (observeOptions) => {
+      const disposers = (
+        await Promise.all([
+          subscribeOptional({
+            subscribe: host.subscribeTaskNerveTaskCountEvents,
+            listener: (event) => {
+              const taskCount = parseTaskCountMaybe(event);
+              if (taskCount === null) {
+                observeOptions.onEvent({ source: "task-count", payload: event });
+                return;
+              }
+              if (applyConversationChromeEventPatch({ taskCount })) {
+                observeOptions.onEvent({ source: "task-count", payload: event });
+              }
+            },
+          }),
+          subscribeOptional({
+            subscribe: host.subscribeTaskDrawerStateEvents,
+            listener: (event) => {
+              const taskDrawerOpen = parseOpenStateMaybe(event);
+              if (taskDrawerOpen === null) {
+                observeOptions.onEvent({ source: "task-drawer", payload: event });
+                return;
+              }
+              if (applyConversationChromeEventPatch({ taskDrawerOpen })) {
+                observeOptions.onEvent({ source: "task-drawer", payload: event });
+              }
+            },
+          }),
+          subscribeOptional({
+            subscribe: host.subscribeTerminalPanelStateEvents,
+            listener: (event) => {
+              const terminalOpen = parseOpenStateMaybe(event);
+              if (terminalOpen === null) {
+                observeOptions.onEvent({ source: "terminal-panel", payload: event });
+                return;
+              }
+              if (applyConversationChromeEventPatch({ terminalOpen })) {
+                observeOptions.onEvent({ source: "terminal-panel", payload: event });
+              }
+            },
+          }),
+          subscribeOptional({
+            subscribe: host.subscribeTaskNerveBranchEvents,
+            listener: (event) => {
+              const branchPatch = parseBranchStatePatch(event);
+              if (!branchPatch) {
+                observeOptions.onEvent({ source: "branch-state", payload: event });
+                return;
+              }
+              if (
+                applyConversationChromeEventPatch({
+                  currentBranch: branchPatch.currentBranch,
+                  branches: branchPatch.branches,
+                })
+              ) {
+                observeOptions.onEvent({ source: "branch-state", payload: event });
+              }
+            },
+          }),
+          subscribeOptional({
+            subscribe: host.subscribeTaskNerveResourceStatsEvents,
+            listener: (event) => {
+              const resourceStats = parseResourceStatsPatch(event);
+              if (!resourceStats) {
+                observeOptions.onEvent({ source: "resource-stats", payload: event });
+                return;
+              }
+              if (applyConversationChromeEventPatch({ resourceStats })) {
+                observeOptions.onEvent({ source: "resource-stats", payload: event });
+              }
+            },
+          }),
+        ])
+      ).filter((disposer): disposer is () => void => typeof disposer === "function");
+
+      if (disposers.length === 0) {
+        observeOptions.onFallbackRefresh?.();
+        return {
+          mode: "fallback-manual-refresh",
+          dispose: () => {},
+        };
+      }
+
+      return {
+        mode: "host-event-subscription",
+        dispose: () => {
+          disposers.forEach((disposer) => {
+            disposer();
+          });
+        },
+      };
     },
   };
 }

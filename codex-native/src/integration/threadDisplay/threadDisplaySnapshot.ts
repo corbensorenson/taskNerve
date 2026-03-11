@@ -23,6 +23,21 @@ interface SnapshotMemo {
 }
 
 let lastSnapshotMemo: SnapshotMemo | null = null;
+const snapshotMemoByThread = new WeakMap<object, SnapshotMemo>();
+
+function memoForThread(thread: unknown): SnapshotMemo | null {
+  if (!thread || typeof thread !== "object") {
+    return lastSnapshotMemo && lastSnapshotMemo.thread === thread ? lastSnapshotMemo : null;
+  }
+  return snapshotMemoByThread.get(thread) ?? null;
+}
+
+function rememberSnapshotMemo(memo: SnapshotMemo) {
+  if (memo.thread && typeof memo.thread === "object") {
+    snapshotMemoByThread.set(memo.thread, memo);
+  }
+  lastSnapshotMemo = memo;
+}
 
 function normalizeTurnKey(value: string | null | undefined): string | null {
   const normalized = typeof value === "string" ? value.trim() : "";
@@ -60,7 +75,7 @@ export function buildThreadDisplaySnapshot(
   const previousEntryCount = Number.isFinite(options.previous_entry_count)
     ? Number(options.previous_entry_count)
     : 0;
-  const previousMemo = lastSnapshotMemo;
+  const previousMemo = memoForThread(options.thread) ?? lastSnapshotMemo;
   const effectiveGeneratedAtUtc =
     generatedAtUtc ||
     (previousMemo && previousMemo.thread === options.thread
@@ -132,7 +147,7 @@ export function buildThreadDisplaySnapshot(
     scroll_decision: scrollDecision,
   };
 
-  lastSnapshotMemo = {
+  rememberSnapshotMemo({
     generatedAtUtc: effectiveGeneratedAtUtc,
     thread: options.thread,
     currentTurnKey,
@@ -148,7 +163,7 @@ export function buildThreadDisplaySnapshot(
     virtualWindow,
     scrollDecision,
     snapshot,
-  };
+  });
 
   return snapshot;
 }

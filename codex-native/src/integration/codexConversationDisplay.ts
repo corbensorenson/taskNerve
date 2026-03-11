@@ -45,12 +45,10 @@ export interface CodexConversationDisplaySnapshot {
   scrollDecision: ThreadScrollDecision;
 }
 
-let lastSnapshotConversion:
-  | {
-      source: ThreadDisplaySnapshot;
-      target: CodexConversationDisplaySnapshot;
-    }
-  | null = null;
+const snapshotConversionCache = new WeakMap<
+  ThreadDisplaySnapshot,
+  CodexConversationDisplaySnapshot
+>();
 
 function toThreadDisplayOptions(
   options: CodexConversationDisplayOptions,
@@ -69,8 +67,9 @@ function toThreadDisplayOptions(
 }
 
 function toCodexSnapshot(snapshot: ThreadDisplaySnapshot): CodexConversationDisplaySnapshot {
-  if (lastSnapshotConversion && lastSnapshotConversion.source === snapshot) {
-    return lastSnapshotConversion.target;
+  const cached = snapshotConversionCache.get(snapshot);
+  if (cached) {
+    return cached;
   }
 
   const converted = {
@@ -95,10 +94,7 @@ function toCodexSnapshot(snapshot: ThreadDisplaySnapshot): CodexConversationDisp
     scrollDecision: snapshot.scroll_decision,
   };
 
-  lastSnapshotConversion = {
-    source: snapshot,
-    target: converted,
-  };
+  snapshotConversionCache.set(snapshot, converted);
 
   return converted;
 }

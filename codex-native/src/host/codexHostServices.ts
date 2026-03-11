@@ -1,3 +1,5 @@
+import type { TaskRecord } from "../schemas.js";
+
 export const CODEX_HOST_SERVICE_METHODS = [
   "getActiveWorkspaceContext",
   "listProjectThreads",
@@ -40,13 +42,43 @@ export interface CodexHostServices {
   ) => Promise<CodexHostSubscription | void> | CodexHostSubscription | void;
   getCodexStylingContext?: () => Promise<unknown> | unknown;
   readTaskNerveTaskCount?: () => Promise<unknown> | unknown;
+  subscribeTaskNerveTaskCountEvents?: (
+    listener: (event: unknown) => void,
+  ) => Promise<CodexHostSubscription | void> | CodexHostSubscription | void;
   readTaskDrawerState?: () => Promise<unknown> | unknown;
+  subscribeTaskDrawerStateEvents?: (
+    listener: (event: unknown) => void,
+  ) => Promise<CodexHostSubscription | void> | CodexHostSubscription | void;
   openTaskDrawer?: () => Promise<unknown> | unknown;
   readTerminalPanelState?: () => Promise<unknown> | unknown;
+  subscribeTerminalPanelStateEvents?: (
+    listener: (event: unknown) => void,
+  ) => Promise<CodexHostSubscription | void> | CodexHostSubscription | void;
   toggleTerminalPanel?: () => Promise<unknown> | unknown;
   listTaskNerveBranches?: () => Promise<unknown> | unknown;
+  subscribeTaskNerveBranchEvents?: (
+    listener: (event: unknown) => void,
+  ) => Promise<CodexHostSubscription | void> | CodexHostSubscription | void;
   switchTaskNerveBranch?: (branchName: string) => Promise<unknown> | unknown;
   readTaskNerveResourceStats?: () => Promise<unknown> | unknown;
+  subscribeTaskNerveResourceStatsEvents?: (
+    listener: (event: unknown) => void,
+  ) => Promise<CodexHostSubscription | void> | CodexHostSubscription | void;
+  readRepositoryGitState?: (options?: { repoRoot?: string }) => Promise<unknown> | unknown;
+  pullRepository?: (
+    options?: { repoRoot?: string; autostash?: boolean },
+  ) => Promise<unknown> | unknown;
+  pushRepository?: (options?: { repoRoot?: string }) => Promise<unknown> | unknown;
+  readRepositoryCiFailures?: (
+    options?: { repoRoot?: string; limit?: number; sinceUtc?: string | null },
+  ) => Promise<unknown> | unknown;
+  upsertTaskNerveProjectTasks?: (
+    options: { repoRoot?: string; tasks: Partial<TaskRecord>[] },
+  ) => Promise<unknown> | unknown;
+  dispatchTaskNerveTasks?: (
+    options: { repoRoot?: string; task_ids: string[] },
+  ) => Promise<unknown> | unknown;
+  listTaskNerveAgents?: () => Promise<unknown> | unknown;
   setConversationCurrentTurnKey?: (turnKey: string) => Promise<unknown> | unknown;
   scrollConversationToTurn?: (
     turnKey: string,

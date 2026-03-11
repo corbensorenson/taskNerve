@@ -45,4 +45,36 @@ describe("codex conversation chrome", () => {
     expect(snapshot.footer.resourceStats.cpuPercent).toBeNull();
     expect(snapshot.footer.resourceStats.gpuPercent).toBeNull();
   });
+
+  it("reuses snapshot objects when normalized chrome inputs are unchanged", () => {
+    const first = buildCodexConversationChromeSnapshot({
+      taskCount: 8.2,
+      taskDrawerOpen: false,
+      terminalOpen: true,
+      currentBranch: " tasknerve/main ",
+      branches: ["tasknerve/main", "feature/ab-test", "feature/ab-test"],
+      resourceStats: {
+        cpuPercent: 42.8,
+        gpuPercent: 11,
+        memoryPercent: 57.4,
+        thermalPressure: " nominal ",
+      },
+    });
+
+    const second = buildCodexConversationChromeSnapshot({
+      taskCount: 8,
+      taskDrawerOpen: false,
+      terminalOpen: true,
+      currentBranch: "tasknerve/main",
+      branches: ["tasknerve/main", "feature/ab-test"],
+      resourceStats: {
+        cpuPercent: 42.8,
+        gpuPercent: 11,
+        memoryPercent: 57.4,
+        thermalPressure: "nominal",
+      },
+    });
+
+    expect(second).toBe(first);
+  });
 });

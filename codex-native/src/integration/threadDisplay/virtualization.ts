@@ -43,20 +43,30 @@ interface MeasuredLayout {
   totalHeight: number;
 }
 
-let measuredLayoutCache: MeasuredLayout | null = null;
+const measuredLayoutCache = new WeakMap<
+  ThreadDisplayEntry[],
+  WeakMap<Readonly<Record<string, number>>, Map<number, MeasuredLayout>>
+>();
 
 function measuredLayoutFor(options: {
   entries: ThreadDisplayEntry[];
   measuredHeightsPx: Readonly<Record<string, number>>;
   fallbackHeight: number;
 }) {
-  const cached = measuredLayoutCache;
-  if (
-    cached &&
-    cached.entries === options.entries &&
-    cached.measuredHeightsPx === options.measuredHeightsPx &&
-    cached.fallbackHeight === options.fallbackHeight
-  ) {
+  let byMeasuredHeights = measuredLayoutCache.get(options.entries);
+  if (!byMeasuredHeights) {
+    byMeasuredHeights = new WeakMap();
+    measuredLayoutCache.set(options.entries, byMeasuredHeights);
+  }
+
+  let byFallbackHeight = byMeasuredHeights.get(options.measuredHeightsPx);
+  if (!byFallbackHeight) {
+    byFallbackHeight = new Map();
+    byMeasuredHeights.set(options.measuredHeightsPx, byFallbackHeight);
+  }
+
+  const cached = byFallbackHeight.get(options.fallbackHeight);
+  if (cached) {
     return cached;
   }
 
@@ -69,15 +79,16 @@ function measuredLayoutFor(options: {
       Number.isFinite(measured) && measured > 0 ? Math.round(measured) : options.fallbackHeight;
   }
 
-  measuredLayoutCache = {
+  const layout: MeasuredLayout = {
     entries: options.entries,
     measuredHeightsPx: options.measuredHeightsPx,
     fallbackHeight: options.fallbackHeight,
     offsets,
     totalHeight: running,
   };
+  byFallbackHeight.set(options.fallbackHeight, layout);
 
-  return measuredLayoutCache;
+  return layout;
 }
 
 export function buildThreadVirtualWindow(options: {

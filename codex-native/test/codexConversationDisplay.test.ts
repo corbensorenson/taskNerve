@@ -72,4 +72,49 @@ describe("codex conversation display", () => {
 
     expect(second).toBe(first);
   });
+
+  it("reuses converted snapshots across interleaved thread snapshots", () => {
+    const threadA = {
+      conversation: {
+        turns: [
+          {
+            id: "t-a",
+            created_at: "2026-03-10T13:00:00.000Z",
+            input_items: [{ type: "message", text: "one" }],
+            output_items: [{ type: "message", text: "two" }],
+          },
+        ],
+      },
+    };
+    const threadB = {
+      conversation: {
+        turns: [
+          {
+            id: "t-b",
+            created_at: "2026-03-10T13:01:00.000Z",
+            input_items: [{ type: "message", text: "three" }],
+            output_items: [{ type: "message", text: "four" }],
+          },
+        ],
+      },
+    };
+
+    const firstA = buildCodexConversationDisplaySnapshot({
+      thread: threadA,
+      generatedAtUtc: "2026-03-10T13:05:00.000Z",
+      currentTurnKey: "assistant:t-a",
+    });
+    buildCodexConversationDisplaySnapshot({
+      thread: threadB,
+      generatedAtUtc: "2026-03-10T13:05:00.000Z",
+      currentTurnKey: "assistant:t-b",
+    });
+    const secondA = buildCodexConversationDisplaySnapshot({
+      thread: threadA,
+      generatedAtUtc: "2026-03-10T13:05:00.000Z",
+      currentTurnKey: "assistant:t-a",
+    });
+
+    expect(secondA).toBe(firstA);
+  });
 });

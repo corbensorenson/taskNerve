@@ -38,6 +38,19 @@ export const projectCodexSettingsSchema = z.object({
   high_intelligence_model: z.string().trim().min(1).nullish(),
   max_intelligence_model: z.string().trim().min(1).nullish(),
   git_origin_url: z.string().trim().min(1).nullish(),
+  git_auto_sync_enabled: z.boolean().default(true),
+  git_tasks_per_push_target: z.number().int().min(1).default(4),
+  git_min_push_interval_minutes: z.number().int().min(0).default(10),
+  git_preferred_branch: z.string().trim().min(1).nullish(),
+  git_auto_sync_allowed_branches: z.array(z.string().trim().min(1)).default([]),
+  git_done_task_count_at_last_push: z.number().int().min(0).default(0),
+  git_last_push_at_utc: z.string().trim().min(1).nullish(),
+  git_tasks_before_push_history: z.array(z.number().int().min(0)).default([]),
+  ci_auto_task_enabled: z.boolean().default(true),
+  ci_failure_task_priority: z.number().int().min(0).default(9),
+  ci_default_assignee_agent_id: z.string().trim().min(1).nullish(),
+  ci_last_sync_at_utc: z.string().trim().min(1).nullish(),
+  ci_last_failed_job_count: z.number().int().min(0).default(0),
 });
 export type ProjectCodexSettings = z.infer<typeof projectCodexSettingsSchema>;
 

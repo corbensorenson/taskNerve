@@ -8,9 +8,24 @@ export function baseTurnKey(value: string): string {
   return value.replace(/^(user|assistant):/i, "").trim();
 }
 
-function userTurnKeys(entries: ThreadDisplayEntry[]): string[] {
+interface UserTurnKeyIndex {
+  keys: string[];
+  directIndexByTurnKey: Map<string, number>;
+  firstIndexByBaseTurnKey: Map<string, number>;
+}
+
+const userTurnKeyIndexCache = new WeakMap<ThreadDisplayEntry[], UserTurnKeyIndex>();
+
+function userTurnKeyIndex(entries: ThreadDisplayEntry[]): UserTurnKeyIndex {
+  const cached = userTurnKeyIndexCache.get(entries);
+  if (cached) {
+    return cached;
+  }
+
   const seen = new Set<string>();
   const keys: string[] = [];
+  const directIndexByTurnKey = new Map<string, number>();
+  const firstIndexByBaseTurnKey = new Map<string, number>();
   for (const entry of entries) {
     if (entry.role !== "user") {
       continue;
@@ -23,11 +38,24 @@ function userTurnKeys(entries: ThreadDisplayEntry[]): string[] {
     }
     seen.add(turnKey);
     keys.push(turnKey);
+    const index = keys.length - 1;
+    directIndexByTurnKey.set(turnKey, index);
+    const base = baseTurnKey(turnKey);
+    if (!firstIndexByBaseTurnKey.has(base)) {
+      firstIndexByBaseTurnKey.set(base, index);
+    }
   }
-  return keys;
+  const index: UserTurnKeyIndex = {
+    keys,
+    directIndexByTurnKey,
+    firstIndexByBaseTurnKey,
+  };
+  userTurnKeyIndexCache.set(entries, index);
+  return index;
 }
 
-function anchorIndex(keys: string[], currentTurnKey?: string | null): number {
+function anchorIndex(index: UserTurnKeyIndex, currentTurnKey?: string | null): number {
+  const keys = index.keys;
   if (keys.length === 0) {
     return -1;
   }
@@ -35,13 +63,13 @@ function anchorIndex(keys: string[], currentTurnKey?: string | null): number {
     return keys.length - 1;
   }
   const normalizedCurrent = currentTurnKey.trim();
-  const directIndex = keys.indexOf(normalizedCurrent);
-  if (directIndex >= 0) {
+  const directIndex = index.directIndexByTurnKey.get(normalizedCurrent);
+  if (typeof directIndex === "number") {
     return directIndex;
   }
   const base = baseTurnKey(normalizedCurrent);
-  const sameTurnIndex = keys.findIndex((key) => baseTurnKey(key) === base);
-  return sameTurnIndex >= 0 ? sameTurnIndex : keys.length - 1;
+  const sameTurnIndex = index.firstIndexByBaseTurnKey.get(base);
+  return typeof sameTurnIndex === "number" ? sameTurnIndex : keys.length - 1;
 }
 
 export function buildPromptJumpControls(
@@ -62,7 +90,8 @@ export function buildPromptNavigationTarget(
   entries: ThreadDisplayEntry[],
   currentTurnKey?: string | null,
 ): PromptNavigationTarget {
-  const keys = userTurnKeys(entries);
+  const keyIndex = userTurnKeyIndex(entries);
+  const keys = keyIndex.keys;
   if (keys.length === 0) {
     return {
       previous_turn_key: null,
@@ -70,7 +99,7 @@ export function buildPromptNavigationTarget(
       user_turn_keys: [],
     };
   }
-  const index = anchorIndex(keys, currentTurnKey);
+  const index = anchorIndex(keyIndex, currentTurnKey);
   if (index < 0) {
     return {
       previous_turn_key: null,

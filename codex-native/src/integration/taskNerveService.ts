@@ -10,7 +10,6 @@ import {
 } from "../domain/projectContracts.js";
 import {
   buildProjectTaskStats,
-  filterTasks,
   mergePromptQueue,
   sortTasks,
   taskUserTags,
@@ -43,6 +42,16 @@ import {
   type CodexConversationInteractionInput,
   type CodexConversationInteractionResult,
 } from "./codexConversationInteraction.js";
+import {
+  buildCodexProjectGitSyncSnapshot,
+  buildProjectSettingsAfterCodexGitPush,
+} from "./codexProjectGitSync.js";
+import type { ProjectGitSyncSnapshot } from "../domain/projectGitSync.js";
+import {
+  buildCodexProjectCiTaskSyncPlan,
+  buildProjectSettingsAfterCodexCiSync,
+} from "./codexProjectCiSync.js";
+import type { ProjectCiTaskSyncPlan } from "../domain/projectCiSync.js";
 
 export interface TaskNerveServiceHealth {
   ok: true;
@@ -97,6 +106,30 @@ export interface TaskNerveService {
   conversationInteractionStep: (
     input: CodexConversationInteractionInput,
   ) => CodexConversationInteractionResult;
+  projectGitSyncSnapshot: (options: {
+    settings: Partial<ProjectCodexSettings>;
+    tasks?: Partial<TaskRecord>[];
+    git_state?: unknown;
+    now_iso?: string;
+  }) => ProjectGitSyncSnapshot;
+  projectSettingsAfterGitPush: (options: {
+    settings: Partial<ProjectCodexSettings>;
+    tasks?: Partial<TaskRecord>[];
+    pushed_at_utc?: string;
+    tasks_pushed_count?: number;
+  }) => ProjectCodexSettings;
+  projectCiTaskSyncPlan: (options: {
+    settings: Partial<ProjectCodexSettings>;
+    tasks?: Partial<TaskRecord>[];
+    failures?: unknown;
+    available_agent_ids?: string[];
+    now_iso?: string;
+  }) => ProjectCiTaskSyncPlan;
+  projectSettingsAfterCiSync: (options: {
+    settings: Partial<ProjectCodexSettings>;
+    failed_job_count: number;
+    synced_at_utc?: string;
+  }) => ProjectCodexSettings;
   threadDisplaySnapshot: (options: BuildThreadDisplayOptions) => ThreadDisplaySnapshot;
 }
 
@@ -107,10 +140,13 @@ function uniqueSorted(values: string[]): string[] {
 }
 
 const TASK_SNAPSHOT_SEARCH_CACHE_LIMIT = 12;
+const TASK_SNAPSHOT_RAW_SEARCH_VARIANTS_LIMIT = 4;
 
 interface TaskSnapshotBaseMemo {
   tasksRef: Partial<TaskRecord>[];
+  tasksQuickMarker: string;
   allTasks: Partial<TaskRecord>[];
+  searchableTextByTask: string[];
   allStats: ReturnType<typeof buildProjectTaskStats>;
   userTags: string[];
   searchCache: Map<
@@ -118,27 +154,95 @@ interface TaskSnapshotBaseMemo {
     {
       visibleTasks: Partial<TaskRecord>[];
       visibleStats: ReturnType<typeof buildProjectTaskStats>;
-      snapshot: TaskNerveTaskSnapshot;
+      snapshotsBySearch: Map<string, TaskNerveTaskSnapshot>;
     }
   >;
 }
 
-function normalizeStringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.map((entry) => String(entry || "")) : [];
+function normalizeSearchText(value: unknown): string {
+  return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function joinNormalizedStringArray(values: unknown): string {
+  if (!Array.isArray(values)) {
+    return "";
+  }
+  return values
+    .map((entry) => normalizeSearchText(entry))
+    .filter(Boolean)
+    .join(" ");
+}
+
+function taskSearchText(task: Partial<TaskRecord>): string {
+  return [
+    normalizeSearchText(task.task_id),
+    normalizeSearchText(task.title),
+    normalizeSearchText(task.detail),
+    normalizeSearchText(task.claimed_by_agent_id),
+    joinNormalizedStringArray(task.tags),
+    joinNormalizedStringArray(task.depends_on),
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function filterSortedTasksBySearch(
+  tasks: Partial<TaskRecord>[],
+  searchableTextByTask: string[],
+  normalizedSearch: string,
+): Partial<TaskRecord>[] {
+  if (!normalizedSearch) {
+    return tasks;
+  }
+
+  const visibleTasks: Partial<TaskRecord>[] = [];
+  for (let index = 0; index < tasks.length; index += 1) {
+    if ((searchableTextByTask[index] || "").includes(normalizedSearch)) {
+      visibleTasks.push(tasks[index]!);
+    }
+  }
+  return visibleTasks;
 }
 
 function sameStringArray(left: unknown, right: unknown): boolean {
-  const leftValues = normalizeStringArray(left);
-  const rightValues = normalizeStringArray(right);
-  if (leftValues.length !== rightValues.length) {
+  if (left === right) {
+    return true;
+  }
+  if (!Array.isArray(left) || !Array.isArray(right)) {
+    return !Array.isArray(left) && !Array.isArray(right);
+  }
+  if (left.length !== right.length) {
     return false;
   }
-  for (let index = 0; index < leftValues.length; index += 1) {
-    if (leftValues[index] !== rightValues[index]) {
+  for (let index = 0; index < left.length; index += 1) {
+    if (String(left[index] || "") !== String(right[index] || "")) {
       return false;
     }
   }
   return true;
+}
+
+function taskQuickMarker(task: Partial<TaskRecord>): string {
+  const taskId = String(task.task_id || "").trim();
+  const status = String(task.status || "").trim();
+  const priority = Number.isFinite(task.priority) ? String(Number(task.priority)) : "";
+  const ready = task.ready ? "1" : "0";
+  const tagsCount = Array.isArray(task.tags) ? task.tags.length : 0;
+  const dependsCount = Array.isArray(task.depends_on) ? task.depends_on.length : 0;
+  return `${taskId}:${status}:${priority}:${ready}:${tagsCount}:${dependsCount}`;
+}
+
+function taskArrayQuickMarker(tasks: Partial<TaskRecord>[]): string {
+  if (tasks.length === 0) {
+    return "0";
+  }
+  const middleIndex = Math.floor((tasks.length - 1) / 2);
+  return [
+    String(tasks.length),
+    taskQuickMarker(tasks[0] || {}),
+    taskQuickMarker(tasks[middleIndex] || {}),
+    taskQuickMarker(tasks[tasks.length - 1] || {}),
+  ].join("|");
 }
 
 function sameTaskRecord(left: Partial<TaskRecord>, right: Partial<TaskRecord>): boolean {
@@ -195,6 +299,8 @@ export function createTaskNerveService(): TaskNerveService {
         "task_snapshot",
         "conversation_display",
         "conversation_interaction",
+        "project_git_sync",
+        "project_ci_sync",
         "thread_display",
         "prompt_queue",
         "model_routing",
@@ -214,32 +320,80 @@ export function createTaskNerveService(): TaskNerveService {
       }
 
       let baseMemo = taskSnapshotBaseMemo;
-      if (!baseMemo || (baseMemo.tasksRef !== tasks && !sameTaskArray(baseMemo.tasksRef, tasks))) {
+      if (!baseMemo) {
         const allTasks = sortTasks(tasks);
         baseMemo = {
           tasksRef: tasks,
+          tasksQuickMarker: taskArrayQuickMarker(tasks),
           allTasks,
+          searchableTextByTask: allTasks.map((task) => taskSearchText(task)),
           allStats: buildProjectTaskStats(allTasks),
           userTags: uniqueSorted(allTasks.flatMap((task) => taskUserTags(task))),
           searchCache: new Map(),
         };
         taskSnapshotBaseMemo = baseMemo;
       } else if (baseMemo.tasksRef !== tasks) {
+        const quickMarker = taskArrayQuickMarker(tasks);
+        if (baseMemo.tasksQuickMarker !== quickMarker || !sameTaskArray(baseMemo.tasksRef, tasks)) {
+          const allTasks = sortTasks(tasks);
+          baseMemo = {
+            tasksRef: tasks,
+            tasksQuickMarker: quickMarker,
+            allTasks,
+            searchableTextByTask: allTasks.map((task) => taskSearchText(task)),
+            allStats: buildProjectTaskStats(allTasks),
+            userTags: uniqueSorted(allTasks.flatMap((task) => taskUserTags(task))),
+            searchCache: new Map(),
+          };
+          taskSnapshotBaseMemo = baseMemo;
+        } else {
+          baseMemo.tasksRef = tasks;
+        }
+      } else {
         baseMemo.tasksRef = tasks;
       }
 
-      const cachedSearch = baseMemo.searchCache.get(search);
+      const normalizedSearch = normalizeSearchText(search);
+      const cachedSearch = baseMemo.searchCache.get(normalizedSearch);
       if (cachedSearch) {
+        const exactSnapshot = cachedSearch.snapshotsBySearch.get(search);
+        if (exactSnapshot) {
+          taskSnapshotMemo = {
+            tasksRef: tasks,
+            search,
+            snapshot: exactSnapshot,
+          };
+          return exactSnapshot;
+        }
+        const snapshot: TaskNerveTaskSnapshot = {
+          search,
+          all_tasks: baseMemo.allTasks,
+          visible_tasks: cachedSearch.visibleTasks,
+          all_stats: baseMemo.allStats,
+          visible_stats: cachedSearch.visibleStats,
+          user_tags: baseMemo.userTags,
+        };
+        if (cachedSearch.snapshotsBySearch.size >= TASK_SNAPSHOT_RAW_SEARCH_VARIANTS_LIMIT) {
+          const oldest = cachedSearch.snapshotsBySearch.keys().next().value;
+          if (typeof oldest === "string") {
+            cachedSearch.snapshotsBySearch.delete(oldest);
+          }
+        }
+        cachedSearch.snapshotsBySearch.set(search, snapshot);
         taskSnapshotMemo = {
           tasksRef: tasks,
           search,
-          snapshot: cachedSearch.snapshot,
+          snapshot,
         };
-        return cachedSearch.snapshot;
+        return snapshot;
       }
 
-      const visibleTasks = filterTasks(baseMemo.allTasks, search, { alreadySorted: true });
-      const hasSearch = Boolean(search.trim());
+      const visibleTasks = filterSortedTasksBySearch(
+        baseMemo.allTasks,
+        baseMemo.searchableTextByTask,
+        normalizedSearch,
+      );
+      const hasSearch = Boolean(normalizedSearch);
       const visibleStats = hasSearch ? buildProjectTaskStats(visibleTasks) : baseMemo.allStats;
 
       if (baseMemo.searchCache.size >= TASK_SNAPSHOT_SEARCH_CACHE_LIMIT) {
@@ -256,10 +410,10 @@ export function createTaskNerveService(): TaskNerveService {
         visible_stats: visibleStats,
         user_tags: baseMemo.userTags,
       };
-      baseMemo.searchCache.set(search, {
+      baseMemo.searchCache.set(normalizedSearch, {
         visibleTasks,
         visibleStats,
-        snapshot,
+        snapshotsBySearch: new Map([[search, snapshot]]),
       });
       taskSnapshotMemo = {
         tasksRef: tasks,
@@ -292,6 +446,14 @@ export function createTaskNerveService(): TaskNerveService {
     conversationDisplaySnapshot: (options) => buildCodexConversationDisplaySnapshot(options),
 
     conversationInteractionStep: (input) => conversationInteractionStep(input),
+
+    projectGitSyncSnapshot: (options) => buildCodexProjectGitSyncSnapshot(options),
+
+    projectSettingsAfterGitPush: (options) => buildProjectSettingsAfterCodexGitPush(options),
+
+    projectCiTaskSyncPlan: (options) => buildCodexProjectCiTaskSyncPlan(options),
+
+    projectSettingsAfterCiSync: (options) => buildProjectSettingsAfterCodexCiSync(options),
 
     threadDisplaySnapshot: (options) => buildThreadDisplaySnapshot(options),
   };
