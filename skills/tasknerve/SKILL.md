@@ -14,8 +14,10 @@ If you want, I can next add a tiny “skill routing” note so requests automati
 Use this skill when any of the following are true:
 - The user wants to coordinate controller and worker threads on a project.
 - The user wants to manage TaskNerve queue flow, heartbeats, or handoffs.
+- The user wants to ingest external issue streams (for example GitHub issues) into TaskNerve with review gates.
+- The user wants TaskNerve Discord bridge behavior managed (webhook updates, mute policy, inbound relay).
 - The user wants project-level TaskNerve settings adjusted.
-- The user wants `project_goals.md`, `project_manifest.md`, or `contributing ideas.md` kept aligned with active work.
+- The user wants project docs (`project_goals.md`, `project_manifest.md`, `contributing_ideas.md`, `levers_pitfalls.md`, `research.md`, `taskNerve/creating_project_skill.md`, `taskNerve/using_project_skill.md`) kept aligned with active work.
 - The user wants day-to-day TaskNerve operation, triage, and orchestration.
 
 Use `tasknerve-creator` instead when the request is to build/modify TaskNerve itself.
@@ -37,20 +39,47 @@ Use `tasknerve-creator` instead when the request is to build/modify TaskNerve it
 3. Treat these files as durable contracts:
 - [project_goals.md](/Users/adimus/Documents/taskNerve/project_goals.md)
 - [project_manifest.md](/Users/adimus/Documents/taskNerve/project_manifest.md)
-- [contributing ideas.md](/Users/adimus/Documents/taskNerve/contributing%20ideas.md)
+- `contributing_ideas.md` (legacy name may still be `contributing ideas.md` in older repos)
+- `levers_pitfalls.md`
+- `research.md`
+- `taskNerve/creating_project_skill.md`
+- `taskNerve/using_project_skill.md`
 
 4. Keep workers fed with concrete, ready work and avoid idle churn.
 5. Capture user-facing state clearly: active project, controller ownership, queue health, and blockers.
+6. For external issue intake, prefer review-first candidate flow with approve/reject controls before task creation.
+7. For Discord use:
+- keep webhook URL per-project
+- respect local mute toggle when user is actively in desktop app
+- treat webhook as outbound; inbound replies must be relayed to TaskNerve `/tasknerve/discord/incoming`
 
 ## Controller Contract
 
 The controller should:
 - familiarize itself with the project state
 - refine and lock `project_goals.md` and `project_manifest.md` with the user
-- use `contributing ideas.md` as optional inspiration/reference input
+- keep `contributing_ideas.md`, `levers_pitfalls.md`, and `research.md` current
+- keep `taskNerve/creating_project_skill.md` and `taskNerve/using_project_skill.md` current
 - populate and maintain the TaskNerve task queue
+- operate issue intake with safety: candidate queue first, then approve/reject before promotion into tasks
 - keep worker threads fed without building prompt backlogs
 - alternate development and maintenance/debt-reduction passes according to project policy
+
+## Project Onboarding Gate
+
+Before treating a project as active in TaskNerve, ensure:
+- project root exists
+- `taskNerve/` project folder exists (or `.tasknerve/` where runtime currently stores state)
+- project `.gitignore` exists
+- required docs exist and are initialized:
+  - `project_goals.md`
+  - `project_manifest.md`
+  - `contributing_ideas.md`
+  - `levers_pitfalls.md`
+  - `research.md`
+  - `taskNerve/creating_project_skill.md`
+  - `taskNerve/using_project_skill.md`
+- imports include a review pass that fills these docs and confirms them with the user
 
 ## UI Contract
 

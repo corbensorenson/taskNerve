@@ -26,7 +26,7 @@ Observed from the shipped app bundle:
 - Do not design the steady-state product around a localhost sidecar or user CLI
 
 3. Repo-local durable state
-- Keep `.tasknerve/`, `project_goals.md`, `project_manifest.md`, and `contributing ideas.md` as the durable source of truth
+- Keep `.tasknerve/`, `project_goals.md`, `project_manifest.md`, `contributing ideas.md`, `taskNerve/creating_project_skill.md`, and `taskNerve/using_project_skill.md` as the durable source of truth
 - Native modules should read and write those files directly
 
 4. Runtime validation

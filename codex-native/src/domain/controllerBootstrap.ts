@@ -4,6 +4,9 @@ import {
   PROJECT_MANIFEST_FILE,
 } from "../constants.js";
 
+const PROJECT_CREATOR_SKILL_FILE = "taskNerve/creating_project_skill.md";
+const PROJECT_USAGE_SKILL_FILE = "taskNerve/using_project_skill.md";
+
 function renderBulletList(items: string[] | undefined, fallback: string): string {
   if (!items || items.length === 0) {
     return `- ${fallback}`;
@@ -32,7 +35,9 @@ Primary responsibilities:
 - Learn and use the built-in TaskNerve skill and TaskNerve timeline/checkpoint context when it is useful.
 - Treat \`${options.projectGoalsPath || PROJECT_GOALS_FILE}\` as the durable contract for what the project is trying to achieve.
 - Treat \`${options.projectManifestPath || PROJECT_MANIFEST_FILE}\` as the durable contract for how the project should achieve those goals.
-- If either document is missing, draft, incomplete, or inconsistent with the repo, refine it with the user until it is locked in.
+- Treat \`${PROJECT_CREATOR_SKILL_FILE}\` as the durable contract for the "creating {project_name} skill" flow.
+- Treat \`${PROJECT_USAGE_SKILL_FILE}\` as the durable contract for the "using {project_name} skill" flow.
+- If any contract document is missing, draft, incomplete, or inconsistent with the repo, refine it with the user until it is locked in.
 - Once goals and manifest are locked, populate the TaskNerve task system with concrete, sequenced tasks.
 - Ask the user how many worker threads should be spawned for this project, then keep those workers fed with high-leverage work.
 - When the task list gets low, review current project state, perform maintenance or debt-reduction passes when appropriate, and add the next best tasks.
@@ -70,7 +75,8 @@ Immediate first pass:
 1. Review the repo and summarize what the project currently is.
 2. Check whether \`${options.projectGoalsPath || PROJECT_GOALS_FILE}\` is locked; if not, work with the user to refine it.
 3. Check whether \`${options.projectManifestPath || PROJECT_MANIFEST_FILE}\` is locked; if not, work with the user to refine it.
-4. Seed or refine the TaskNerve backlog so workers have actionable tasks.
-5. Ask the user how many workers to spawn, then orchestrate the active project threads.
+4. Check whether \`${PROJECT_CREATOR_SKILL_FILE}\` and \`${PROJECT_USAGE_SKILL_FILE}\` are up to date for this project.
+5. Seed or refine the TaskNerve backlog so workers have actionable tasks.
+6. Ask the user how many workers to spawn, then orchestrate the active project threads.
 `;
 }

@@ -22,6 +22,10 @@ describe("project codex settings", () => {
     expect(settings.git_auto_sync_allowed_branches).toEqual([]);
     expect(settings.ci_auto_task_enabled).toBe(true);
     expect(settings.ci_failure_task_priority).toBe(9);
+    expect(settings.issues_sync_enabled).toBe(true);
+    expect(settings.issues_auto_task_enabled).toBe(false);
+    expect(settings.issues_filter_enabled).toBe(true);
+    expect(settings.issues_filter_min_trust_score).toBe(65);
   });
 
   it("routes worker models by explicit override and intelligence level", () => {

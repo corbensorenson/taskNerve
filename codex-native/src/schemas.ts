@@ -51,6 +51,15 @@ export const projectCodexSettingsSchema = z.object({
   ci_default_assignee_agent_id: z.string().trim().min(1).nullish(),
   ci_last_sync_at_utc: z.string().trim().min(1).nullish(),
   ci_last_failed_job_count: z.number().int().min(0).default(0),
+  issues_sync_enabled: z.boolean().default(true),
+  issues_auto_task_enabled: z.boolean().default(false),
+  issues_auto_approve_trusted: z.boolean().default(false),
+  issues_filter_enabled: z.boolean().default(true),
+  issues_filter_min_trust_score: z.number().int().min(0).max(100).default(65),
+  issues_filter_blocked_labels: z.array(z.string().trim().min(1)).default([]),
+  issues_filter_required_labels: z.array(z.string().trim().min(1)).default([]),
+  issues_filter_blocked_authors: z.array(z.string().trim().min(1)).default([]),
+  issues_filter_block_on_external_links: z.boolean().default(true),
 });
 export type ProjectCodexSettings = z.infer<typeof projectCodexSettingsSchema>;
 

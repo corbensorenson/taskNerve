@@ -6,5 +6,9 @@ interface:
   default_prompt: >-
     Operate this project through TaskNerve's native workflow in Codex. Use
     project settings for policy, task drawer for active queue work, keep
-    project_goals.md and project_manifest.md aligned with execution, and keep
-    controller/worker flow clear, responsive, and task-aware.
+    project_goals.md, project_manifest.md, contributing_ideas.md,
+    levers_pitfalls.md, research.md, taskNerve/creating_project_skill.md,
+    and taskNerve/using_project_skill.md aligned with execution, and keep
+    controller/worker flow clear, responsive, and task-aware. For external
+    issue intake, keep a review-first queue and apply malice/noise filters
+    before anything becomes a task.

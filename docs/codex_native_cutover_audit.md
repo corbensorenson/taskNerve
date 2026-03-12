@@ -42,7 +42,7 @@ These remain for reference and migration history only.
 Supported model on this branch:
 - one app: Codex
 - one inference path: Codex built-in signed-in inference
-- one durable state model: `.tasknerve/`, `project_goals.md`, `project_manifest.md`, `contributing ideas.md`
+- one durable state model: `.tasknerve/`, `project_goals.md`, `project_manifest.md`, `contributing ideas.md`, `taskNerve/creating_project_skill.md`, `taskNerve/using_project_skill.md`
 - one integration direction: direct host integration APIs
 
 Not supported as primary workflows:

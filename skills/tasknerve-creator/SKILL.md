@@ -17,6 +17,7 @@ Use this skill when any of the following are true:
 - The user asks for TaskNerve UI behavior changes in Codex integration surfaces.
 - The user asks to change TaskNerve architecture, persistence, or host event flow.
 - The user asks to create/update TaskNerve skills.
+- The user asks to add or modify TaskNerve external-notification bridges (for example Discord webhook/relay).
 
 Use `tasknerve` instead when the request is primarily operating project work through TaskNerve.
 
@@ -27,6 +28,7 @@ Use `tasknerve` instead when the request is primarily operating project work thr
 - Treat `target/*` extracts and built bundles as artifacts, not source.
 - Do not maintain duplicate runtime pipelines or parallel editable bundle trees.
 - Do not add patching/injection workflows as normal product behavior.
+- When validating UI/runtime changes in a local installed app, always deploy from one canonical extract tree: `target/codex-tasknerve-app-live-extract`.
 
 ## Implementation Workflow
 
@@ -50,6 +52,11 @@ npm run typecheck
 npm test
 ```
 
+5. If adding chat-bridge integrations (Discord, etc.):
+- keep per-project config in TaskNerve project settings
+- keep outbound notifications optional and easy to mute
+- clearly separate outbound webhook capability from inbound relay/bot requirements
+
 ## Packaging and Recovery Guardrails
 
 - Normal path: change source, rebuild, and package; do not hand-edit installed app bundles.
@@ -59,6 +66,20 @@ npm test
 - set `Info.plist` `ElectronAsarIntegrity:Resources/app.asar:hash` to Electron's ASAR header SHA-256 hex (hash bytes `app.asar[16..16+len]`, where `len = u32le(app.asar[12..16])`)
 - re-sign the `.app`
 - Before shipping that recovery build, confirm `.vite/build/main.js` has no unresolved placeholders (for example `__TASKNERVE_WINDOW_MANAGER__`).
+
+## Local Visibility Workflow (Required)
+
+When the user expects visible desktop app changes immediately, run this flow before claiming completion:
+
+1. Apply changes in source (`codex-native/src`) and any required canonical extract updates.
+2. Deploy the canonical extract into the installed app:
+```bash
+bash /Users/adimus/Documents/taskNerve/scripts/deploy-live-extract-to-installed-app.sh
+```
+3. Verify installed artifact contains expected markers using extracted verify files under `target/install-backups/<timestamp>/verify-installed`.
+4. Relaunch the app and confirm the changed UI/behavior is visible.
+
+Do not report success until steps 2-4 are complete.
 
 ## Skill-Creation Rules
 

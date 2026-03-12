@@ -98,6 +98,15 @@ export function defaultProjectCodexSettings(options: {
     ci_default_assignee_agent_id: null,
     ci_last_sync_at_utc: null,
     ci_last_failed_job_count: 0,
+    issues_sync_enabled: true,
+    issues_auto_task_enabled: false,
+    issues_auto_approve_trusted: false,
+    issues_filter_enabled: true,
+    issues_filter_min_trust_score: 65,
+    issues_filter_blocked_labels: [],
+    issues_filter_required_labels: [],
+    issues_filter_blocked_authors: [],
+    issues_filter_block_on_external_links: true,
   });
 }
 
@@ -172,6 +181,34 @@ export function normalizeProjectCodexSettings(
       value.ci_last_failed_job_count,
       defaults.ci_last_failed_job_count,
       0,
+    ),
+    issues_sync_enabled: normalizeBoolean(value.issues_sync_enabled, defaults.issues_sync_enabled),
+    issues_auto_task_enabled: normalizeBoolean(
+      value.issues_auto_task_enabled,
+      defaults.issues_auto_task_enabled,
+    ),
+    issues_auto_approve_trusted: normalizeBoolean(
+      value.issues_auto_approve_trusted,
+      defaults.issues_auto_approve_trusted,
+    ),
+    issues_filter_enabled: normalizeBoolean(
+      value.issues_filter_enabled,
+      defaults.issues_filter_enabled,
+    ),
+    issues_filter_min_trust_score: Math.min(
+      100,
+      normalizeInt(
+        value.issues_filter_min_trust_score,
+        defaults.issues_filter_min_trust_score,
+        0,
+      ),
+    ),
+    issues_filter_blocked_labels: normalizeStringArray(value.issues_filter_blocked_labels, 64),
+    issues_filter_required_labels: normalizeStringArray(value.issues_filter_required_labels, 64),
+    issues_filter_blocked_authors: normalizeStringArray(value.issues_filter_blocked_authors, 64),
+    issues_filter_block_on_external_links: normalizeBoolean(
+      value.issues_filter_block_on_external_links,
+      defaults.issues_filter_block_on_external_links,
     ),
   });
 }
