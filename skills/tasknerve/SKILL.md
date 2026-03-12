@@ -64,6 +64,20 @@ The controller should:
 - operate issue intake with safety: candidate queue first, then approve/reject before promotion into tasks
 - keep worker threads fed without building prompt backlogs
 - alternate development and maintenance/debt-reduction passes according to project policy
+- break work into mostly xs/s tasks by default; split anything broad until each task has clear, verifiable done conditions
+- use a structured task template so workers have enough context to execute without ambiguity:
+  - `title`
+  - `objective`
+  - `task_type`
+  - `subsystem`
+  - `files_in_scope`
+  - `out_of_scope`
+  - `acceptance_criteria`
+  - `deliverables`
+  - `verification_steps`
+  - `implementation_notes`
+  - `risk_notes`
+  - `estimated_effort`
 
 ## Project Onboarding Gate
 
@@ -77,8 +91,16 @@ Before treating a project as active in TaskNerve, ensure:
   - `contributing_ideas.md`
   - `levers_pitfalls.md`
   - `research.md`
+  - `taskNerve/project_goals.md`
+  - `taskNerve/project_manifest.md`
+  - `taskNerve/contributing_ideas.md`
+  - `taskNerve/levers_pitfalls.md`
+  - `taskNerve/research.md`
   - `taskNerve/creating_project_skill.md`
   - `taskNerve/using_project_skill.md`
+  - `taskNerve/launch_project.sh`
+  - `taskNerve/project_trace.ndjson` (created/maintained by deterministic trace sync)
+  - `taskNerve/project_trace_manifest.json` (trace sync status + counters)
 - imports include a review pass that fills these docs and confirms them with the user
 
 ## UI Contract
@@ -87,4 +109,6 @@ Preferred UX:
 - one settings-first TaskNerve page
 - one task drawer opened from the task-count chip in Codex chrome
 - project docs listed inside each project grouping in the sidebar
+- controller thread should be clearly designated in each project group
+- non-controller threads should be presented under an `/agents` section
 - views rendered with Codex host components and styling conventions

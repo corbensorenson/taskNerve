@@ -17,4 +17,6 @@ export * from "./integration/codexConversationInteraction.js";
 export * from "./integration/codexProjectGitSync.js";
 export * from "./integration/codexProjectCiSync.js";
 export * from "./integration/codexConversationChrome.js";
+export * from "./integration/modelTransport.js";
+export * from "./integration/codexProjectTrace.js";
 export * from "./integration/threadDisplay/index.js";

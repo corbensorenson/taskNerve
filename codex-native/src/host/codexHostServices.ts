@@ -27,6 +27,7 @@ export interface CodexHostServices {
   listProjectThreads: () => Promise<unknown> | unknown;
   startThread: (options: unknown) => Promise<unknown> | unknown;
   startTurn: (options: unknown) => Promise<unknown> | unknown;
+  startTurnWebSocket?: (options: unknown) => Promise<unknown> | unknown;
   setThreadName: (threadId: string, title: string) => Promise<unknown> | unknown;
   setThreadModel: (threadId: string, model: string) => Promise<unknown> | unknown;
   pinThread: (threadId: string) => Promise<unknown> | unknown;

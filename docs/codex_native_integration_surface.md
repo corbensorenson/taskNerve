@@ -34,6 +34,11 @@ Codex-first display surface:
 - per-repo mtime/raw caching for settings/registry reads with low-overhead cache lookups across many open projects
 - settings/registry caches use bounded retention with hot-entry promotion to keep memory predictable at scale
 - task queue sorting/filtering/stats
+- structured task metadata support for high-signal worker handoff:
+  - `objective`, `task_type`, `subsystem`
+  - `files_in_scope`, `out_of_scope`
+  - `acceptance_criteria`, `deliverables`, `verification_steps`
+  - `implementation_notes`, `risk_notes`, `estimated_effort`
 - memoized task snapshots for repeated task/search inputs
 - precomputed task-search text to reduce per-query string normalization overhead on large queues
 - normalized search-key reuse so equivalent queries (spacing/case variants) share filtered task results and stats
@@ -53,6 +58,11 @@ Codex-first display surface:
 `createCodexTaskNerveHostRuntime()`:
 - host-integrated snapshots with explicit host-styling contract
 - direct controller-thread bootstrapping through Codex host service methods
+- websocket-ready turn transport selection for controller bootstrap:
+  - prefers `host.startTurnWebSocket(...)` when available in `auto` mode
+  - supports explicit runtime override via `modelTransportMode` (`auto|http|websocket`)
+  - falls back to `host.startTurn(...)` on websocket unavailability/failure
+- host-exposed `modelTransportSnapshot(...)` for transport diagnostics
 - host-exposed `conversationDisplaySnapshot(...)` for direct Codex thread rendering
 - host-exposed `conversationInteractionStep(...)` for pure interaction reduction
 - host-exposed `applyConversationInteraction(...)` to execute native scroll/jump commands when host methods exist
@@ -60,6 +70,9 @@ Codex-first display surface:
 - host-exposed `syncProjectGit(...)` for smart pull/push execution with tracked push cadence
 - host-exposed `projectCiSyncSnapshot(...)` for per-repo CI failure triage and task-upsert preview
 - host-exposed `syncProjectCi(...)` for automatic CI failure task upsert + dispatch through host task APIs
+- host-exposed `syncProjectTrace(...)` for deterministic per-project trace capture to `taskNerve/project_trace.ndjson`
+- `syncProjectProduction(...)` now runs trace sync as part of the integrated production pass
+- `controllerProjectAutomation(...)` now runs trace sync as part of the controller automation pass
 - host-exposed thread display snapshot method for native Codex thread UIs
 - optional host-event refresh observers:
   - `observeThreadRefresh(...)` prefers `host.subscribeThreadEvents(...)`
@@ -97,7 +110,11 @@ import {
 } from "codex-tasknerve-native";
 
 const taskNerve = createTaskNerveService();
-const runtime = createCodexTaskNerveHostRuntime({ host: codexHostServices, taskNerveService: taskNerve });
+const runtime = createCodexTaskNerveHostRuntime({
+  host: codexHostServices,
+  taskNerveService: taskNerve,
+  modelTransportMode: "auto",
+});
 
 const snapshot = await runtime.snapshot({
   repoRoot,
@@ -110,6 +127,8 @@ const controller = await runtime.bootstrapControllerThread({
   repoRoot,
   projectName,
 });
+
+const transport = runtime.modelTransportSnapshot();
 
 const threadDisplay = await runtime.conversationDisplaySnapshot({
   thread: rawThreadPayload,
@@ -167,6 +186,11 @@ const ciSnapshot = await runtime.projectCiSyncSnapshot({
 const ciSync = await runtime.syncProjectCi({
   repoRoot,
   tasks,
+});
+
+const traceSync = await runtime.syncProjectTrace({
+  repoRoot,
+  projectName,
 });
 
 const standaloneCi = buildCodexProjectCiTaskSyncPlan({

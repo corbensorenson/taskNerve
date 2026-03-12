@@ -46,8 +46,39 @@ Single development target:
 Primary entrypoints:
 - [taskNerveService.ts](/Users/adimus/Documents/taskNerve/codex-native/src/integration/taskNerveService.ts)
 - [codexTaskNerveHostRuntime.ts](/Users/adimus/Documents/taskNerve/codex-native/src/integration/codexTaskNerveHostRuntime.ts)
+- [modelTransport.ts](/Users/adimus/Documents/taskNerve/codex-native/src/integration/modelTransport.ts)
 
 These are designed to be called directly from Codex host code so TaskNerve uses Codex threads, models, settings, and styling surfaces.
+
+Model transport readiness:
+- TaskNerve now includes a websocket-ready start-turn transport selector with safe HTTP fallback.
+- Runtime env keys: `TASKNERVE_MODEL_TRANSPORT` or `TASKNERVE_MODEL_TRANSPORT_MODE` (`auto`, `http`, `websocket`; default `auto`).
+- Runtime API override: `createCodexTaskNerveHostRuntime({ ..., modelTransportMode: "http" | "websocket" | "auto" })`.
+- If websocket transport is requested/selected but unavailable or fails, TaskNerve falls back to `startTurn` automatically.
+
+Per-project trace collection:
+- Deterministic project traces are written to `taskNerve/project_trace.ndjson` (plus `taskNerve/project_trace_manifest.json`).
+- Trace sync is available via `runtime.syncProjectTrace(...)` and is also run automatically during production/automation sync paths.
+- Project settings now include trace controls:
+  - `trace_collection_enabled`
+  - `trace_capture_controller`
+  - `trace_capture_agents`
+  - `trace_include_message_content`
+  - `trace_max_content_chars`
+
+Task template quality:
+- Controller prompts now enforce small-task decomposition (prefer `xs`/`s`).
+- Task records support richer worker handoff fields:
+  - `objective`, `task_type`, `subsystem`
+  - `files_in_scope`, `out_of_scope`
+  - `acceptance_criteria`, `deliverables`, `verification_steps`
+  - `implementation_notes`, `risk_notes`, `estimated_effort`
+- Deterministic dispatch quality gate is now available before task dispatch:
+  - `task_quality_gate_enabled` (default: `true`)
+  - `task_quality_gate_min_score` (default: `80`)
+  - `task_quality_gate_include_ci` (default: `false`)
+  - Required fields for controller tasks: `title`, `objective`, `acceptance_criteria`,
+    `deliverables`, `verification_steps`, `files_in_scope`
 
 ## Development
 
@@ -100,6 +131,19 @@ This script:
 Optional env vars:
 - `TASKNERVE_SKIP_DMG=1` to skip DMG packaging
 - `TASKNERVE_DMG_OUTPUT_DIR=/custom/path` to change installer output directory
+
+Project onboarding UX (desktop live extract):
+- In the project drawer header, use `Clone project from GitHub` to paste a clone URL.
+- TaskNerve will clone into a deterministic project folder, register/import the project, ensure required TaskNerve docs/artifacts, and bootstrap the controller thread automatically.
+- TaskNerve now also ensures a `taskNerve/` contract pack per project:
+  - `taskNerve/project_goals.md`
+  - `taskNerve/project_manifest.md`
+  - `taskNerve/contributing_ideas.md`
+  - `taskNerve/levers_pitfalls.md`
+  - `taskNerve/research.md`
+  - `taskNerve/creating_project_skill.md`
+  - `taskNerve/using_project_skill.md`
+  - `taskNerve/launch_project.sh`
 
 Install/refresh bundled skill in Codex:
 

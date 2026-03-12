@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -137,6 +137,69 @@ describe("codex TaskNerve host runtime", () => {
     expect(host.startTurn).toHaveBeenCalledTimes(1);
     expect(host.pinThread).toHaveBeenCalledWith("thread-controller");
     expect(host.openThread).toHaveBeenCalledWith("thread-controller");
+    expect(result.model_transport.executed_mode).toBe("http");
+  });
+
+  it("prefers websocket transport for bootstrap when available", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-controller-runtime-ws-"));
+    const host = mockHostServices();
+    (host as any).startTurnWebSocket = vi.fn(async () => ({ ok: true }));
+    const runtime = createCodexTaskNerveHostRuntime({
+      host,
+      env: { TASKNERVE_MODEL_TRANSPORT: "auto" },
+    });
+
+    const result = await runtime.bootstrapControllerThread({
+      repoRoot,
+      projectName: "taskNerve",
+      currentStateSignals: ["integration-first"],
+      queueSummary: "0 open tasks",
+      threadTitle: "TaskNerve Controller",
+    });
+
+    expect(result.model_transport.executed_mode).toBe("websocket");
+    expect(result.model_transport.fell_back_to_http).toBe(false);
+    expect((host as any).startTurnWebSocket).toHaveBeenCalledTimes(1);
+    expect(host.startTurn).not.toHaveBeenCalled();
+  });
+
+  it("supports runtime transport override to force http on websocket-capable hosts", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-controller-runtime-http-"));
+    const host = mockHostServices();
+    (host as any).startTurnWebSocket = vi.fn(async () => ({ ok: true }));
+    const runtime = createCodexTaskNerveHostRuntime({
+      host,
+      env: { TASKNERVE_MODEL_TRANSPORT: "auto" },
+      modelTransportMode: "http",
+    });
+
+    const result = await runtime.bootstrapControllerThread({
+      repoRoot,
+      projectName: "taskNerve",
+      currentStateSignals: ["integration-first"],
+      queueSummary: "0 open tasks",
+      threadTitle: "TaskNerve Controller",
+    });
+
+    expect(result.model_transport.requested_mode).toBe("http");
+    expect(result.model_transport.resolved_mode).toBe("http");
+    expect(result.model_transport.executed_mode).toBe("http");
+    expect((host as any).startTurnWebSocket).not.toHaveBeenCalled();
+    expect(host.startTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("exposes model transport snapshot for diagnostics", async () => {
+    const host = mockHostServices();
+    const runtime = createCodexTaskNerveHostRuntime({
+      host,
+      env: { TASKNERVE_MODEL_TRANSPORT: "websocket" },
+    });
+
+    const snapshot = runtime.modelTransportSnapshot();
+    expect(snapshot.integration_mode).toBe("codex-native-host");
+    expect(snapshot.requested_mode).toBe("websocket");
+    expect(snapshot.resolved_mode).toBe("http");
+    expect(snapshot.websocket_available).toBe(false);
   });
 
   it("builds per-project git sync snapshots with cadence metrics", async () => {
@@ -332,6 +395,42 @@ describe("codex TaskNerve host runtime", () => {
     expect(snapshot.bottlenecks.some((entry) => entry.id === "ci-failures-detected")).toBe(true);
   });
 
+  it("syncs project traces into taskNerve/project_trace.ndjson via host thread listing", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-runtime-trace-sync-"));
+    const host = mockHostServices();
+    (host as any).listProjectThreads = vi.fn(async () => ({
+      threads: [
+        {
+          thread_id: "thread-controller",
+          role: "controller",
+          agent_id: "agent.controller",
+          title: "TaskNerve Controller",
+          turns: [
+            {
+              id: "turn-1",
+              role: "assistant",
+              text: "Controller trace output.",
+            },
+          ],
+        },
+      ],
+    }));
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    const result = await runtime.syncProjectTrace({
+      repoRoot,
+      projectName: "taskNerve",
+      nowIsoUtc: "2026-03-11T04:09:30.000Z",
+    });
+
+    expect(result.integration_mode).toBe("codex-native-host");
+    expect(result.enabled).toBe(true);
+    expect(result.entries_appended).toBe(2);
+    expect(host.listProjectThreads).toHaveBeenCalledTimes(1);
+    const traceRaw = await readFile(result.trace_path, "utf8");
+    expect(traceRaw).toContain("\"thread_id\":\"thread-controller\"");
+  });
+
   it("runs production sync as one native flow for CI tasking and git sync", async () => {
     const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-production-sync-"));
     const host = mockHostServices();
@@ -355,6 +454,8 @@ describe("codex TaskNerve host runtime", () => {
     expect(result.executed.ci_task_upserts).toBe(1);
     expect(result.executed.ci_dispatch_count).toBe(1);
     expect(result.timings_ms.total).toBeGreaterThanOrEqual(0);
+    expect(result.trace_sync.integration_mode).toBe("codex-native-host");
+    expect(result.trace_sync.trace_path).toContain("/taskNerve/project_trace.ndjson");
     expect(host.upsertTaskNerveProjectTasks).toHaveBeenCalledWith({
       repoRoot,
       tasks: expect.any(Array),
@@ -390,6 +491,7 @@ describe("codex TaskNerve host runtime", () => {
     expect(result.git_binding.source).toBe("input");
     expect(result.settings.git_origin_url).toBe("git@github.com:acme/tasknerve.git");
     expect(result.production_sync.integration_mode).toBe("codex-native-host");
+    expect(result.trace_sync.integration_mode).toBe("codex-native-host");
     expect(host.pullRepository).toHaveBeenCalledWith({
       repoRoot,
       autostash: true,
@@ -414,6 +516,7 @@ describe("codex TaskNerve host runtime", () => {
     expect(result.git_binding.configured).toBe(true);
     expect(result.git_binding.source).toBe("workspace-context");
     expect(result.settings.git_origin_url).toBe("https://github.com/acme/tasknerve.git");
+    expect(result.trace_sync.integration_mode).toBe("codex-native-host");
     expect(result.warnings).toEqual(expect.not.arrayContaining([
       expect.stringContaining("git origin is not configured"),
     ]));

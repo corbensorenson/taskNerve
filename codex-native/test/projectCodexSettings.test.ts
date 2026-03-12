@@ -15,13 +15,25 @@ describe("project codex settings", () => {
     });
 
     expect(settings.worker_single_message_mode).toBe(true);
-    expect(settings.worker_model_routing_enabled).toBe(false);
+    expect(settings.worker_model_routing_enabled).toBe(true);
+    expect(settings.worker_route_wait_for_match).toBe(true);
+    expect(settings.worker_route_allow_retarget).toBe(true);
+    expect(settings.worker_route_prefer_spawn).toBe(true);
+    expect(settings.worker_route_match_effort).toBe(true);
+    expect(settings.task_quality_gate_enabled).toBe(true);
+    expect(settings.task_quality_gate_min_score).toBe(80);
+    expect(settings.task_quality_gate_include_ci).toBe(false);
     expect(settings.git_origin_url).toBe("git@github.com:acme/example.git");
     expect(settings.git_auto_sync_enabled).toBe(true);
     expect(settings.git_tasks_per_push_target).toBe(4);
     expect(settings.git_auto_sync_allowed_branches).toEqual([]);
     expect(settings.ci_auto_task_enabled).toBe(true);
     expect(settings.ci_failure_task_priority).toBe(9);
+    expect(settings.trace_collection_enabled).toBe(true);
+    expect(settings.trace_capture_controller).toBe(true);
+    expect(settings.trace_capture_agents).toBe(true);
+    expect(settings.trace_include_message_content).toBe(true);
+    expect(settings.trace_max_content_chars).toBe(16000);
     expect(settings.issues_sync_enabled).toBe(true);
     expect(settings.issues_auto_task_enabled).toBe(false);
     expect(settings.issues_filter_enabled).toBe(true);

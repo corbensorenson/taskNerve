@@ -112,6 +112,32 @@ describe("taskNerve service integration surface", () => {
     expect(byDependency.visible_tasks.map((task) => task.task_id)).toEqual(["t-1"]);
   });
 
+  it("filters and invalidates snapshot memo for structured task template fields", () => {
+    const service = createTaskNerveService();
+    const tasks: Array<Partial<TaskRecord>> = [
+      {
+        task_id: "t-structured",
+        title: "Trace pipeline tune",
+        status: "open",
+        priority: 8,
+        acceptance_criteria: ["Trace entries are de-duplicated by event id"],
+        verification_steps: ["Inspect taskNerve/project_trace_manifest.json"],
+      },
+    ];
+
+    const byStructuredField = service.taskSnapshot(tasks, "project_trace_manifest");
+    expect(byStructuredField.visible_tasks.map((task) => task.task_id)).toEqual(["t-structured"]);
+
+    const first = service.taskSnapshot(tasks, "de-duplicated");
+    const mutated = tasks.map((task) => ({
+      ...task,
+      acceptance_criteria: ["Trace entries include deterministic event ids"],
+    }));
+    const second = service.taskSnapshot(mutated, "de-duplicated");
+    expect(second).not.toBe(first);
+    expect(second.visible_tasks).toHaveLength(0);
+  });
+
   it("reuses normalized search results for equivalent query text", () => {
     const service = createTaskNerveService();
     const tasks: Array<Partial<TaskRecord>> = [
@@ -171,6 +197,39 @@ describe("taskNerve service integration surface", () => {
 
     expect(queued.replaced_pending).toBe(true);
     expect(queued.queue.map((entry) => entry.prompt_id)).toEqual(["new"]);
+
+    const gate = service.gateDispatchTaskIdsByQuality({
+      settings: {
+        task_quality_gate_enabled: true,
+        task_quality_gate_min_score: 80,
+        task_quality_gate_include_ci: false,
+      },
+      task_ids: ["task-low", "task-high"],
+      tasks: [
+        {
+          task_id: "task-low",
+          title: "Do thing",
+        },
+        {
+          task_id: "task-high",
+          title: "Improve prompt queue routing",
+          objective: "Avoid stale pending worker prompts",
+          acceptance_criteria: ["Queue only keeps newest pending prompt per worker"],
+          deliverables: ["Queue merge patch"],
+          verification_steps: ["npm test"],
+          files_in_scope: ["codex-native/src/domain/taskQueue.ts"],
+          task_type: "maintenance",
+          estimated_effort: "xs",
+          implementation_notes: "Prefer deterministic ordering by status then priority",
+          risk_notes: ["Do not drop running prompts"],
+          subsystem: "prompt-queue",
+          ready: true,
+        },
+      ],
+    });
+
+    expect(gate.allowed_task_ids).toEqual(["task-high"]);
+    expect(gate.blocked_task_ids).toEqual(["task-low"]);
   });
 
   it("builds thread display snapshots with timestamps, prompt navigation, and non-janky scroll policy", () => {

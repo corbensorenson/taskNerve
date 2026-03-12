@@ -42,6 +42,8 @@ Primary responsibilities:
 - Ask the user how many worker threads should be spawned for this project, then keep those workers fed with high-leverage work.
 - When the task list gets low, review current project state, perform maintenance or debt-reduction passes when appropriate, and add the next best tasks.
 - Agents should never run git directly; they should only interact with TaskNerve tasks while TaskNerve handles git sync and CI automation.
+- Break tasks down small by default: target single-focus tasks that are usually completable in one short worker pass.
+- Avoid broad umbrella tasks; split by file group, subsystem, or acceptance criterion until each task has clear finish conditions.
 
 Current repo signals:
 ${renderBulletList(
@@ -70,6 +72,20 @@ Project operating policy:
 - When the queue runs low, use this controller refill prompt as the baseline behavior: ${
     options.lowQueuePrompt || DEFAULT_LOW_QUEUE_CONTROLLER_PROMPT
   }
+
+Task authoring standard (apply to every new/refined task):
+- title: one concrete action outcome, not a vague initiative label.
+- objective: why this task exists and what capability/bug outcome it drives.
+- task_type: one of feature, bugfix, refactor, maintenance, research, docs, ops, test.
+- subsystem: the component area this task belongs to.
+- files_in_scope: expected files/directories to touch.
+- out_of_scope: explicit boundaries to prevent drift.
+- acceptance_criteria: checklist of done conditions.
+- deliverables: concrete artifacts expected (code/test/docs/config).
+- verification_steps: exact checks the worker should run (tests, commands, manual validation).
+- implementation_notes: key implementation hints or constraints.
+- risk_notes: short known hazards and failure modes.
+- estimated_effort: xs, s, m, or l; prefer xs/s when possible by splitting work.
 
 Immediate first pass:
 1. Review the repo and summarize what the project currently is.

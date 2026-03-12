@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   PROJECT_GOALS_FILE,
   PROJECT_MANIFEST_FILE,
+  TASKNERVE_PROJECT_DIR,
   TIMELINE_ROOT_DIR,
 } from "../constants.js";
 
@@ -40,4 +41,20 @@ export function projectGoalsPath(repoRoot: string): string {
 
 export function projectManifestPath(repoRoot: string): string {
   return path.join(repoRoot, PROJECT_MANIFEST_FILE);
+}
+
+export function taskNerveProjectDir(repoRoot: string): string {
+  return path.join(repoRoot, TASKNERVE_PROJECT_DIR);
+}
+
+export function projectTracePath(repoRoot: string): string {
+  return path.join(taskNerveProjectDir(repoRoot), "project_trace.ndjson");
+}
+
+export function projectTraceManifestPath(repoRoot: string): string {
+  return path.join(taskNerveProjectDir(repoRoot), "project_trace_manifest.json");
+}
+
+export function timelineProjectTraceStatePath(repoRoot: string): string {
+  return path.join(timelineRoot(repoRoot), "codex", "project_trace_state.json");
 }

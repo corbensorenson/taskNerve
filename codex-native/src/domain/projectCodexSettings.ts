@@ -77,7 +77,14 @@ export function defaultProjectCodexSettings(options: {
     low_queue_controller_prompt: DEFAULT_LOW_QUEUE_CONTROLLER_PROMPT,
     low_queue_controller_enabled: true,
     worker_single_message_mode: true,
-    worker_model_routing_enabled: false,
+    worker_model_routing_enabled: true,
+    worker_route_wait_for_match: true,
+    worker_route_allow_retarget: true,
+    worker_route_prefer_spawn: true,
+    worker_route_match_effort: true,
+    task_quality_gate_enabled: true,
+    task_quality_gate_min_score: 80,
+    task_quality_gate_include_ci: false,
     worker_default_model: null,
     controller_default_model: null,
     low_intelligence_model: null,
@@ -98,6 +105,11 @@ export function defaultProjectCodexSettings(options: {
     ci_default_assignee_agent_id: null,
     ci_last_sync_at_utc: null,
     ci_last_failed_job_count: 0,
+    trace_collection_enabled: true,
+    trace_capture_controller: true,
+    trace_capture_agents: true,
+    trace_include_message_content: true,
+    trace_max_content_chars: 16_000,
     issues_sync_enabled: true,
     issues_auto_task_enabled: false,
     issues_auto_approve_trusted: false,
@@ -137,6 +149,34 @@ export function normalizeProjectCodexSettings(
     worker_model_routing_enabled: normalizeBoolean(
       value.worker_model_routing_enabled,
       defaults.worker_model_routing_enabled,
+    ),
+    worker_route_wait_for_match: normalizeBoolean(
+      value.worker_route_wait_for_match,
+      defaults.worker_route_wait_for_match,
+    ),
+    worker_route_allow_retarget: normalizeBoolean(
+      value.worker_route_allow_retarget,
+      defaults.worker_route_allow_retarget,
+    ),
+    worker_route_prefer_spawn: normalizeBoolean(
+      value.worker_route_prefer_spawn,
+      defaults.worker_route_prefer_spawn,
+    ),
+    worker_route_match_effort: normalizeBoolean(
+      value.worker_route_match_effort,
+      defaults.worker_route_match_effort,
+    ),
+    task_quality_gate_enabled: normalizeBoolean(
+      value.task_quality_gate_enabled,
+      defaults.task_quality_gate_enabled,
+    ),
+    task_quality_gate_min_score: Math.min(
+      100,
+      normalizeInt(value.task_quality_gate_min_score, defaults.task_quality_gate_min_score, 0),
+    ),
+    task_quality_gate_include_ci: normalizeBoolean(
+      value.task_quality_gate_include_ci,
+      defaults.task_quality_gate_include_ci,
     ),
     worker_default_model: normalizeOptionalText(value.worker_default_model),
     controller_default_model: normalizeOptionalText(value.controller_default_model),
@@ -181,6 +221,23 @@ export function normalizeProjectCodexSettings(
       value.ci_last_failed_job_count,
       defaults.ci_last_failed_job_count,
       0,
+    ),
+    trace_collection_enabled: normalizeBoolean(
+      value.trace_collection_enabled,
+      defaults.trace_collection_enabled,
+    ),
+    trace_capture_controller: normalizeBoolean(
+      value.trace_capture_controller,
+      defaults.trace_capture_controller,
+    ),
+    trace_capture_agents: normalizeBoolean(value.trace_capture_agents, defaults.trace_capture_agents),
+    trace_include_message_content: normalizeBoolean(
+      value.trace_include_message_content,
+      defaults.trace_include_message_content,
+    ),
+    trace_max_content_chars: Math.min(
+      200_000,
+      normalizeInt(value.trace_max_content_chars, defaults.trace_max_content_chars, 1),
     ),
     issues_sync_enabled: normalizeBoolean(value.issues_sync_enabled, defaults.issues_sync_enabled),
     issues_auto_task_enabled: normalizeBoolean(

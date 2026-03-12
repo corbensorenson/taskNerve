@@ -1,4 +1,4 @@
-import { CONTROLLER_AGENT_ID } from "../constants.js";
+import { CONTROLLER_AGENT_ID, nowIsoUtc } from "../constants.js";
 import {
   assertCodexHostServices,
   type CodexHostSubscription,
@@ -38,11 +38,27 @@ import {
   type CodexControllerProjectAutomationOptions,
   type CodexControllerProjectAutomationResult,
 } from "./codexControllerProjectAutomation.js";
+import {
+  syncCodexProjectTrace,
+  type CodexProjectTraceSyncResult,
+} from "./codexProjectTrace.js";
+import {
+  resolveModelTransportPlan,
+  startTurnWithResolvedModelTransport,
+  type CodexModelTransportExecution,
+  type CodexModelTransportMode,
+  type CodexModelTransportPlan,
+} from "./modelTransport.js";
 import { createTaskNerveService, type TaskNerveService } from "./taskNerveService.js";
 import type {
   BuildThreadDisplayOptions,
   ThreadDisplaySnapshot,
 } from "./threadDisplay/index.js";
+import {
+  projectTraceManifestPath,
+  projectTracePath,
+  timelineProjectTraceStatePath,
+} from "../io/paths.js";
 
 export type {
   CodexProjectProductionRunOptions,
@@ -105,6 +121,23 @@ export interface CodexControllerBootstrapResult {
   thread_title: string;
   controller_model: string | null;
   prompt: string;
+  model_transport: {
+    requested_mode: CodexModelTransportPlan["requested_mode"];
+    resolved_mode: CodexModelTransportPlan["resolved_mode"];
+    executed_mode: CodexModelTransportExecution["executed_mode"];
+    websocket_available: boolean;
+    fallback_reason: string | null;
+    fell_back_to_http: boolean;
+    websocket_error: string | null;
+  };
+}
+
+export interface CodexModelTransportSnapshot {
+  integration_mode: "codex-native-host";
+  requested_mode: CodexModelTransportPlan["requested_mode"];
+  resolved_mode: CodexModelTransportPlan["resolved_mode"];
+  websocket_available: boolean;
+  fallback_reason: string | null;
 }
 
 export interface CodexProjectGitSyncSnapshotOptions {
@@ -162,6 +195,25 @@ export interface CodexProjectCiSyncRunResult {
   persisted_task_upserts: number;
   dispatched_task_ids: string[];
   warnings: string[];
+}
+
+export interface CodexRuntimeProjectTraceSyncOptions {
+  repoRoot: string;
+  projectName?: string | null;
+  settings?: Partial<ProjectCodexSettings>;
+  threadsPayload?: unknown;
+  nowIsoUtc?: string | null;
+  force?: boolean;
+}
+
+export interface CodexProjectProductionRunWithTraceResult
+  extends CodexProjectProductionRunResult {
+  trace_sync: CodexProjectTraceSyncResult;
+}
+
+export interface CodexControllerProjectAutomationWithTraceResult
+  extends CodexControllerProjectAutomationResult {
+  trace_sync: CodexProjectTraceSyncResult;
 }
 
 export type CodexConversationChromeAction =
@@ -227,15 +279,18 @@ export interface CodexTaskNerveHostRuntime {
     options: CodexProjectCiSyncSnapshotOptions,
   ) => Promise<ProjectCiTaskSyncPlan>;
   syncProjectCi: (options: CodexProjectCiSyncRunOptions) => Promise<CodexProjectCiSyncRunResult>;
+  syncProjectTrace: (
+    options: CodexRuntimeProjectTraceSyncOptions,
+  ) => Promise<CodexProjectTraceSyncResult>;
   projectProductionSnapshot: (
     options: CodexProjectProductionSnapshotOptions,
   ) => Promise<CodexProjectProductionSnapshot>;
   syncProjectProduction: (
     options: CodexProjectProductionRunOptions,
-  ) => Promise<CodexProjectProductionRunResult>;
+  ) => Promise<CodexProjectProductionRunWithTraceResult>;
   controllerProjectAutomation: (
     options: CodexControllerProjectAutomationOptions,
-  ) => Promise<CodexControllerProjectAutomationResult>;
+  ) => Promise<CodexControllerProjectAutomationWithTraceResult>;
   conversationDisplaySnapshot: (
     options: CodexConversationDisplayOptions,
   ) => Promise<CodexConversationDisplaySnapshot>;
@@ -268,6 +323,7 @@ export interface CodexTaskNerveHostRuntime {
   observeConversationChromeRefresh: (
     options: ObserveConversationChromeRefreshOptions,
   ) => Promise<CodexHostRefreshSubscription>;
+  modelTransportSnapshot: () => CodexModelTransportSnapshot;
 }
 
 interface NormalizedBranchState {
@@ -705,9 +761,13 @@ function rememberBoundedMapValue<Key, Value>(
 export function createCodexTaskNerveHostRuntime(options: {
   host: Partial<CodexHostServices> | null | undefined;
   taskNerveService?: TaskNerveService;
+  env?: NodeJS.ProcessEnv;
+  modelTransportMode?: CodexModelTransportMode | null;
 }): CodexTaskNerveHostRuntime {
   const host = assertCodexHostServices(options.host);
   const taskNerve = options.taskNerveService ?? createTaskNerveService();
+  const runtimeEnv = options.env ?? process.env;
+  const runtimeModelTransportMode = options.modelTransportMode ?? null;
   let hostStylingContextCache: {
     value: unknown;
     fetchedAtMs: number;
@@ -1425,6 +1485,63 @@ export function createCodexTaskNerveHostRuntime(options: {
     }
   }
 
+  async function syncProjectTraceStrict(
+    traceOptions: CodexRuntimeProjectTraceSyncOptions,
+  ): Promise<CodexProjectTraceSyncResult> {
+    const settings = traceOptions.settings
+      ? taskNerve.normalizeProjectSettings(traceOptions.settings)
+      : await taskNerve.loadProjectSettings({
+          repoRoot: traceOptions.repoRoot,
+        });
+    const threadsPayload =
+      traceOptions.threadsPayload !== undefined
+        ? traceOptions.threadsPayload
+        : await Promise.resolve(host.listProjectThreads());
+    return syncCodexProjectTrace({
+      repoRoot: traceOptions.repoRoot,
+      projectName: traceOptions.projectName ?? null,
+      settings,
+      threadsPayload,
+      nowIsoUtc: traceOptions.nowIsoUtc,
+      force: traceOptions.force,
+    });
+  }
+
+  async function syncProjectTraceSafe(
+    traceOptions: CodexRuntimeProjectTraceSyncOptions,
+  ): Promise<CodexProjectTraceSyncResult> {
+    try {
+      return await syncProjectTraceStrict(traceOptions);
+    } catch (error) {
+      const fallbackSettings = taskNerve.normalizeProjectSettings(traceOptions.settings ?? {});
+      const syncedAtUtc = traceOptions.nowIsoUtc ?? nowIsoUtc();
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        integration_mode: "codex-native-host",
+        repo_root: traceOptions.repoRoot,
+        project_name: traceOptions.projectName ?? null,
+        enabled: false,
+        reason: "disabled",
+        trace_path: projectTracePath(traceOptions.repoRoot),
+        manifest_path: projectTraceManifestPath(traceOptions.repoRoot),
+        state_path: timelineProjectTraceStatePath(traceOptions.repoRoot),
+        threads_seen: 0,
+        threads_in_scope: 0,
+        entries_seen: 0,
+        entries_appended: 0,
+        total_entries_written: 0,
+        trace_settings: {
+          capture_controller: fallbackSettings.trace_capture_controller,
+          capture_agents: fallbackSettings.trace_capture_agents,
+          include_message_content: fallbackSettings.trace_include_message_content,
+          max_content_chars: fallbackSettings.trace_max_content_chars,
+        },
+        synced_at_utc: syncedAtUtc,
+        warnings: [`Trace sync failed: ${message}`],
+      };
+    }
+  }
+
   return {
     snapshot: async (snapshotOptions) => {
       const settingsPromise = taskNerve.loadProjectSettings({
@@ -1448,6 +1565,19 @@ export function createCodexTaskNerveHostRuntime(options: {
         repo_root: snapshotOptions.repoRoot,
         settings,
         task_snapshot: taskSnapshot,
+      };
+    },
+
+    modelTransportSnapshot: () => {
+      const plan = resolveModelTransportPlan(host, runtimeEnv, {
+        requestedMode: runtimeModelTransportMode,
+      });
+      return {
+        integration_mode: "codex-native-host",
+        requested_mode: plan.requested_mode,
+        resolved_mode: plan.resolved_mode,
+        websocket_available: plan.websocket_available,
+        fallback_reason: plan.fallback_reason,
       };
     },
 
@@ -1635,11 +1765,25 @@ export function createCodexTaskNerveHostRuntime(options: {
       } else if (typeof host.dispatchTaskNerveTasks !== "function") {
         warnings.push("Codex host method dispatchTaskNerveTasks is unavailable");
       } else {
-        dispatchedTaskIds = [...context.snapshot.dispatch_task_ids];
-        await host.dispatchTaskNerveTasks({
-          repoRoot: syncOptions.repoRoot,
-          task_ids: dispatchedTaskIds,
+        const qualityGate = taskNerve.gateDispatchTaskIdsByQuality({
+          settings: settingsAfterSync,
+          task_ids: context.snapshot.dispatch_task_ids,
+          tasks: context.snapshot.task_upserts.map((entry) => entry.task),
         });
+        if (qualityGate.blocked_task_ids.length > 0) {
+          warnings.push(
+            `Task quality gate blocked ${qualityGate.blocked_task_ids.length} dispatch item(s): ${qualityGate.blocked_task_ids.join(
+              ", ",
+            )}`,
+          );
+        }
+        dispatchedTaskIds = [...qualityGate.allowed_task_ids];
+        if (dispatchedTaskIds.length > 0) {
+          await host.dispatchTaskNerveTasks({
+            repoRoot: syncOptions.repoRoot,
+            task_ids: dispatchedTaskIds,
+          });
+        }
       }
 
       invalidateProjectCiFailureCache(syncOptions.repoRoot);
@@ -1652,6 +1796,10 @@ export function createCodexTaskNerveHostRuntime(options: {
         dispatched_task_ids: dispatchedTaskIds,
         warnings,
       };
+    },
+
+    syncProjectTrace: async (traceOptions) => {
+      return syncProjectTraceSafe(traceOptions);
     },
 
     projectProductionSnapshot: async (projectOptions) => {
@@ -1668,7 +1816,7 @@ export function createCodexTaskNerveHostRuntime(options: {
     },
 
     syncProjectProduction: async (syncOptions) => {
-      return syncCodexProjectProduction(
+      const productionResult = await syncCodexProjectProduction(
         {
           host,
           taskNerve,
@@ -1680,10 +1828,19 @@ export function createCodexTaskNerveHostRuntime(options: {
         },
         syncOptions,
       );
+      const traceSync = await syncProjectTraceSafe({
+        repoRoot: syncOptions.repoRoot,
+        nowIsoUtc: syncOptions.nowIsoUtc,
+      });
+      return {
+        ...productionResult,
+        trace_sync: traceSync,
+        warnings: [...new Set([...productionResult.warnings, ...traceSync.warnings])],
+      };
     },
 
     controllerProjectAutomation: async (automationOptions) => {
-      return runCodexControllerProjectAutomation(
+      const automationResult = await runCodexControllerProjectAutomation(
         {
           host,
           taskNerve,
@@ -1695,6 +1852,15 @@ export function createCodexTaskNerveHostRuntime(options: {
         },
         automationOptions,
       );
+      const traceSync = await syncProjectTraceSafe({
+        repoRoot: automationOptions.repoRoot,
+        nowIsoUtc: automationOptions.nowIsoUtc,
+      });
+      return {
+        ...automationResult,
+        trace_sync: traceSync,
+        warnings: [...new Set([...automationResult.warnings, ...traceSync.warnings])],
+      };
     },
 
     bootstrapControllerThread: async (bootstrapOptions) => {
@@ -1738,13 +1904,21 @@ export function createCodexTaskNerveHostRuntime(options: {
         beforeTurnOps.push(host.setThreadModel(threadId, controllerModel));
       }
       await Promise.all(beforeTurnOps);
-      await host.startTurn({
+      const turnPayload = {
         thread_id: threadId,
         threadId,
         agent_id: CONTROLLER_AGENT_ID,
         model: controllerModel || undefined,
         prompt,
-      });
+      };
+      const transportExecution = await startTurnWithResolvedModelTransport(
+        host,
+        turnPayload,
+        runtimeEnv,
+        {
+          requestedMode: runtimeModelTransportMode,
+        },
+      );
       await Promise.all([host.pinThread(threadId), host.openThread(threadId)]);
 
       return {
@@ -1753,6 +1927,15 @@ export function createCodexTaskNerveHostRuntime(options: {
         thread_title: title,
         controller_model: controllerModel,
         prompt,
+        model_transport: {
+          requested_mode: transportExecution.plan.requested_mode,
+          resolved_mode: transportExecution.plan.resolved_mode,
+          executed_mode: transportExecution.executed_mode,
+          websocket_available: transportExecution.plan.websocket_available,
+          fallback_reason: transportExecution.plan.fallback_reason,
+          fell_back_to_http: transportExecution.fell_back_to_http,
+          websocket_error: transportExecution.websocket_error,
+        },
       };
     },
 

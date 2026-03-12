@@ -8,13 +8,39 @@ export type TaskStatus = z.infer<typeof taskStatusSchema>;
 export const intelligenceLevelSchema = z.enum(["low", "medium", "high", "max"]);
 export type IntelligenceLevel = z.infer<typeof intelligenceLevelSchema>;
 
+export const taskTypeSchema = z.enum([
+  "feature",
+  "bugfix",
+  "refactor",
+  "maintenance",
+  "research",
+  "docs",
+  "ops",
+  "test",
+]);
+export type TaskType = z.infer<typeof taskTypeSchema>;
+
+export const taskEffortSchema = z.enum(["xs", "s", "m", "l"]);
+export type TaskEffort = z.infer<typeof taskEffortSchema>;
+
 export const taskSchema = z.object({
   task_id: z.string(),
   title: z.string(),
   detail: z.string().nullable().optional(),
+  objective: z.string().trim().min(1).nullish(),
+  task_type: taskTypeSchema.nullish(),
+  subsystem: z.string().trim().min(1).nullish(),
   priority: z.number().int().default(0),
   tags: z.array(z.string()).default([]),
   depends_on: z.array(z.string()).default([]),
+  files_in_scope: z.array(z.string().trim().min(1)).default([]),
+  out_of_scope: z.array(z.string().trim().min(1)).default([]),
+  acceptance_criteria: z.array(z.string().trim().min(1)).default([]),
+  deliverables: z.array(z.string().trim().min(1)).default([]),
+  verification_steps: z.array(z.string().trim().min(1)).default([]),
+  implementation_notes: z.string().trim().min(1).nullish(),
+  risk_notes: z.array(z.string().trim().min(1)).default([]),
+  estimated_effort: taskEffortSchema.nullish(),
   status: taskStatusSchema.default("open"),
   ready: z.boolean().optional(),
   claimed_by_agent_id: z.string().nullable().optional(),
@@ -30,7 +56,14 @@ export const projectCodexSettingsSchema = z.object({
   low_queue_controller_prompt: z.string(),
   low_queue_controller_enabled: z.boolean().default(true),
   worker_single_message_mode: z.boolean().default(true),
-  worker_model_routing_enabled: z.boolean().default(false),
+  worker_model_routing_enabled: z.boolean().default(true),
+  worker_route_wait_for_match: z.boolean().default(true),
+  worker_route_allow_retarget: z.boolean().default(true),
+  worker_route_prefer_spawn: z.boolean().default(true),
+  worker_route_match_effort: z.boolean().default(true),
+  task_quality_gate_enabled: z.boolean().default(true),
+  task_quality_gate_min_score: z.number().int().min(0).max(100).default(80),
+  task_quality_gate_include_ci: z.boolean().default(false),
   worker_default_model: z.string().trim().min(1).nullish(),
   controller_default_model: z.string().trim().min(1).nullish(),
   low_intelligence_model: z.string().trim().min(1).nullish(),
@@ -51,6 +84,11 @@ export const projectCodexSettingsSchema = z.object({
   ci_default_assignee_agent_id: z.string().trim().min(1).nullish(),
   ci_last_sync_at_utc: z.string().trim().min(1).nullish(),
   ci_last_failed_job_count: z.number().int().min(0).default(0),
+  trace_collection_enabled: z.boolean().default(true),
+  trace_capture_controller: z.boolean().default(true),
+  trace_capture_agents: z.boolean().default(true),
+  trace_include_message_content: z.boolean().default(true),
+  trace_max_content_chars: z.number().int().min(1).max(200_000).default(16_000),
   issues_sync_enabled: z.boolean().default(true),
   issues_auto_task_enabled: z.boolean().default(false),
   issues_auto_approve_trusted: z.boolean().default(false),

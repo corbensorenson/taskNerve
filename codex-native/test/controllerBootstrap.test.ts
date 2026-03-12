@@ -20,5 +20,9 @@ describe("controller bootstrap prompt", () => {
     expect(prompt).toMatch(/built-in TaskNerve skill/);
     expect(prompt).toMatch(/Agents should never run git directly/);
     expect(prompt).toMatch(/TaskNerve-managed subsystem/);
+    expect(prompt).toMatch(/Break tasks down small by default/);
+    expect(prompt).toMatch(/Task authoring standard/);
+    expect(prompt).toMatch(/acceptance_criteria/);
+    expect(prompt).toMatch(/verification_steps/);
   });
 });

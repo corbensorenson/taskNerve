@@ -10,6 +10,7 @@ import {
 } from "../domain/projectContracts.js";
 import {
   buildProjectTaskStats,
+  gateTaskDispatchByQuality,
   mergePromptQueue,
   sortTasks,
   taskUserTags,
@@ -86,6 +87,11 @@ export interface TaskNerveService {
     request: Partial<PromptQueueRequest>,
     options?: { singleMessageMode?: boolean },
   ) => ReturnType<typeof mergePromptQueue>;
+  gateDispatchTaskIdsByQuality: (options: {
+    settings: Partial<ProjectCodexSettings>;
+    task_ids: string[];
+    tasks: Partial<TaskRecord>[];
+  }) => ReturnType<typeof gateTaskDispatchByQuality>;
   resolveModelsForTask: (
     settings: Partial<ProjectCodexSettings>,
     task?: Partial<TaskRecord>,
@@ -187,9 +193,20 @@ function taskSearchText(task: Partial<TaskRecord>): string {
     normalizeSearchText(task.task_id),
     normalizeSearchText(task.title),
     normalizeSearchText(task.detail),
+    normalizeSearchText(task.objective),
+    normalizeSearchText(task.task_type),
+    normalizeSearchText(task.subsystem),
+    normalizeSearchText(task.implementation_notes),
+    normalizeSearchText(task.estimated_effort),
     normalizeSearchText(task.claimed_by_agent_id),
     joinNormalizedStringArray(task.tags),
     joinNormalizedStringArray(task.depends_on),
+    joinNormalizedStringArray(task.files_in_scope),
+    joinNormalizedStringArray(task.out_of_scope),
+    joinNormalizedStringArray(task.acceptance_criteria),
+    joinNormalizedStringArray(task.deliverables),
+    joinNormalizedStringArray(task.verification_steps),
+    joinNormalizedStringArray(task.risk_notes),
   ]
     .filter(Boolean)
     .join(" ");
@@ -238,7 +255,30 @@ function taskQuickMarker(task: Partial<TaskRecord>): string {
   const ready = task.ready ? "1" : "0";
   const tagsCount = Array.isArray(task.tags) ? task.tags.length : 0;
   const dependsCount = Array.isArray(task.depends_on) ? task.depends_on.length : 0;
-  return `${taskId}:${status}:${priority}:${ready}:${tagsCount}:${dependsCount}`;
+  const acceptanceCount = Array.isArray(task.acceptance_criteria)
+    ? task.acceptance_criteria.length
+    : 0;
+  const deliverablesCount = Array.isArray(task.deliverables) ? task.deliverables.length : 0;
+  const verificationCount = Array.isArray(task.verification_steps)
+    ? task.verification_steps.length
+    : 0;
+  const scopeCount = Array.isArray(task.files_in_scope) ? task.files_in_scope.length : 0;
+  const objectiveFlag = task.objective ? "1" : "0";
+  const notesFlag = task.implementation_notes ? "1" : "0";
+  return [
+    taskId,
+    status,
+    priority,
+    ready,
+    String(tagsCount),
+    String(dependsCount),
+    String(acceptanceCount),
+    String(deliverablesCount),
+    String(verificationCount),
+    String(scopeCount),
+    objectiveFlag,
+    notesFlag,
+  ].join(":");
 }
 
 function taskArrayQuickMarker(tasks: Partial<TaskRecord>[]): string {
@@ -259,14 +299,25 @@ function sameTaskRecord(left: Partial<TaskRecord>, right: Partial<TaskRecord>): 
     left.task_id === right.task_id &&
     left.title === right.title &&
     left.detail === right.detail &&
+    left.objective === right.objective &&
+    left.task_type === right.task_type &&
+    left.subsystem === right.subsystem &&
     left.priority === right.priority &&
     left.status === right.status &&
     left.ready === right.ready &&
+    left.implementation_notes === right.implementation_notes &&
+    left.estimated_effort === right.estimated_effort &&
     left.claimed_by_agent_id === right.claimed_by_agent_id &&
     left.suggested_intelligence === right.suggested_intelligence &&
     left.suggested_model === right.suggested_model &&
     sameStringArray(left.tags, right.tags) &&
-    sameStringArray(left.depends_on, right.depends_on)
+    sameStringArray(left.depends_on, right.depends_on) &&
+    sameStringArray(left.files_in_scope, right.files_in_scope) &&
+    sameStringArray(left.out_of_scope, right.out_of_scope) &&
+    sameStringArray(left.acceptance_criteria, right.acceptance_criteria) &&
+    sameStringArray(left.deliverables, right.deliverables) &&
+    sameStringArray(left.verification_steps, right.verification_steps) &&
+    sameStringArray(left.risk_notes, right.risk_notes)
   );
 }
 
@@ -313,6 +364,7 @@ export function createTaskNerveService(): TaskNerveService {
         "project_production",
         "thread_display",
         "prompt_queue",
+        "task_quality_gate",
         "model_routing",
       ],
     }),
@@ -434,6 +486,19 @@ export function createTaskNerveService(): TaskNerveService {
     },
 
     queuePrompt: (queue, request, options = {}) => mergePromptQueue(queue, request, options),
+
+    gateDispatchTaskIdsByQuality: (options) => {
+      const normalizedSettings = normalizeProjectCodexSettings(options.settings);
+      return gateTaskDispatchByQuality({
+        taskIds: options.task_ids,
+        tasks: options.tasks,
+        gate: {
+          enabled: normalizedSettings.task_quality_gate_enabled,
+          minScore: normalizedSettings.task_quality_gate_min_score,
+          includeCiTasks: normalizedSettings.task_quality_gate_include_ci,
+        },
+      });
+    },
 
     resolveModelsForTask: (settings, task = {}) => {
       const normalizedSettings = normalizeProjectCodexSettings(settings);

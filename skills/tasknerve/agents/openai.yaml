@@ -8,7 +8,11 @@ interface:
     project settings for policy, task drawer for active queue work, keep
     project_goals.md, project_manifest.md, contributing_ideas.md,
     levers_pitfalls.md, research.md, taskNerve/creating_project_skill.md,
-    and taskNerve/using_project_skill.md aligned with execution, and keep
+    taskNerve/using_project_skill.md, and the mirrored taskNerve contract
+    pack (including taskNerve/launch_project.sh) aligned with execution, and keep
     controller/worker flow clear, responsive, and task-aware. For external
     issue intake, keep a review-first queue and apply malice/noise filters
-    before anything becomes a task.
+    before anything becomes a task. Prefer small (xs/s) scoped tasks and fill
+    structured task fields for worker clarity: objective, task_type, subsystem,
+    files_in_scope, out_of_scope, acceptance_criteria, deliverables,
+    verification_steps, implementation_notes, risk_notes, and estimated_effort.

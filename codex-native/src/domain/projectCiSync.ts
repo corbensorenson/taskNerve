@@ -288,11 +288,38 @@ function normalizeExistingTask(task: Partial<TaskRecord> | undefined, key: strin
     task_id: taskId,
     title,
     detail: normalizeOptionalText(task?.detail),
+    objective: normalizeOptionalText(task?.objective),
+    task_type:
+      task?.task_type === "feature" ||
+      task?.task_type === "bugfix" ||
+      task?.task_type === "refactor" ||
+      task?.task_type === "maintenance" ||
+      task?.task_type === "research" ||
+      task?.task_type === "docs" ||
+      task?.task_type === "ops" ||
+      task?.task_type === "test"
+        ? task.task_type
+        : undefined,
+    subsystem: normalizeOptionalText(task?.subsystem),
     priority,
     tags: mergeUniqueTags(Array.isArray(task?.tags) ? task.tags : []),
     depends_on: Array.isArray(task?.depends_on)
       ? task.depends_on.map((entry) => String(entry || "").trim()).filter(Boolean)
       : [],
+    files_in_scope: normalizeStringArray(task?.files_in_scope, 128),
+    out_of_scope: normalizeStringArray(task?.out_of_scope, 128),
+    acceptance_criteria: normalizeStringArray(task?.acceptance_criteria, 128),
+    deliverables: normalizeStringArray(task?.deliverables, 128),
+    verification_steps: normalizeStringArray(task?.verification_steps, 128),
+    implementation_notes: normalizeOptionalText(task?.implementation_notes),
+    risk_notes: normalizeStringArray(task?.risk_notes, 128),
+    estimated_effort:
+      task?.estimated_effort === "xs" ||
+      task?.estimated_effort === "s" ||
+      task?.estimated_effort === "m" ||
+      task?.estimated_effort === "l"
+        ? task.estimated_effort
+        : undefined,
     status,
     ready: Boolean(task?.ready),
     claimed_by_agent_id: normalizeOptionalText(task?.claimed_by_agent_id),
@@ -321,6 +348,30 @@ function buildCiTaskFromFailure(options: {
     ...base,
     title: `Fix CI failure: ${options.failure.job}${options.failure.branch ? ` (${options.failure.branch})` : ""}`,
     detail: buildCiTaskDetail(options.failure),
+    objective:
+      base.objective ||
+      `Restore CI health by fixing failing job ${options.failure.job}.`,
+    task_type: base.task_type || "maintenance",
+    subsystem: base.subsystem || "ci",
+    acceptance_criteria:
+      base.acceptance_criteria.length > 0
+        ? base.acceptance_criteria
+        : [
+            `The failing CI job ${options.failure.job} passes on branch ${options.failure.branch || "unknown"}.`,
+            "Root cause is documented in the task detail or implementation notes.",
+          ],
+    deliverables:
+      base.deliverables.length > 0
+        ? base.deliverables
+        : ["Fix committed", "Relevant tests updated if needed"],
+    verification_steps:
+      base.verification_steps.length > 0
+        ? base.verification_steps
+        : [
+            `Re-run failing CI job ${options.failure.job} and confirm success.`,
+            "Run targeted local validation before handoff.",
+          ],
+    estimated_effort: base.estimated_effort || "s",
     priority: Math.max(base.priority, options.priority),
     status,
     ready: true,

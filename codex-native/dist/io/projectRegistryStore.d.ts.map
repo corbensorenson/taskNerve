@@ -1,1 +1,0 @@
-{"version":3,"file":"projectRegistryStore.d.ts","sourceRoot":"","sources":["../../src/io/projectRegistryStore.ts"],"names":[],"mappings":"AAGA,OAAO,EAAyB,KAAK,eAAe,EAAE,MAAM,eAAe,CAAC;AA+B5E,wBAAsB,mBAAmB,CACvC,GAAG,GAAE,MAAM,CAAC,UAAwB,GACnC,OAAO,CAAC,eAAe,CAAC,CAwC1B;AAED,wBAAsB,oBAAoB,CACxC,QAAQ,EAAE,eAAe,EACzB,GAAG,GAAE,MAAM,CAAC,UAAwB,GACnC,OAAO,CAAC,eAAe,CAAC,CAgB1B"}

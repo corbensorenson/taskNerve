@@ -1,8 +1,12 @@
 export const SCHEMA_PROJECT_CODEX_SETTINGS = "tasknerve.project_codex_settings.v1";
 export const SCHEMA_PROJECTS = "tasknerve.projects.v1";
+export const SCHEMA_PROJECT_TRACE_STATE = "tasknerve.project_trace_state.v1";
+export const SCHEMA_PROJECT_TRACE_MANIFEST = "tasknerve.project_trace_manifest.v1";
+export const SCHEMA_PROJECT_TRACE_ENTRY = "tasknerve.project_trace_entry.v1";
 export const PROJECT_GOALS_FILE = "project_goals.md";
 export const PROJECT_MANIFEST_FILE = "project_manifest.md";
 export const TIMELINE_ROOT_DIR = ".tasknerve";
+export const TASKNERVE_PROJECT_DIR = "taskNerve";
 export const CONTROLLER_AGENT_ID = "agent.controller";
 export const DEFAULT_HEARTBEAT_MESSAGE_CORE =
   "Please continue working on {project_name} project utilizing the taskNerve system. I believe in you, do your absolute best!";

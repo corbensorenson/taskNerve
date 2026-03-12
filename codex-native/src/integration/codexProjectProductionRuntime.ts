@@ -177,11 +177,25 @@ export async function syncCodexProjectProduction(
   } else if (typeof dependencies.host.dispatchTaskNerveTasks !== "function") {
     warnings.push("Codex host method dispatchTaskNerveTasks is unavailable");
   } else {
-    dispatchedTaskIds = [...context.ciSnapshot.dispatch_task_ids];
-    await dependencies.host.dispatchTaskNerveTasks({
-      repoRoot: options.repoRoot,
-      task_ids: dispatchedTaskIds,
+    const qualityGate = dependencies.taskNerve.gateDispatchTaskIdsByQuality({
+      settings: effectiveSettings,
+      task_ids: context.ciSnapshot.dispatch_task_ids,
+      tasks: context.ciSnapshot.task_upserts.map((entry) => entry.task),
     });
+    if (qualityGate.blocked_task_ids.length > 0) {
+      warnings.push(
+        `Task quality gate blocked ${qualityGate.blocked_task_ids.length} dispatch item(s): ${qualityGate.blocked_task_ids.join(
+          ", ",
+        )}`,
+      );
+    }
+    dispatchedTaskIds = [...qualityGate.allowed_task_ids];
+    if (dispatchedTaskIds.length > 0) {
+      await dependencies.host.dispatchTaskNerveTasks({
+        repoRoot: options.repoRoot,
+        task_ids: dispatchedTaskIds,
+      });
+    }
   }
   timings.ci_sync = Date.now() - ciStartMs;
   dependencies.invalidateProjectCiFailureCache(options.repoRoot);
