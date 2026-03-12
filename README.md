@@ -98,6 +98,18 @@ bash ./scripts/public-release-check.sh
 bash ./scripts/vigorous-e2e.sh
 ```
 
+Prune heavyweight local build/install artifacts in `target/` (deterministic retention):
+
+```bash
+bash ./scripts/clean-target-retention.sh
+```
+
+To aggressively reclaim local disk from transient build outputs:
+
+```bash
+bash ./scripts/clean-target-retention.sh --drop-debug-release
+```
+
 If local runtime extracts exist under `target/`, collapse duplicate extract trees to one canonical live tree:
 
 ```bash

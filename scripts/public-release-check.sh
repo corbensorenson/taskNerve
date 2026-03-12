@@ -29,6 +29,21 @@ test ! -f "$REPO_ROOT/codex-native/index.html"
 test ! -f "$REPO_ROOT/codex-native/index-CMu6BCpo.js"
 test ! -f "$REPO_ROOT/codex-native/tasknerve-settings-native.js"
 
+if git -C "$REPO_ROOT" ls-files | rg -q '^codex-native/node_modules/'; then
+  echo "Tracked dependency output found under codex-native/node_modules." >&2
+  exit 1
+fi
+
+if git -C "$REPO_ROOT" ls-files | rg -q '^codex-native/dist/'; then
+  echo "Tracked compiled output found under codex-native/dist." >&2
+  exit 1
+fi
+
+if git -C "$REPO_ROOT" ls-files | rg -q '\.DS_Store$'; then
+  echo "Tracked .DS_Store artifacts detected." >&2
+  exit 1
+fi
+
 if rg -n --glob '!**/node_modules/**' \
   "sync-codex-tasknerve\\.mjs|allow-legacy-patching|legacy:sync:app|TASKNERVE_CODEX_MAIN_BRIDGE|TASKNERVE_CODEX_PANEL" \
   "$REPO_ROOT/README.md" \
