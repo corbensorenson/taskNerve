@@ -9,6 +9,7 @@ export * from "./domain/taskQueue.js";
 export * from "./io/paths.js";
 export * from "./io/projectCodexSettingsStore.js";
 export * from "./io/projectRegistryStore.js";
+export * from "./io/projectAgentWatchdogStateStore.js";
 export * from "./host/codexHostServices.js";
 export * from "./integration/taskNerveService.js";
 export * from "./integration/codexTaskNerveHostRuntime.js";
@@ -19,4 +20,9 @@ export * from "./integration/codexProjectCiSync.js";
 export * from "./integration/codexConversationChrome.js";
 export * from "./integration/modelTransport.js";
 export * from "./integration/codexProjectTrace.js";
+export {
+  runCodexAgentWatchdog,
+  type CodexAgentWatchdogPolicy,
+  type CodexAgentWatchdogRunResult,
+} from "./integration/codexAgentWatchdog.js";
 export * from "./integration/threadDisplay/index.js";

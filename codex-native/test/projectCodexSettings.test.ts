@@ -34,6 +34,12 @@ describe("project codex settings", () => {
     expect(settings.trace_capture_agents).toBe(true);
     expect(settings.trace_include_message_content).toBe(true);
     expect(settings.trace_max_content_chars).toBe(16000);
+    expect(settings.self_improvement_enabled).toBe(true);
+    expect(settings.self_improvement_auto_dispatch_enabled).toBe(true);
+    expect(settings.self_improvement_max_tasks_per_run).toBe(2);
+    expect(settings.self_improvement_open_task_limit).toBe(6);
+    expect(settings.self_improvement_dispatch_cooldown_minutes).toBe(45);
+    expect(settings.self_improvement_last_dispatch_at_utc).toBeNull();
     expect(settings.issues_sync_enabled).toBe(true);
     expect(settings.issues_auto_task_enabled).toBe(false);
     expect(settings.issues_filter_enabled).toBe(true);

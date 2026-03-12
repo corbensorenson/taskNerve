@@ -1,0 +1,54 @@
+{
+  "schema_version": "tasknerve.codex_upstream_state.v1",
+  "updated_at_utc": "2026-03-12T09:32:17Z",
+  "upstream_feed_url": "https://persistent.oaistatic.com/codex-app-prod/appcast.xml",
+  "latest_seen": {
+    "upstream_version": "26.309.31024",
+    "upstream_build": null,
+    "published_at_utc": "Wed, 11 Mar 2026 22:38:16 +0000",
+    "title": "26.309.31024",
+    "download_url": "https://persistent.oaistatic.com/codex-app-prod/Codex-darwin-arm64-26.309.31024.zip",
+    "release_notes_url": null,
+    "fingerprint": "26.309.31024||Wed, 11 Mar 2026 22:38:16 +0000|https://persistent.oaistatic.com/codex-app-prod/Codex-darwin-arm64-26.309.31024.zip"
+  },
+  "history": [
+    {
+      "checked_at_utc": "2026-03-12T09:32:17Z",
+      "upstream_feed_url": "https://persistent.oaistatic.com/codex-app-prod/appcast.xml",
+      "candidate": {
+        "upstream_version": "26.309.31024",
+        "upstream_build": null,
+        "published_at_utc": "Wed, 11 Mar 2026 22:38:16 +0000",
+        "title": "26.309.31024",
+        "download_url": "https://persistent.oaistatic.com/codex-app-prod/Codex-darwin-arm64-26.309.31024.zip",
+        "release_notes_url": null,
+        "fingerprint": "26.309.31024||Wed, 11 Mar 2026 22:38:16 +0000|https://persistent.oaistatic.com/codex-app-prod/Codex-darwin-arm64-26.309.31024.zip"
+      },
+      "deterministic": {
+        "decision": "defer",
+        "reason": "no-relevant-upstream-signals",
+        "matched_areas": [],
+        "area_hits": {},
+        "hard_block_hits": [],
+        "critical_hit_areas": [],
+        "critical_needed": false
+      },
+      "ai_triage": null,
+      "ai_triage_error": null,
+      "final_decision": {
+        "decision": "defer",
+        "reason": "deterministic:no-relevant-upstream-signals"
+      },
+      "phase_one_critical": false,
+      "phase_two_required": false,
+      "phase_two_issue": {
+        "attempted": false,
+        "skipped_reason": "phase-two-not-required"
+      },
+      "checks_ok": true,
+      "check_results": [],
+      "ai_apply": null,
+      "promoted": false
+    }
+  ]
+}

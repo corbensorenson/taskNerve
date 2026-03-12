@@ -1,0 +1,78 @@
+{
+  "schema_version": "tasknerve.update_interceptor_policy.v1",
+  "updated_at_utc": "2026-03-12T00:00:00Z",
+  "upstream_feed_url": "https://persistent.oaistatic.com/codex-app-prod/appcast.xml",
+  "tasknerve_appcast_url": "https://raw.githubusercontent.com/adimus/taskNerve/main/taskNerve/update/appcast.xml",
+  "ai": {
+    "enabled": true,
+    "model": "gpt-5.3-codex",
+    "min_confidence": 0.6,
+    "timeout_seconds": 360,
+    "auto_apply_enabled": true,
+    "apply_timeout_seconds": 1800
+  },
+  "decision": {
+    "required_review_areas": [
+      "protocol",
+      "threads",
+      "models",
+      "auth",
+      "filesystem",
+      "updater",
+      "runtime"
+    ],
+    "critical_areas": [
+      "protocol",
+      "threads",
+      "models",
+      "auth",
+      "filesystem",
+      "updater",
+      "runtime"
+    ],
+    "hard_block_terms": [
+      "breaking change",
+      "incompatible",
+      "protocol migration",
+      "unsupported client"
+    ],
+    "auto_promote_on_pass": true,
+    "phase_two_requires_owner_approval": true,
+    "max_history_entries": 32
+  },
+  "checks": {
+    "base_commands": [
+      "bash ./scripts/public-release-check.sh"
+    ],
+    "area_commands": {
+      "protocol": [
+        "bash ./scripts/vigorous-e2e.sh"
+      ],
+      "threads": [
+        "bash ./scripts/vigorous-e2e.sh"
+      ],
+      "models": [
+        "bash ./scripts/vigorous-e2e.sh"
+      ],
+      "updater": [
+        "bash ./scripts/vigorous-e2e.sh"
+      ],
+      "runtime": [
+        "bash ./scripts/vigorous-e2e.sh"
+      ]
+    },
+    "ai_recommended_command_aliases": {
+      "release_check": "bash ./scripts/public-release-check.sh",
+      "e2e": "bash ./scripts/vigorous-e2e.sh"
+    }
+  },
+  "issues": {
+    "enabled": true,
+    "repo": "adimus/taskNerve",
+    "labels": [
+      "update-interceptor",
+      "non-critical"
+    ],
+    "assignees": []
+  }
+}

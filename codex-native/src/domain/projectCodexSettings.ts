@@ -110,6 +110,12 @@ export function defaultProjectCodexSettings(options: {
     trace_capture_agents: true,
     trace_include_message_content: true,
     trace_max_content_chars: 16_000,
+    self_improvement_enabled: true,
+    self_improvement_auto_dispatch_enabled: true,
+    self_improvement_max_tasks_per_run: 2,
+    self_improvement_open_task_limit: 6,
+    self_improvement_dispatch_cooldown_minutes: 45,
+    self_improvement_last_dispatch_at_utc: null,
     issues_sync_enabled: true,
     issues_auto_task_enabled: false,
     issues_auto_approve_trusted: false,
@@ -238,6 +244,41 @@ export function normalizeProjectCodexSettings(
     trace_max_content_chars: Math.min(
       200_000,
       normalizeInt(value.trace_max_content_chars, defaults.trace_max_content_chars, 1),
+    ),
+    self_improvement_enabled: normalizeBoolean(
+      value.self_improvement_enabled,
+      defaults.self_improvement_enabled,
+    ),
+    self_improvement_auto_dispatch_enabled: normalizeBoolean(
+      value.self_improvement_auto_dispatch_enabled,
+      defaults.self_improvement_auto_dispatch_enabled,
+    ),
+    self_improvement_max_tasks_per_run: Math.min(
+      16,
+      normalizeInt(
+        value.self_improvement_max_tasks_per_run,
+        defaults.self_improvement_max_tasks_per_run,
+        1,
+      ),
+    ),
+    self_improvement_open_task_limit: Math.min(
+      64,
+      normalizeInt(
+        value.self_improvement_open_task_limit,
+        defaults.self_improvement_open_task_limit,
+        1,
+      ),
+    ),
+    self_improvement_dispatch_cooldown_minutes: Math.min(
+      2_880,
+      normalizeInt(
+        value.self_improvement_dispatch_cooldown_minutes,
+        defaults.self_improvement_dispatch_cooldown_minutes,
+        0,
+      ),
+    ),
+    self_improvement_last_dispatch_at_utc: normalizeOptionalText(
+      value.self_improvement_last_dispatch_at_utc,
     ),
     issues_sync_enabled: normalizeBoolean(value.issues_sync_enabled, defaults.issues_sync_enabled),
     issues_auto_task_enabled: normalizeBoolean(

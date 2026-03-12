@@ -17,6 +17,7 @@ Use this skill when any of the following are true:
 - The user wants to ingest external issue streams (for example GitHub issues) into TaskNerve with review gates.
 - The user wants TaskNerve Discord bridge behavior managed (webhook updates, mute policy, inbound relay).
 - The user wants project-level TaskNerve settings adjusted.
+- The user wants TaskNerve update interceptor behavior managed (critical fast updates, phase-two review issues, channel state).
 - The user wants project docs (`project_goals.md`, `project_manifest.md`, `contributing_ideas.md`, `levers_pitfalls.md`, `research.md`, `taskNerve/creating_project_skill.md`, `taskNerve/using_project_skill.md`) kept aligned with active work.
 - The user wants day-to-day TaskNerve operation, triage, and orchestration.
 
@@ -64,6 +65,7 @@ The controller should:
 - operate issue intake with safety: candidate queue first, then approve/reject before promotion into tasks
 - keep worker threads fed without building prompt backlogs
 - alternate development and maintenance/debt-reduction passes according to project policy
+- run deterministic self-improvement passes based on runtime signals (watchdog resets, quality-gate blocks, git-sync instability) with bounded cadence
 - break work into mostly xs/s tasks by default; split anything broad until each task has clear, verifiable done conditions
 - use a structured task template so workers have enough context to execute without ambiguity:
   - `title`

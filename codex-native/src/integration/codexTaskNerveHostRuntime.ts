@@ -43,12 +43,21 @@ import {
   type CodexProjectTraceSyncResult,
 } from "./codexProjectTrace.js";
 import {
+  runCodexAgentWatchdog,
+  type CodexAgentWatchdogPolicy,
+  type CodexAgentWatchdogRunResult,
+} from "./codexAgentWatchdog.js";
+import {
   resolveModelTransportPlan,
   startTurnWithResolvedModelTransport,
   type CodexModelTransportExecution,
   type CodexModelTransportMode,
   type CodexModelTransportPlan,
 } from "./modelTransport.js";
+import {
+  escalateGitIssuesToController,
+  type GitIssueSignal,
+} from "./codexGitIssueRemediation.js";
 import { createTaskNerveService, type TaskNerveService } from "./taskNerveService.js";
 import type {
   BuildThreadDisplayOptions,
@@ -59,6 +68,36 @@ import {
   projectTracePath,
   timelineProjectTraceStatePath,
 } from "../io/paths.js";
+import {
+  getCachedMapValue,
+  hasConversationChromeOverrides,
+  normalizeHostSubscriptionDisposer,
+  parseAgentIds,
+  parseBranchState,
+  parseBranchStatePatch,
+  parseOpenState,
+  parseOpenStateMaybe,
+  parseResourceStats,
+  parseResourceStatsPatch,
+  parseStringArray,
+  parseTaskCount,
+  parseTaskCountMaybe,
+  parseThreadId,
+  rememberBoundedMapValue,
+  sameResourceStats,
+  sameStringArray,
+  syncTaskMarker,
+  type NormalizedBranchState,
+} from "./codexTaskNerveHostRuntime.helpers.js";
+import type {
+  CodexControllerProjectAutomationWithTraceResult,
+  CodexHostRefreshSubscription,
+  CodexProjectCiSyncRunResult,
+  CodexProjectGitSyncRunResult,
+  CodexProjectProductionRunWithTraceResult,
+  CodexRuntimeProjectTraceSyncOptions,
+  CodexTaskNerveHostRuntime,
+} from "./codexTaskNerveHostRuntime.types.js";
 
 export type {
   CodexProjectProductionRunOptions,
@@ -69,6 +108,32 @@ export type {
   CodexControllerProjectAutomationOptions,
   CodexControllerProjectAutomationResult,
 } from "./codexControllerProjectAutomation.js";
+export type {
+  CodexAgentWatchdogRunOptions,
+  CodexControllerBootstrapOptions,
+  CodexControllerBootstrapResult,
+  CodexControllerProjectAutomationWithTraceResult,
+  CodexConversationChromeAction,
+  CodexConversationChromeActionResult,
+  CodexConversationChromeRefreshEvent,
+  CodexConversationChromeRefreshSource,
+  CodexHostRefreshSubscription,
+  CodexModelTransportSnapshot,
+  CodexProjectCiSyncRunOptions,
+  CodexProjectCiSyncRunResult,
+  CodexProjectCiSyncSnapshotOptions,
+  CodexProjectGitSyncRunOptions,
+  CodexProjectGitSyncRunResult,
+  CodexProjectGitSyncSnapshotOptions,
+  CodexProjectProductionRunWithTraceResult,
+  CodexRuntimeProjectTraceSyncOptions,
+  CodexTaskNerveHostRuntime,
+  CodexTaskNerveSnapshot,
+  CodexTaskNerveSnapshotOptions,
+  ObserveConversationChromeRefreshOptions,
+  ObserveRepositorySettingsRefreshOptions,
+  ObserveThreadRefreshOptions,
+} from "./codexTaskNerveHostRuntime.types.js";
 
 const HOST_STYLING_CONTEXT_CACHE_TTL_MS = 10_000;
 const CONVERSATION_CHROME_CACHE_TTL_MS = 250;
@@ -77,686 +142,9 @@ const RESOURCE_STATS_CACHE_TTL_MS = 1_000;
 const PROJECT_GIT_STATE_CACHE_TTL_MS = 2_500;
 const PROJECT_CI_FAILURE_CACHE_TTL_MS = 7_500;
 const PROJECT_CI_AGENT_CACHE_TTL_MS = 2_500;
+const PROJECT_TRACE_SYNC_CACHE_TTL_MS = 3_000;
 const PROJECT_STATE_CACHE_MAX_ENTRIES = 256;
 const PROJECT_CI_FAILURE_FETCH_LIMIT = 256;
-
-export interface CodexTaskNerveSnapshotOptions {
-  repoRoot: string;
-  projectName: string;
-  tasks: Partial<TaskRecord>[];
-  search?: string;
-  gitOriginUrl?: string | null;
-}
-
-export interface CodexTaskNerveSnapshot {
-  integration_mode: "codex-native-host";
-  styling: {
-    inherit_codex_host: true;
-    render_mode: "host-components-only";
-  };
-  host_styling_context: unknown;
-  project_name: string;
-  repo_root: string;
-  settings: ProjectCodexSettings;
-  task_snapshot: ReturnType<TaskNerveService["taskSnapshot"]>;
-}
-
-export interface CodexControllerBootstrapOptions {
-  repoRoot: string;
-  projectName: string;
-  projectGoalsPath?: string;
-  projectManifestPath?: string;
-  currentStateSignals?: string[];
-  timelineSignals?: string[];
-  queueSummary?: string;
-  maintenanceCadence?: string;
-  heartbeatCore?: string | null;
-  lowQueuePrompt?: string;
-  threadTitle?: string;
-}
-
-export interface CodexControllerBootstrapResult {
-  integration_mode: "codex-native-host";
-  thread_id: string;
-  thread_title: string;
-  controller_model: string | null;
-  prompt: string;
-  model_transport: {
-    requested_mode: CodexModelTransportPlan["requested_mode"];
-    resolved_mode: CodexModelTransportPlan["resolved_mode"];
-    executed_mode: CodexModelTransportExecution["executed_mode"];
-    websocket_available: boolean;
-    fallback_reason: string | null;
-    fell_back_to_http: boolean;
-    websocket_error: string | null;
-  };
-}
-
-export interface CodexModelTransportSnapshot {
-  integration_mode: "codex-native-host";
-  requested_mode: CodexModelTransportPlan["requested_mode"];
-  resolved_mode: CodexModelTransportPlan["resolved_mode"];
-  websocket_available: boolean;
-  fallback_reason: string | null;
-}
-
-export interface CodexProjectGitSyncSnapshotOptions {
-  repoRoot: string;
-  tasks?: Partial<TaskRecord>[];
-  nowIsoUtc?: string | null;
-  gitState?: unknown;
-}
-
-export interface CodexProjectGitSyncRunOptions {
-  repoRoot: string;
-  tasks?: Partial<TaskRecord>[];
-  mode?: "smart" | "pull" | "push";
-  autostash?: boolean;
-  force?: boolean;
-  autoSwitchPreferredBranch?: boolean;
-  nowIsoUtc?: string | null;
-}
-
-export interface CodexProjectGitSyncRunResult {
-  integration_mode: "codex-native-host";
-  mode: "smart" | "pull" | "push";
-  executed: {
-    pull: boolean;
-    push: boolean;
-  };
-  plan_reason: ReturnType<typeof planCodexProjectGitSync>["reason"];
-  before: ProjectGitSyncSnapshot;
-  after: ProjectGitSyncSnapshot;
-  warnings: string[];
-}
-
-export interface CodexProjectCiSyncSnapshotOptions {
-  repoRoot: string;
-  tasks?: Partial<TaskRecord>[];
-  ciFailures?: unknown;
-  availableAgentIds?: string[];
-  nowIsoUtc?: string | null;
-}
-
-export interface CodexProjectCiSyncRunOptions {
-  repoRoot: string;
-  tasks?: Partial<TaskRecord>[];
-  ciFailures?: unknown;
-  availableAgentIds?: string[];
-  persistTasks?: boolean;
-  dispatch?: boolean;
-  nowIsoUtc?: string | null;
-}
-
-export interface CodexProjectCiSyncRunResult {
-  integration_mode: "codex-native-host";
-  before: ProjectCiTaskSyncPlan;
-  settings: ProjectCodexSettings;
-  persisted_task_upserts: number;
-  dispatched_task_ids: string[];
-  warnings: string[];
-}
-
-export interface CodexRuntimeProjectTraceSyncOptions {
-  repoRoot: string;
-  projectName?: string | null;
-  settings?: Partial<ProjectCodexSettings>;
-  threadsPayload?: unknown;
-  nowIsoUtc?: string | null;
-  force?: boolean;
-}
-
-export interface CodexProjectProductionRunWithTraceResult
-  extends CodexProjectProductionRunResult {
-  trace_sync: CodexProjectTraceSyncResult;
-}
-
-export interface CodexControllerProjectAutomationWithTraceResult
-  extends CodexControllerProjectAutomationResult {
-  trace_sync: CodexProjectTraceSyncResult;
-}
-
-export type CodexConversationChromeAction =
-  | { type: "topbar-task-count-click" }
-  | { type: "topbar-import-project-click" }
-  | { type: "topbar-new-project-click" }
-  | { type: "footer-terminal-toggle-click" }
-  | { type: "footer-branch-switch"; branch: string };
-
-export interface CodexConversationChromeActionResult {
-  ok: boolean;
-  integration_mode: "codex-native-host";
-  action: CodexConversationChromeAction["type"];
-  task_drawer_open?: boolean;
-  terminal_open?: boolean;
-  branch?: string;
-  error?: string;
-}
-
-export interface CodexHostRefreshSubscription {
-  mode: "host-event-subscription" | "fallback-manual-refresh";
-  dispose: () => void;
-}
-
-export interface ObserveThreadRefreshOptions {
-  threadId?: string | null;
-  onEvent: (event: unknown) => void;
-  onFallbackRefresh?: () => void;
-}
-
-export interface ObserveRepositorySettingsRefreshOptions {
-  onEvent: (event: unknown) => void;
-  onFallbackRefresh?: () => void;
-}
-
-export type CodexConversationChromeRefreshSource =
-  | "task-count"
-  | "task-drawer"
-  | "terminal-panel"
-  | "branch-state"
-  | "resource-stats";
-
-export interface CodexConversationChromeRefreshEvent {
-  source: CodexConversationChromeRefreshSource;
-  payload: unknown;
-}
-
-export interface ObserveConversationChromeRefreshOptions {
-  onEvent: (event: CodexConversationChromeRefreshEvent) => void;
-  onFallbackRefresh?: () => void;
-}
-
-export interface CodexTaskNerveHostRuntime {
-  snapshot: (options: CodexTaskNerveSnapshotOptions) => Promise<CodexTaskNerveSnapshot>;
-  bootstrapControllerThread: (
-    options: CodexControllerBootstrapOptions,
-  ) => Promise<CodexControllerBootstrapResult>;
-  projectGitSyncSnapshot: (
-    options: CodexProjectGitSyncSnapshotOptions,
-  ) => Promise<ProjectGitSyncSnapshot>;
-  syncProjectGit: (options: CodexProjectGitSyncRunOptions) => Promise<CodexProjectGitSyncRunResult>;
-  projectCiSyncSnapshot: (
-    options: CodexProjectCiSyncSnapshotOptions,
-  ) => Promise<ProjectCiTaskSyncPlan>;
-  syncProjectCi: (options: CodexProjectCiSyncRunOptions) => Promise<CodexProjectCiSyncRunResult>;
-  syncProjectTrace: (
-    options: CodexRuntimeProjectTraceSyncOptions,
-  ) => Promise<CodexProjectTraceSyncResult>;
-  projectProductionSnapshot: (
-    options: CodexProjectProductionSnapshotOptions,
-  ) => Promise<CodexProjectProductionSnapshot>;
-  syncProjectProduction: (
-    options: CodexProjectProductionRunOptions,
-  ) => Promise<CodexProjectProductionRunWithTraceResult>;
-  controllerProjectAutomation: (
-    options: CodexControllerProjectAutomationOptions,
-  ) => Promise<CodexControllerProjectAutomationWithTraceResult>;
-  conversationDisplaySnapshot: (
-    options: CodexConversationDisplayOptions,
-  ) => Promise<CodexConversationDisplaySnapshot>;
-  conversationInteractionStep: (
-    input: CodexConversationInteractionInput,
-  ) => Promise<CodexConversationInteractionResult>;
-  applyConversationInteraction: (
-    input: CodexConversationInteractionInput,
-  ) => Promise<
-    CodexConversationInteractionResult & {
-      apply_summary: {
-        applied: number;
-        skipped: number;
-      };
-    }
-  >;
-  threadDisplaySnapshot: (options: BuildThreadDisplayOptions) => Promise<ThreadDisplaySnapshot>;
-  conversationChromeSnapshot: (
-    options?: CodexConversationChromeStateInput,
-  ) => Promise<CodexConversationChromeSnapshot>;
-  handleConversationChromeAction: (
-    action: CodexConversationChromeAction,
-  ) => Promise<CodexConversationChromeActionResult>;
-  observeThreadRefresh: (
-    options: ObserveThreadRefreshOptions,
-  ) => Promise<CodexHostRefreshSubscription>;
-  observeRepositorySettingsRefresh: (
-    options: ObserveRepositorySettingsRefreshOptions,
-  ) => Promise<CodexHostRefreshSubscription>;
-  observeConversationChromeRefresh: (
-    options: ObserveConversationChromeRefreshOptions,
-  ) => Promise<CodexHostRefreshSubscription>;
-  modelTransportSnapshot: () => CodexModelTransportSnapshot;
-}
-
-interface NormalizedBranchState {
-  currentBranch: string | null;
-  branches: string[];
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-  return value as Record<string, unknown>;
-}
-
-function parseThreadId(value: unknown): string | null {
-  const payload = asRecord(value);
-  if (!payload) {
-    return null;
-  }
-  const direct = payload.thread_id;
-  if (typeof direct === "string" && direct.trim()) {
-    return direct;
-  }
-  const camel = payload.threadId;
-  if (typeof camel === "string" && camel.trim()) {
-    return camel;
-  }
-  const nested = asRecord(payload.thread);
-  if (nested) {
-    if (typeof nested.id === "string" && nested.id.trim()) {
-      return nested.id;
-    }
-    if (typeof nested.thread_id === "string" && nested.thread_id.trim()) {
-      return nested.thread_id;
-    }
-  }
-  const id = payload.id;
-  return typeof id === "string" && id.trim() ? id : null;
-}
-
-function parseTaskCount(value: unknown): number {
-  if (Number.isFinite(value)) {
-    return Math.max(0, Math.round(Number(value)));
-  }
-  if (Array.isArray(value)) {
-    return value.length;
-  }
-  const record = asRecord(value);
-  if (!record) {
-    return 0;
-  }
-  const candidates = [
-    record.taskCount,
-    record.task_count,
-    record.pendingTaskCount,
-    record.pending_task_count,
-    record.count,
-  ];
-  for (const candidate of candidates) {
-    if (Number.isFinite(candidate)) {
-      return Math.max(0, Math.round(Number(candidate)));
-    }
-  }
-  return 0;
-}
-
-function parseTaskCountMaybe(value: unknown): number | null {
-  if (Number.isFinite(value)) {
-    return Math.max(0, Math.round(Number(value)));
-  }
-  if (Array.isArray(value)) {
-    return value.length;
-  }
-  const record = asRecord(value);
-  if (!record) {
-    return null;
-  }
-  const candidates = [
-    record.taskCount,
-    record.task_count,
-    record.pendingTaskCount,
-    record.pending_task_count,
-    record.count,
-  ];
-  for (const candidate of candidates) {
-    if (Number.isFinite(candidate)) {
-      return Math.max(0, Math.round(Number(candidate)));
-    }
-  }
-  return null;
-}
-
-function parseOpenState(value: unknown, fallback = false): boolean {
-  if (typeof value === "boolean") {
-    return value;
-  }
-  const record = asRecord(value);
-  if (!record) {
-    return fallback;
-  }
-  const candidates = [record.open, record.isOpen, record.drawer_open, record.task_drawer_open];
-  for (const candidate of candidates) {
-    if (typeof candidate === "boolean") {
-      return candidate;
-    }
-  }
-  return fallback;
-}
-
-function parseOpenStateMaybe(value: unknown): boolean | null {
-  if (typeof value === "boolean") {
-    return value;
-  }
-  const record = asRecord(value);
-  if (!record) {
-    return null;
-  }
-  const candidates = [record.open, record.isOpen, record.drawer_open, record.task_drawer_open];
-  for (const candidate of candidates) {
-    if (typeof candidate === "boolean") {
-      return candidate;
-    }
-  }
-  return null;
-}
-
-function parseBranchState(value: unknown): NormalizedBranchState {
-  if (Array.isArray(value)) {
-    const branches = value
-      .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
-      .filter(Boolean);
-    return {
-      currentBranch: branches[0] || null,
-      branches,
-    };
-  }
-
-  const record = asRecord(value);
-  if (!record) {
-    return { currentBranch: null, branches: [] };
-  }
-
-  const rawBranches = Array.isArray(record.branches)
-    ? record.branches
-    : Array.isArray(record.branchNames)
-      ? record.branchNames
-      : [];
-  const branches = rawBranches
-    .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
-    .filter(Boolean);
-
-  const currentCandidates = [
-    record.current,
-    record.currentBranch,
-    record.current_branch,
-    record.activeBranch,
-    record.active_branch,
-  ];
-  const currentBranch =
-    currentCandidates.find((entry) => typeof entry === "string" && entry.trim()) as
-      | string
-      | undefined;
-
-  return {
-    currentBranch: currentBranch?.trim() || branches[0] || null,
-    branches,
-  };
-}
-
-function parseBranchStatePatch(value: unknown): Partial<NormalizedBranchState> | null {
-  if (Array.isArray(value)) {
-    const branches = value
-      .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
-      .filter(Boolean);
-    return {
-      currentBranch: branches[0] || null,
-      branches,
-    };
-  }
-
-  const record = asRecord(value);
-  if (!record) {
-    return null;
-  }
-
-  let branches: string[] | undefined;
-  if (Array.isArray(record.branches)) {
-    branches = record.branches
-      .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
-      .filter(Boolean);
-  } else if (Array.isArray(record.branchNames)) {
-    branches = record.branchNames
-      .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
-      .filter(Boolean);
-  }
-
-  let currentBranch: string | null | undefined;
-  const currentCandidates = [
-    record.current,
-    record.currentBranch,
-    record.current_branch,
-    record.activeBranch,
-    record.active_branch,
-  ];
-  for (const candidate of currentCandidates) {
-    if (typeof candidate === "string") {
-      const normalized = candidate.trim();
-      currentBranch = normalized || null;
-      break;
-    }
-  }
-
-  if (branches === undefined && currentBranch === undefined) {
-    return null;
-  }
-
-  const patch: Partial<NormalizedBranchState> = {};
-  if (branches !== undefined) {
-    patch.branches = branches;
-    if (currentBranch === undefined) {
-      patch.currentBranch = branches[0] || null;
-    }
-  }
-  if (currentBranch !== undefined) {
-    patch.currentBranch = currentBranch;
-  }
-  return patch;
-}
-
-function parseStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return [...new Set(value.map((entry) => String(entry || "").trim()).filter(Boolean))];
-}
-
-function parseAgentIds(value: unknown): string[] {
-  if (Array.isArray(value)) {
-    return parseStringArray(value);
-  }
-  const record = asRecord(value);
-  if (!record) {
-    return [];
-  }
-
-  const candidateArrays = [record.agent_ids, record.agentIds, record.agents, record.workers];
-  for (const candidate of candidateArrays) {
-    if (!Array.isArray(candidate)) {
-      continue;
-    }
-    const normalized = candidate
-      .map((entry) => {
-        if (typeof entry === "string") {
-          return entry.trim();
-        }
-        const asEntryRecord = asRecord(entry);
-        if (!asEntryRecord) {
-          return "";
-        }
-        const idCandidates = [asEntryRecord.id, asEntryRecord.agent_id, asEntryRecord.agentId];
-        for (const id of idCandidates) {
-          if (typeof id === "string" && id.trim()) {
-            return id.trim();
-          }
-        }
-        return "";
-      })
-      .filter(Boolean);
-    if (normalized.length > 0) {
-      return [...new Set(normalized)];
-    }
-  }
-
-  return [];
-}
-
-function parseResourceStats(value: unknown): Partial<CodexConversationChromeResourceStats> {
-  const record = asRecord(value);
-  if (!record) {
-    return {};
-  }
-  return {
-    cpuPercent: Number.isFinite(record.cpuPercent)
-      ? Number(record.cpuPercent)
-      : Number.isFinite(record.cpu_percent)
-        ? Number(record.cpu_percent)
-        : null,
-    gpuPercent: Number.isFinite(record.gpuPercent)
-      ? Number(record.gpuPercent)
-      : Number.isFinite(record.gpu_percent)
-        ? Number(record.gpu_percent)
-        : null,
-    memoryPercent: Number.isFinite(record.memoryPercent)
-      ? Number(record.memoryPercent)
-      : Number.isFinite(record.memory_percent)
-        ? Number(record.memory_percent)
-        : null,
-    thermalPressure:
-      typeof record.thermalPressure === "string" && record.thermalPressure.trim()
-        ? record.thermalPressure.trim()
-        : typeof record.thermal_pressure === "string" && record.thermal_pressure.trim()
-          ? record.thermal_pressure.trim()
-          : null,
-    capturedAtUtc:
-      typeof record.capturedAtUtc === "string" && record.capturedAtUtc.trim()
-        ? record.capturedAtUtc.trim()
-        : typeof record.captured_at_utc === "string" && record.captured_at_utc.trim()
-          ? record.captured_at_utc.trim()
-          : null,
-  };
-}
-
-function parseResourceStatsPatch(
-  value: unknown,
-): Partial<CodexConversationChromeResourceStats> | null {
-  const record = asRecord(value);
-  if (!record) {
-    return null;
-  }
-
-  const patch: Partial<CodexConversationChromeResourceStats> = {};
-
-  if ("cpuPercent" in record || "cpu_percent" in record) {
-    const candidate = record.cpuPercent ?? record.cpu_percent;
-    patch.cpuPercent = Number.isFinite(candidate) ? Number(candidate) : null;
-  }
-  if ("gpuPercent" in record || "gpu_percent" in record) {
-    const candidate = record.gpuPercent ?? record.gpu_percent;
-    patch.gpuPercent = Number.isFinite(candidate) ? Number(candidate) : null;
-  }
-  if ("memoryPercent" in record || "memory_percent" in record) {
-    const candidate = record.memoryPercent ?? record.memory_percent;
-    patch.memoryPercent = Number.isFinite(candidate) ? Number(candidate) : null;
-  }
-  if ("thermalPressure" in record || "thermal_pressure" in record) {
-    const candidate = record.thermalPressure ?? record.thermal_pressure;
-    patch.thermalPressure =
-      typeof candidate === "string" && candidate.trim() ? candidate.trim() : null;
-  }
-  if ("capturedAtUtc" in record || "captured_at_utc" in record) {
-    const candidate = record.capturedAtUtc ?? record.captured_at_utc;
-    patch.capturedAtUtc = typeof candidate === "string" && candidate.trim() ? candidate.trim() : null;
-  }
-
-  return Object.keys(patch).length > 0 ? patch : null;
-}
-
-function sameStringArray(left: string[] | undefined, right: string[] | undefined): boolean {
-  if (left === right) {
-    return true;
-  }
-  if (!left || !right) {
-    return !left && !right;
-  }
-  if (left.length !== right.length) {
-    return false;
-  }
-  for (let index = 0; index < left.length; index += 1) {
-    if (left[index] !== right[index]) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function sameResourceStats(
-  left: Partial<CodexConversationChromeResourceStats> | null | undefined,
-  right: Partial<CodexConversationChromeResourceStats> | null | undefined,
-): boolean {
-  return (
-    (left?.cpuPercent ?? undefined) === (right?.cpuPercent ?? undefined) &&
-    (left?.gpuPercent ?? undefined) === (right?.gpuPercent ?? undefined) &&
-    (left?.memoryPercent ?? undefined) === (right?.memoryPercent ?? undefined) &&
-    (left?.thermalPressure ?? undefined) === (right?.thermalPressure ?? undefined) &&
-    (left?.capturedAtUtc ?? undefined) === (right?.capturedAtUtc ?? undefined)
-  );
-}
-
-function normalizeHostSubscriptionDisposer(value: CodexHostSubscription | void): () => void {
-  if (typeof value === "function") {
-    return value;
-  }
-  if (!value || typeof value !== "object") {
-    return () => {};
-  }
-  if ("dispose" in value && typeof value.dispose === "function") {
-    return () => value.dispose();
-  }
-  if ("unsubscribe" in value && typeof value.unsubscribe === "function") {
-    return () => value.unsubscribe();
-  }
-  return () => {};
-}
-
-function hasConversationChromeOverrides(input: CodexConversationChromeStateInput): boolean {
-  return (
-    input.taskCount !== undefined ||
-    input.taskDrawerOpen !== undefined ||
-    input.terminalOpen !== undefined ||
-    input.currentBranch !== undefined ||
-    input.branches !== undefined ||
-    input.resourceStats !== undefined
-  );
-}
-
-function getCachedMapValue<Key, Value>(map: Map<Key, Value>, key: Key): Value | null {
-  if (!map.has(key)) {
-    return null;
-  }
-  const value = map.get(key)!;
-  // Promote the accessed key to keep active repos hot under bounded cache limits.
-  map.delete(key);
-  map.set(key, value);
-  return value;
-}
-
-function rememberBoundedMapValue<Key, Value>(
-  map: Map<Key, Value>,
-  key: Key,
-  value: Value,
-  limit: number,
-) {
-  if (map.has(key)) {
-    map.delete(key);
-  }
-  map.set(key, value);
-  if (map.size > limit) {
-    const oldestKey = map.keys().next().value;
-    if (oldestKey !== undefined) {
-      map.delete(oldestKey);
-    }
-  }
-}
 
 export function createCodexTaskNerveHostRuntime(options: {
   host: Partial<CodexHostServices> | null | undefined;
@@ -811,6 +199,7 @@ export function createCodexTaskNerveHostRuntime(options: {
     }
   >();
   const projectGitStateInflight = new Map<string, Promise<unknown>>();
+  const projectGitSyncInflight = new Map<string, Promise<CodexProjectGitSyncRunResult>>();
   const projectCiFailureCache = new Map<
     string,
     {
@@ -819,6 +208,23 @@ export function createCodexTaskNerveHostRuntime(options: {
     }
   >();
   const projectCiFailureInflight = new Map<string, Promise<unknown>>();
+  const projectCiSyncInflight = new Map<string, Promise<CodexProjectCiSyncRunResult>>();
+  const projectTraceSyncCache = new Map<
+    string,
+    {
+      result: CodexProjectTraceSyncResult;
+      fetchedAtMs: number;
+    }
+  >();
+  const projectTraceSyncInflight = new Map<string, Promise<CodexProjectTraceSyncResult>>();
+  const projectProductionSyncInflight = new Map<
+    string,
+    Promise<CodexProjectProductionRunWithTraceResult>
+  >();
+  const controllerProjectAutomationInflight = new Map<
+    string,
+    Promise<CodexControllerProjectAutomationWithTraceResult>
+  >();
   let projectCiAgentCache: {
     value: string[];
     fetchedAtMs: number;
@@ -1507,38 +913,91 @@ export function createCodexTaskNerveHostRuntime(options: {
     });
   }
 
+  function traceSyncDedupeKey(
+    traceOptions: CodexRuntimeProjectTraceSyncOptions,
+  ): string | null {
+    const repoRoot = traceOptions.repoRoot.trim();
+    if (!repoRoot) {
+      return null;
+    }
+    if (traceOptions.threadsPayload !== undefined || traceOptions.settings !== undefined) {
+      return null;
+    }
+    return `${repoRoot}::${traceOptions.projectName ?? ""}`;
+  }
+
   async function syncProjectTraceSafe(
     traceOptions: CodexRuntimeProjectTraceSyncOptions,
   ): Promise<CodexProjectTraceSyncResult> {
+    const dedupeKey = traceSyncDedupeKey(traceOptions);
+    const cacheEligible = !!dedupeKey && traceOptions.force !== true;
+    const now = Date.now();
+    if (cacheEligible && dedupeKey) {
+      const cached = getCachedMapValue(projectTraceSyncCache, dedupeKey);
+      if (cached && now - cached.fetchedAtMs < PROJECT_TRACE_SYNC_CACHE_TTL_MS) {
+        return cached.result;
+      }
+    }
+    if (dedupeKey) {
+      const inflight = projectTraceSyncInflight.get(dedupeKey);
+      if (inflight) {
+        return inflight;
+      }
+    }
+
+    const run: Promise<CodexProjectTraceSyncResult> = (async (): Promise<CodexProjectTraceSyncResult> => {
+      try {
+        return await syncProjectTraceStrict(traceOptions);
+      } catch (error) {
+        const fallbackSettings = taskNerve.normalizeProjectSettings(traceOptions.settings ?? {});
+        const syncedAtUtc = traceOptions.nowIsoUtc ?? nowIsoUtc();
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          integration_mode: "codex-native-host",
+          repo_root: traceOptions.repoRoot,
+          project_name: traceOptions.projectName ?? null,
+          enabled: false,
+          reason: "disabled",
+          trace_path: projectTracePath(traceOptions.repoRoot),
+          manifest_path: projectTraceManifestPath(traceOptions.repoRoot),
+          state_path: timelineProjectTraceStatePath(traceOptions.repoRoot),
+          threads_seen: 0,
+          threads_in_scope: 0,
+          entries_seen: 0,
+          entries_appended: 0,
+          total_entries_written: 0,
+          trace_settings: {
+            capture_controller: fallbackSettings.trace_capture_controller,
+            capture_agents: fallbackSettings.trace_capture_agents,
+            include_message_content: fallbackSettings.trace_include_message_content,
+            max_content_chars: fallbackSettings.trace_max_content_chars,
+          },
+          synced_at_utc: syncedAtUtc,
+          warnings: [`Trace sync failed: ${message}`],
+        };
+      }
+    })();
+
+    if (!dedupeKey) {
+      return run;
+    }
+    projectTraceSyncInflight.set(dedupeKey, run);
     try {
-      return await syncProjectTraceStrict(traceOptions);
-    } catch (error) {
-      const fallbackSettings = taskNerve.normalizeProjectSettings(traceOptions.settings ?? {});
-      const syncedAtUtc = traceOptions.nowIsoUtc ?? nowIsoUtc();
-      const message = error instanceof Error ? error.message : String(error);
-      return {
-        integration_mode: "codex-native-host",
-        repo_root: traceOptions.repoRoot,
-        project_name: traceOptions.projectName ?? null,
-        enabled: false,
-        reason: "disabled",
-        trace_path: projectTracePath(traceOptions.repoRoot),
-        manifest_path: projectTraceManifestPath(traceOptions.repoRoot),
-        state_path: timelineProjectTraceStatePath(traceOptions.repoRoot),
-        threads_seen: 0,
-        threads_in_scope: 0,
-        entries_seen: 0,
-        entries_appended: 0,
-        total_entries_written: 0,
-        trace_settings: {
-          capture_controller: fallbackSettings.trace_capture_controller,
-          capture_agents: fallbackSettings.trace_capture_agents,
-          include_message_content: fallbackSettings.trace_include_message_content,
-          max_content_chars: fallbackSettings.trace_max_content_chars,
-        },
-        synced_at_utc: syncedAtUtc,
-        warnings: [`Trace sync failed: ${message}`],
-      };
+      const result = await run;
+      if (cacheEligible) {
+        rememberBoundedMapValue(
+          projectTraceSyncCache,
+          dedupeKey,
+          {
+            result,
+            fetchedAtMs: Date.now(),
+          },
+          PROJECT_STATE_CACHE_MAX_ENTRIES,
+        );
+      }
+      return result;
+    } finally {
+      projectTraceSyncInflight.delete(dedupeKey);
     }
   }
 
@@ -1592,16 +1051,29 @@ export function createCodexTaskNerveHostRuntime(options: {
     },
 
     syncProjectGit: async (syncOptions) => {
-      const context = await loadProjectGitSyncContext({
-        repoRoot: syncOptions.repoRoot,
-        tasks: syncOptions.tasks,
-        nowIsoUtc: syncOptions.nowIsoUtc,
-      });
-      const warnings: string[] = [];
-      let pulled = false;
-      let pushed = false;
-      let effectiveSettings = context.settings;
-      let effectiveSnapshot = context.snapshot;
+      const repoKey = syncOptions.repoRoot.trim();
+      const dedupeKey = repoKey
+        ? `${repoKey}::${syncTaskMarker(syncOptions.tasks)}::${syncOptions.mode ?? "smart"}::${syncOptions.autostash !== false ? "autostash" : "no-autostash"}::${syncOptions.force === true ? "force" : "guarded"}::${syncOptions.autoSwitchPreferredBranch !== false ? "auto-branch" : "fixed-branch"}::${syncOptions.nowIsoUtc ?? ""}`
+        : "";
+      if (repoKey) {
+        const inflight = projectGitSyncInflight.get(dedupeKey);
+        if (inflight) {
+          return inflight;
+        }
+      }
+
+      const run: Promise<CodexProjectGitSyncRunResult> = (async (): Promise<CodexProjectGitSyncRunResult> => {
+        const context = await loadProjectGitSyncContext({
+          repoRoot: syncOptions.repoRoot,
+          tasks: syncOptions.tasks,
+          nowIsoUtc: syncOptions.nowIsoUtc,
+        });
+        const warnings: string[] = [];
+        const gitIssues: GitIssueSignal[] = [];
+        let pulled = false;
+        let pushed = false;
+        let effectiveSettings = context.settings;
+        let effectiveSnapshot = context.snapshot;
 
       const preferredBranch = effectiveSnapshot.push_policy.preferred_branch;
       if (
@@ -1611,15 +1083,26 @@ export function createCodexTaskNerveHostRuntime(options: {
         effectiveSnapshot.branch_status.current_branch !== preferredBranch &&
         typeof host.switchTaskNerveBranch === "function"
       ) {
-        await host.switchTaskNerveBranch(preferredBranch);
-        invalidateProjectGitStateCache(syncOptions.repoRoot);
-        const refreshedGitState = await loadProjectGitState(syncOptions.repoRoot);
-        effectiveSnapshot = taskNerve.projectGitSyncSnapshot({
-          settings: effectiveSettings,
-          tasks: syncOptions.tasks,
-          git_state: refreshedGitState,
-          now_iso: syncOptions.nowIsoUtc ?? undefined,
-        });
+        try {
+          await host.switchTaskNerveBranch(preferredBranch);
+          invalidateProjectGitStateCache(syncOptions.repoRoot);
+          const refreshedGitState = await loadProjectGitState(syncOptions.repoRoot);
+          effectiveSnapshot = taskNerve.projectGitSyncSnapshot({
+            settings: effectiveSettings,
+            tasks: syncOptions.tasks,
+            git_state: refreshedGitState,
+            now_iso: syncOptions.nowIsoUtc ?? undefined,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          warnings.push(`Branch switch failed: ${message}`);
+          gitIssues.push({
+            key: `branch-switch-failed:${preferredBranch}`,
+            phase: "branch-switch",
+            summary: `Preferred branch switch to ${preferredBranch} failed`,
+            detail: message,
+          });
+        }
       } else if (
         syncOptions.autoSwitchPreferredBranch !== false &&
         typeof preferredBranch === "string" &&
@@ -1628,6 +1111,12 @@ export function createCodexTaskNerveHostRuntime(options: {
         typeof host.switchTaskNerveBranch !== "function"
       ) {
         warnings.push("Codex host method switchTaskNerveBranch is unavailable");
+        gitIssues.push({
+          key: `branch-switch-method-unavailable:${preferredBranch}`,
+          phase: "branch-switch",
+          summary: "Codex host method switchTaskNerveBranch is unavailable",
+          detail: `Preferred branch ${preferredBranch} could not be activated automatically`,
+        });
       }
 
       const plan = planCodexProjectGitSync({
@@ -1638,20 +1127,36 @@ export function createCodexTaskNerveHostRuntime(options: {
       if (plan.should_pull) {
         if (typeof host.pullRepository !== "function") {
           warnings.push("Codex host method pullRepository is unavailable");
+          gitIssues.push({
+            key: "pull-method-unavailable",
+            phase: "pull",
+            summary: "Codex host method pullRepository is unavailable",
+          });
         } else {
-          await host.pullRepository({
-            repoRoot: syncOptions.repoRoot,
-            autostash: syncOptions.autostash ?? true,
-          });
-          pulled = true;
-          invalidateProjectGitStateCache(syncOptions.repoRoot);
-          const refreshedGitState = await loadProjectGitState(syncOptions.repoRoot);
-          effectiveSnapshot = taskNerve.projectGitSyncSnapshot({
-            settings: effectiveSettings,
-            tasks: syncOptions.tasks,
-            git_state: refreshedGitState,
-            now_iso: syncOptions.nowIsoUtc ?? undefined,
-          });
+          try {
+            await host.pullRepository({
+              repoRoot: syncOptions.repoRoot,
+              autostash: syncOptions.autostash ?? true,
+            });
+            pulled = true;
+            invalidateProjectGitStateCache(syncOptions.repoRoot);
+            const refreshedGitState = await loadProjectGitState(syncOptions.repoRoot);
+            effectiveSnapshot = taskNerve.projectGitSyncSnapshot({
+              settings: effectiveSettings,
+              tasks: syncOptions.tasks,
+              git_state: refreshedGitState,
+              now_iso: syncOptions.nowIsoUtc ?? undefined,
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            warnings.push(`Pull failed: ${message}`);
+            gitIssues.push({
+              key: "pull-failed",
+              phase: "pull",
+              summary: "TaskNerve pull operation failed",
+              detail: message,
+            });
+          }
         }
       }
 
@@ -1666,44 +1171,111 @@ export function createCodexTaskNerveHostRuntime(options: {
 
       if (hardBlockedByPolicy) {
         warnings.push(`Push skipped: ${pushBlockedReason}`);
+        if (pushBlockedReason) {
+          gitIssues.push({
+            key: `push-blocked:${pushBlockedReason}`,
+            phase: "policy",
+            summary: `Push blocked by policy: ${pushBlockedReason}`,
+          });
+        }
+      } else if (
+        plan.reason === "smart-push-blocked" &&
+        pushBlockedReason !== null &&
+        pushBlockedReason !== "insufficient-task-volume"
+      ) {
+        warnings.push(`Git sync blocked: ${pushBlockedReason}`);
+        gitIssues.push({
+          key: `smart-push-blocked:${pushBlockedReason}`,
+          phase: "policy",
+          summary: `Smart git sync is blocked: ${pushBlockedReason}`,
+        });
       } else if (plan.should_push) {
         if (typeof host.pushRepository !== "function") {
           warnings.push("Codex host method pushRepository is unavailable");
+          gitIssues.push({
+            key: "push-method-unavailable",
+            phase: "push",
+            summary: "Codex host method pushRepository is unavailable",
+          });
         } else {
-          await host.pushRepository({
-            repoRoot: syncOptions.repoRoot,
-          });
-          pushed = true;
-          effectiveSettings = taskNerve.projectSettingsAfterGitPush({
-            settings: effectiveSettings,
-            tasks: syncOptions.tasks,
-            pushed_at_utc: syncOptions.nowIsoUtc ?? undefined,
-          });
-          await taskNerve.writeProjectSettings(syncOptions.repoRoot, effectiveSettings);
-          invalidateProjectGitStateCache(syncOptions.repoRoot);
+          try {
+            await host.pushRepository({
+              repoRoot: syncOptions.repoRoot,
+            });
+            pushed = true;
+            effectiveSettings = taskNerve.projectSettingsAfterGitPush({
+              settings: effectiveSettings,
+              tasks: syncOptions.tasks,
+              pushed_at_utc: syncOptions.nowIsoUtc ?? undefined,
+            });
+            await taskNerve.writeProjectSettings(syncOptions.repoRoot, effectiveSettings);
+            invalidateProjectGitStateCache(syncOptions.repoRoot);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            warnings.push(`Push failed: ${message}`);
+            gitIssues.push({
+              key: "push-failed",
+              phase: "push",
+              summary: "TaskNerve push operation failed",
+              detail: message,
+            });
+          }
         }
       }
 
-      const afterGitState = await loadProjectGitState(syncOptions.repoRoot);
+      let afterGitState: unknown = null;
+      try {
+        afterGitState = await loadProjectGitState(syncOptions.repoRoot);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        warnings.push(`Failed to read repository git state: ${message}`);
+        gitIssues.push({
+          key: "git-state-read-failed",
+          phase: "policy",
+          summary: "TaskNerve could not refresh repository git state after sync",
+          detail: message,
+        });
+      }
       const after = taskNerve.projectGitSyncSnapshot({
         settings: effectiveSettings,
         tasks: syncOptions.tasks,
         git_state: afterGitState,
         now_iso: syncOptions.nowIsoUtc ?? undefined,
       });
+      const remediation = await escalateGitIssuesToController({
+        host,
+        taskNerve,
+        repoRoot: syncOptions.repoRoot,
+        nowIsoUtc: syncOptions.nowIsoUtc,
+        settings: effectiveSettings,
+        tasks: syncOptions.tasks,
+        issues: gitIssues,
+      });
+      warnings.push(...remediation.warnings);
 
-      return {
-        integration_mode: "codex-native-host",
-        mode: plan.mode,
-        executed: {
-          pull: pulled,
-          push: pushed,
-        },
-        plan_reason: plan.reason,
-        before: context.snapshot,
-        after,
-        warnings,
-      };
+        return {
+          integration_mode: "codex-native-host",
+          mode: plan.mode,
+          executed: {
+            pull: pulled,
+            push: pushed,
+          },
+          plan_reason: plan.reason,
+          before: context.snapshot,
+          after,
+          warnings,
+        };
+      })();
+
+      if (!repoKey) {
+        return run;
+      }
+      projectGitSyncInflight.set(dedupeKey, run);
+      try {
+        return await run;
+      } finally {
+        projectGitSyncInflight.delete(dedupeKey);
+      }
     },
 
     projectCiSyncSnapshot: async (projectOptions) => {
@@ -1718,88 +1290,138 @@ export function createCodexTaskNerveHostRuntime(options: {
     },
 
     syncProjectCi: async (syncOptions) => {
-      const context = await loadProjectCiSyncContext({
-        repoRoot: syncOptions.repoRoot,
-        tasks: syncOptions.tasks,
-        ciFailures: syncOptions.ciFailures,
-        availableAgentIds: syncOptions.availableAgentIds,
-        nowIsoUtc: syncOptions.nowIsoUtc,
-      });
-      const warnings: string[] = [];
-      let persistedTaskUpserts = 0;
-      let dispatchedTaskIds: string[] = [];
-
-      const settingsAfterSync = await taskNerve.writeProjectSettings(
-        syncOptions.repoRoot,
-        taskNerve.projectSettingsAfterCiSync({
-          settings: context.settings,
-          failed_job_count: context.snapshot.ci_metrics.unique_failure_count,
-          synced_at_utc: syncOptions.nowIsoUtc ?? undefined,
-        }),
-      );
-
-      const taskPayload = context.snapshot.task_upserts.map((entry) => entry.task);
-      if (!context.snapshot.policy.auto_task_enabled) {
-        warnings.push("CI auto-tasking is disabled in project settings");
-      } else if (syncOptions.persistTasks === false) {
-        warnings.push("CI task persistence skipped by request");
-      } else if (taskPayload.length > 0) {
-        if (typeof host.upsertTaskNerveProjectTasks !== "function") {
-          warnings.push("Codex host method upsertTaskNerveProjectTasks is unavailable");
-        } else {
-          await host.upsertTaskNerveProjectTasks({
-            repoRoot: syncOptions.repoRoot,
-            tasks: taskPayload,
-          });
-          persistedTaskUpserts = taskPayload.length;
+      const repoKey = syncOptions.repoRoot.trim();
+      const dedupeKey = repoKey
+        ? `${repoKey}::${syncTaskMarker(syncOptions.tasks)}::${syncOptions.persistTasks !== false ? "persist" : "no-persist"}::${syncOptions.dispatch !== false ? "dispatch" : "no-dispatch"}::${syncOptions.nowIsoUtc ?? ""}`
+        : "";
+      const dedupeEligible =
+        !!repoKey &&
+        syncOptions.ciFailures === undefined &&
+        syncOptions.availableAgentIds === undefined;
+      if (dedupeEligible) {
+        const inflight = projectCiSyncInflight.get(dedupeKey);
+        if (inflight) {
+          return inflight;
         }
       }
 
-      const shouldDispatch = syncOptions.dispatch !== false;
-      if (!shouldDispatch) {
-        // Explicit opt-out: keep snapshot output but skip host dispatch call.
-      } else if (!context.snapshot.policy.auto_task_enabled) {
-        // Auto-tasking disabled; dispatch is intentionally suppressed.
-      } else if (persistedTaskUpserts <= 0 || context.snapshot.dispatch_task_ids.length === 0) {
-        // Nothing new to dispatch.
-      } else if (typeof host.dispatchTaskNerveTasks !== "function") {
-        warnings.push("Codex host method dispatchTaskNerveTasks is unavailable");
-      } else {
-        const qualityGate = taskNerve.gateDispatchTaskIdsByQuality({
-          settings: settingsAfterSync,
-          task_ids: context.snapshot.dispatch_task_ids,
-          tasks: context.snapshot.task_upserts.map((entry) => entry.task),
+      const run: Promise<CodexProjectCiSyncRunResult> = (async (): Promise<CodexProjectCiSyncRunResult> => {
+        const context = await loadProjectCiSyncContext({
+          repoRoot: syncOptions.repoRoot,
+          tasks: syncOptions.tasks,
+          ciFailures: syncOptions.ciFailures,
+          availableAgentIds: syncOptions.availableAgentIds,
+          nowIsoUtc: syncOptions.nowIsoUtc,
         });
-        if (qualityGate.blocked_task_ids.length > 0) {
-          warnings.push(
-            `Task quality gate blocked ${qualityGate.blocked_task_ids.length} dispatch item(s): ${qualityGate.blocked_task_ids.join(
-              ", ",
-            )}`,
-          );
+        const warnings: string[] = [];
+        let persistedTaskUpserts = 0;
+        let dispatchedTaskIds: string[] = [];
+
+        const settingsAfterSync = await taskNerve.writeProjectSettings(
+          syncOptions.repoRoot,
+          taskNerve.projectSettingsAfterCiSync({
+            settings: context.settings,
+            failed_job_count: context.snapshot.ci_metrics.unique_failure_count,
+            synced_at_utc: syncOptions.nowIsoUtc ?? undefined,
+          }),
+        );
+
+        const taskPayload = context.snapshot.task_upserts.map((entry) => entry.task);
+        if (!context.snapshot.policy.auto_task_enabled) {
+          warnings.push("CI auto-tasking is disabled in project settings");
+        } else if (syncOptions.persistTasks === false) {
+          warnings.push("CI task persistence skipped by request");
+        } else if (taskPayload.length > 0) {
+          if (typeof host.upsertTaskNerveProjectTasks !== "function") {
+            warnings.push("Codex host method upsertTaskNerveProjectTasks is unavailable");
+          } else {
+            await host.upsertTaskNerveProjectTasks({
+              repoRoot: syncOptions.repoRoot,
+              tasks: taskPayload,
+            });
+            persistedTaskUpserts = taskPayload.length;
+          }
         }
-        dispatchedTaskIds = [...qualityGate.allowed_task_ids];
-        if (dispatchedTaskIds.length > 0) {
-          await host.dispatchTaskNerveTasks({
-            repoRoot: syncOptions.repoRoot,
-            task_ids: dispatchedTaskIds,
+
+        const shouldDispatch = syncOptions.dispatch !== false;
+        if (!shouldDispatch) {
+          // Explicit opt-out: keep snapshot output but skip host dispatch call.
+        } else if (!context.snapshot.policy.auto_task_enabled) {
+          // Auto-tasking disabled; dispatch is intentionally suppressed.
+        } else if (persistedTaskUpserts <= 0 || context.snapshot.dispatch_task_ids.length === 0) {
+          // Nothing new to dispatch.
+        } else if (typeof host.dispatchTaskNerveTasks !== "function") {
+          warnings.push("Codex host method dispatchTaskNerveTasks is unavailable");
+        } else {
+          const qualityGate = taskNerve.gateDispatchTaskIdsByQuality({
+            settings: settingsAfterSync,
+            task_ids: context.snapshot.dispatch_task_ids,
+            tasks: context.snapshot.task_upserts.map((entry) => entry.task),
           });
+          if (qualityGate.blocked_task_ids.length > 0) {
+            warnings.push(
+              `Task quality gate blocked ${qualityGate.blocked_task_ids.length} dispatch item(s): ${qualityGate.blocked_task_ids.join(
+                ", ",
+              )}`,
+            );
+          }
+          dispatchedTaskIds = [...qualityGate.allowed_task_ids];
+          if (dispatchedTaskIds.length > 0) {
+            await host.dispatchTaskNerveTasks({
+              repoRoot: syncOptions.repoRoot,
+              task_ids: dispatchedTaskIds,
+            });
+          }
         }
+
+        invalidateProjectCiFailureCache(syncOptions.repoRoot);
+
+        return {
+          integration_mode: "codex-native-host",
+          before: context.snapshot,
+          settings: settingsAfterSync,
+          persisted_task_upserts: persistedTaskUpserts,
+          dispatched_task_ids: dispatchedTaskIds,
+          warnings,
+        };
+      })();
+
+      if (!dedupeEligible) {
+        return run;
       }
-
-      invalidateProjectCiFailureCache(syncOptions.repoRoot);
-
-      return {
-        integration_mode: "codex-native-host",
-        before: context.snapshot,
-        settings: settingsAfterSync,
-        persisted_task_upserts: persistedTaskUpserts,
-        dispatched_task_ids: dispatchedTaskIds,
-        warnings,
-      };
+      projectCiSyncInflight.set(dedupeKey, run);
+      try {
+        return await run;
+      } finally {
+        projectCiSyncInflight.delete(dedupeKey);
+      }
     },
 
     syncProjectTrace: async (traceOptions) => {
       return syncProjectTraceSafe(traceOptions);
+    },
+
+    syncAgentWatchdog: async (watchdogOptions) => {
+      const settings = watchdogOptions.settings
+        ? taskNerve.normalizeProjectSettings(watchdogOptions.settings)
+        : await taskNerve.loadProjectSettings({
+            repoRoot: watchdogOptions.repoRoot,
+          });
+      return runCodexAgentWatchdog(
+        {
+          host,
+          taskNerve,
+        },
+        {
+          repoRoot: watchdogOptions.repoRoot,
+          projectName: watchdogOptions.projectName ?? null,
+          tasks: watchdogOptions.tasks,
+          settings,
+          threadsPayload: watchdogOptions.threadsPayload,
+          nowIsoUtc: watchdogOptions.nowIsoUtc,
+          policy: watchdogOptions.policy,
+        },
+      );
     },
 
     projectProductionSnapshot: async (projectOptions) => {
@@ -1816,51 +1438,110 @@ export function createCodexTaskNerveHostRuntime(options: {
     },
 
     syncProjectProduction: async (syncOptions) => {
-      const productionResult = await syncCodexProjectProduction(
-        {
-          host,
-          taskNerve,
-          loadProjectGitState,
-          loadProjectCiFailures,
-          loadProjectCiAgentIds,
-          invalidateProjectGitStateCache,
-          invalidateProjectCiFailureCache,
-        },
-        syncOptions,
-      );
-      const traceSync = await syncProjectTraceSafe({
-        repoRoot: syncOptions.repoRoot,
-        nowIsoUtc: syncOptions.nowIsoUtc,
-      });
-      return {
-        ...productionResult,
-        trace_sync: traceSync,
-        warnings: [...new Set([...productionResult.warnings, ...traceSync.warnings])],
-      };
+      const repoKey = syncOptions.repoRoot.trim();
+      const dedupeKey = repoKey
+        ? `${repoKey}::${syncTaskMarker(syncOptions.tasks)}::${syncOptions.mode ?? "smart"}`
+        : "";
+      const dedupeEligible =
+        !!repoKey &&
+        (syncOptions.mode === undefined || syncOptions.mode === "smart") &&
+        syncOptions.autostash !== false &&
+        syncOptions.forcePush !== true &&
+        syncOptions.autoSwitchPreferredBranch !== false &&
+        syncOptions.persistCiTasks !== false &&
+        syncOptions.dispatchCiTasks !== false &&
+        syncOptions.gitState === undefined &&
+        syncOptions.ciFailures === undefined &&
+        syncOptions.availableAgentIds === undefined;
+      if (dedupeEligible) {
+        const inflight = projectProductionSyncInflight.get(dedupeKey);
+        if (inflight) {
+          return inflight;
+        }
+      }
+
+      const run = (async () => {
+        const productionResult = await syncCodexProjectProduction(
+          {
+            host,
+            taskNerve,
+            loadProjectGitState,
+            loadProjectCiFailures,
+            loadProjectCiAgentIds,
+            invalidateProjectGitStateCache,
+            invalidateProjectCiFailureCache,
+          },
+          syncOptions,
+        );
+        const traceSync = await syncProjectTraceSafe({
+          repoRoot: syncOptions.repoRoot,
+          nowIsoUtc: syncOptions.nowIsoUtc,
+        });
+        return {
+          ...productionResult,
+          trace_sync: traceSync,
+          warnings: [...new Set([...productionResult.warnings, ...traceSync.warnings])],
+        };
+      })();
+
+      if (!dedupeEligible) {
+        return run;
+      }
+      projectProductionSyncInflight.set(dedupeKey, run);
+      try {
+        return await run;
+      } finally {
+        projectProductionSyncInflight.delete(dedupeKey);
+      }
     },
 
     controllerProjectAutomation: async (automationOptions) => {
-      const automationResult = await runCodexControllerProjectAutomation(
-        {
-          host,
-          taskNerve,
-          loadProjectGitState,
-          loadProjectCiFailures,
-          loadProjectCiAgentIds,
-          invalidateProjectGitStateCache,
-          invalidateProjectCiFailureCache,
-        },
-        automationOptions,
-      );
-      const traceSync = await syncProjectTraceSafe({
-        repoRoot: automationOptions.repoRoot,
-        nowIsoUtc: automationOptions.nowIsoUtc,
-      });
-      return {
-        ...automationResult,
-        trace_sync: traceSync,
-        warnings: [...new Set([...automationResult.warnings, ...traceSync.warnings])],
-      };
+      const repoKey = automationOptions.repoRoot.trim();
+      const dedupeKey = repoKey
+        ? `${repoKey}::${syncTaskMarker(automationOptions.tasks)}::${String(
+            automationOptions.gitOriginUrl || "",
+          ).trim()}`
+        : "";
+      if (repoKey) {
+        const inflight = controllerProjectAutomationInflight.get(dedupeKey);
+        if (inflight) {
+          return inflight;
+        }
+      }
+
+      const run = (async () => {
+        const automationResult = await runCodexControllerProjectAutomation(
+          {
+            host,
+            taskNerve,
+            loadProjectGitState,
+            loadProjectCiFailures,
+            loadProjectCiAgentIds,
+            invalidateProjectGitStateCache,
+            invalidateProjectCiFailureCache,
+          },
+          automationOptions,
+        );
+        const traceSync = await syncProjectTraceSafe({
+          repoRoot: automationOptions.repoRoot,
+          nowIsoUtc: automationOptions.nowIsoUtc,
+        });
+        return {
+          ...automationResult,
+          trace_sync: traceSync,
+          warnings: [...new Set([...automationResult.warnings, ...traceSync.warnings])],
+        };
+      })();
+
+      if (!repoKey) {
+        return run;
+      }
+      controllerProjectAutomationInflight.set(dedupeKey, run);
+      try {
+        return await run;
+      } finally {
+        controllerProjectAutomationInflight.delete(dedupeKey);
+      }
     },
 
     bootstrapControllerThread: async (bootstrapOptions) => {

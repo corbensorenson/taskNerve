@@ -68,10 +68,22 @@ Codex-first display surface:
 - host-exposed `applyConversationInteraction(...)` to execute native scroll/jump commands when host methods exist
 - host-exposed `projectGitSyncSnapshot(...)` for per-repo git sync metrics and recommendation
 - host-exposed `syncProjectGit(...)` for smart pull/push execution with tracked push cadence
+- git sync failures/policy blocks automatically escalate into a deterministic controller remediation task (`task.git-remediation.controller`) so git remains TaskNerve-managed and user hands-off
 - host-exposed `projectCiSyncSnapshot(...)` for per-repo CI failure triage and task-upsert preview
 - host-exposed `syncProjectCi(...)` for automatic CI failure task upsert + dispatch through host task APIs
 - host-exposed `syncProjectTrace(...)` for deterministic per-project trace capture to `taskNerve/project_trace.ndjson`
+- host-exposed `syncAgentWatchdog(...)` for deterministic stall recovery:
+  - worker stall: reset worker thread directly and continue the same claimed task without controller escalation
+  - controller stall: reset controller thread directly (no escalation task loop)
+  - deterministic waiting-hint grace: suppresses resets for threads that explicitly report long-running monitoring/wait states (until grace window expires or a newer user turn arrives)
 - `syncProjectProduction(...)` now runs trace sync as part of the integrated production pass
+- `syncProjectProduction(...)` now also runs deterministic agent/controller watchdog recovery and reports reset counts
+- `syncProjectProduction(...)` now runs a deterministic self-improvement planner:
+  - converts runtime signals (watchdog resets, task-quality gate blocks, git-sync instability) into bounded maintenance tasks
+  - reopens prior completed auto-improvement tasks when signals regress
+  - enforces max tasks/run, open-task caps, and dispatch cooldown to avoid queue spam
+- `syncProjectProduction(...)` dedupes concurrent smart runs per repo to prevent duplicate pull/push/CI/watchdog/trace work under burst triggers
+- trace sync now uses per-repo short-lived cache + inflight dedupe for burst refreshes, while explicit `force` still bypasses cache
 - `controllerProjectAutomation(...)` now runs trace sync as part of the controller automation pass
 - host-exposed thread display snapshot method for native Codex thread UIs
 - optional host-event refresh observers:

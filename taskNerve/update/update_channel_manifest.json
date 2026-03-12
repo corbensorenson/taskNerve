@@ -1,0 +1,22 @@
+{
+  "schema_version": "tasknerve.update_channel_manifest.v1",
+  "updated_at_utc": "2026-03-12T09:32:17Z",
+  "channel_name": "stable",
+  "appcast_url": "https://raw.githubusercontent.com/adimus/taskNerve/main/taskNerve/update/appcast.xml",
+  "owner_delivery_mode": "interceptor-gated",
+  "ai_interceptor_enabled": false,
+  "last_intercepted_upstream": {
+    "upstream_version": "26.309.31024",
+    "upstream_build": null,
+    "published_at_utc": "Wed, 11 Mar 2026 22:38:16 +0000",
+    "title": "26.309.31024",
+    "download_url": "https://persistent.oaistatic.com/codex-app-prod/Codex-darwin-arm64-26.309.31024.zip",
+    "release_notes_url": null,
+    "fingerprint": "26.309.31024||Wed, 11 Mar 2026 22:38:16 +0000|https://persistent.oaistatic.com/codex-app-prod/Codex-darwin-arm64-26.309.31024.zip"
+  },
+  "last_validated_candidate": null,
+  "pending_release_candidate": null,
+  "latest_published_release": null,
+  "pending_critical_count": 0,
+  "pending_phase_two_review_count": 0
+}

@@ -1,0 +1,55 @@
+name: TaskNerve Update Interceptor
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 * * * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  intercept:
+    name: Intercept Upstream Codex Updates
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Run Interceptor
+        env:
+          TASKNERVE_UPDATE_AI_ENABLED: "0"
+          TASKNERVE_UPDATE_ISSUE_REPO: "adimus/taskNerve"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 ./scripts/codex-update-interceptor.py --repo-root .
+
+      - name: Open PR For Interceptor State Changes
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore: update TaskNerve interceptor state"
+          title: "TaskNerve interceptor: upstream update digest"
+          body: |
+            Automated update from TaskNerve Codex update interceptor.
+
+            - updates upstream digest state
+            - updates channel/queue metadata
+            - opens phase-two review issues when non-critical updates are detected
+          branch: codex/update-interceptor
+          delete-branch: true
+          labels: |
+            automated
+            update-interceptor
+          add-paths: |
+            taskNerve/update/upstream_codex_state.json
+            taskNerve/update/update_channel_manifest.json
+            taskNerve/update/critical_update_queue.json
+            taskNerve/update/review_update_queue.json

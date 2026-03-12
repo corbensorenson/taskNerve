@@ -1,6 +1,10 @@
 import { z } from "zod";
 
-import { SCHEMA_PROJECT_CODEX_SETTINGS, SCHEMA_PROJECTS } from "./constants.js";
+import {
+  SCHEMA_PROJECT_AGENT_WATCHDOG_STATE,
+  SCHEMA_PROJECT_CODEX_SETTINGS,
+  SCHEMA_PROJECTS,
+} from "./constants.js";
 
 export const taskStatusSchema = z.enum(["open", "claimed", "blocked", "done"]);
 export type TaskStatus = z.infer<typeof taskStatusSchema>;
@@ -89,6 +93,12 @@ export const projectCodexSettingsSchema = z.object({
   trace_capture_agents: z.boolean().default(true),
   trace_include_message_content: z.boolean().default(true),
   trace_max_content_chars: z.number().int().min(1).max(200_000).default(16_000),
+  self_improvement_enabled: z.boolean().default(true),
+  self_improvement_auto_dispatch_enabled: z.boolean().default(true),
+  self_improvement_max_tasks_per_run: z.number().int().min(1).max(16).default(2),
+  self_improvement_open_task_limit: z.number().int().min(1).max(64).default(6),
+  self_improvement_dispatch_cooldown_minutes: z.number().int().min(0).max(2_880).default(45),
+  self_improvement_last_dispatch_at_utc: z.string().trim().min(1).nullish(),
   issues_sync_enabled: z.boolean().default(true),
   issues_auto_task_enabled: z.boolean().default(false),
   issues_auto_approve_trusted: z.boolean().default(false),
@@ -118,6 +128,15 @@ export const projectRegistrySchema = z.object({
   projects: z.array(registeredProjectSchema).default([]),
 });
 export type ProjectRegistry = z.infer<typeof projectRegistrySchema>;
+
+export const projectAgentWatchdogStateSchema = z.object({
+  schema_version: z.string().default(SCHEMA_PROJECT_AGENT_WATCHDOG_STATE),
+  updated_at_utc: z.string(),
+  controller_last_reset_at_utc: z.string().trim().min(1).nullish(),
+  last_recovery_by_task: z.record(z.string(), z.string()).default({}),
+  last_recovery_by_thread: z.record(z.string(), z.string()).default({}),
+});
+export type ProjectAgentWatchdogState = z.infer<typeof projectAgentWatchdogStateSchema>;
 
 export const promptQueueRequestSchema = z.object({
   prompt_id: z.string(),

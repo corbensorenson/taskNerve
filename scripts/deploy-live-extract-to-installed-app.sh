@@ -5,6 +5,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIVE_EXTRACT_DIR="${TASKNERVE_LIVE_EXTRACT_DIR:-$REPO_ROOT/target/codex-tasknerve-app-live-extract}"
 APP_PATH="${1:-${TASKNERVE_APP_PATH:-/Applications/Codex TaskNerve.app}}"
 SKIP_DMG="${TASKNERVE_SKIP_DMG:-0}"
+UPDATE_CHANNEL_MANIFEST="${TASKNERVE_UPDATE_CHANNEL_MANIFEST:-$REPO_ROOT/taskNerve/update/update_channel_manifest.json}"
+TASKNERVE_FEED_URL="${TASKNERVE_SPARKLE_FEED_URL:-}"
 
 RESOURCES_DIR="$APP_PATH/Contents/Resources"
 ASAR_PATH="$RESOURCES_DIR/app.asar"
@@ -27,6 +29,31 @@ DMG_SHA256=""
 if [[ ! -d "$LIVE_EXTRACT_DIR" ]]; then
   echo "missing live extract: $LIVE_EXTRACT_DIR" >&2
   echo "expected canonical extract at target/codex-tasknerve-app-live-extract" >&2
+  exit 1
+fi
+
+if [[ -z "$TASKNERVE_FEED_URL" && -f "$UPDATE_CHANNEL_MANIFEST" ]]; then
+  TASKNERVE_FEED_URL="$(
+    python3 - "$UPDATE_CHANNEL_MANIFEST" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    payload = {}
+value = payload.get("appcast_url")
+if isinstance(value, str) and value.strip():
+    print(value.strip())
+PY
+  )"
+fi
+
+if [[ -z "$TASKNERVE_FEED_URL" ]]; then
+  echo "TaskNerve update feed URL is not configured." >&2
+  echo "Set TASKNERVE_SPARKLE_FEED_URL or ensure appcast_url exists in: $UPDATE_CHANNEL_MANIFEST" >&2
   exit 1
 fi
 
@@ -70,6 +97,21 @@ mkdir -p "$BACKUP_DIR" "$TMP_DIR"
 
 cp "$ASAR_PATH" "$BACKUP_DIR/app.asar.backup"
 cp "$PLIST_PATH" "$BACKUP_DIR/Info.plist.backup"
+
+LIVE_PACKAGE_JSON="$LIVE_EXTRACT_DIR/package.json"
+if [[ -f "$LIVE_PACKAGE_JSON" ]]; then
+  python3 - "$LIVE_PACKAGE_JSON" "$TASKNERVE_FEED_URL" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+feed = sys.argv[2].strip()
+payload = json.loads(path.read_text(encoding="utf-8"))
+payload["codexSparkleFeedUrl"] = feed
+path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+PY
+fi
 
 node "$ASAR_BIN" pack "$LIVE_EXTRACT_DIR" "$TMP_ASAR"
 
@@ -149,6 +191,7 @@ fi
 
 echo "deployed live extract to installed app"
 echo "app: $APP_PATH"
+echo "update feed: $TASKNERVE_FEED_URL"
 echo "asar sha256: $ASAR_SHA256"
 echo "asar header hash: $ASAR_HEADER_HASH"
 echo "backup dir: $BACKUP_DIR"

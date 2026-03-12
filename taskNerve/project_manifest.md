@@ -37,8 +37,12 @@ TaskNerve folder docs:
 - Prefer event-driven updates over periodic polling where host events exist.
 - Cache and dedupe expensive loads by mtime/content where safe.
 - Keep render churn low in thread display and sidebar project surfaces.
+- Keep self-improvement loops bounded with deterministic limits (max tasks/run, open-task cap, dispatch cooldown).
 
 ## Safety Contract
 - Validate patched runtime JS before deploy.
 - Keep bridge routes idempotent when possible.
 - Fail clearly with actionable errors; avoid silent broken states.
+- Route upstream Codex updates through TaskNerve update interceptor (critical-fast phase + owner-approved phase-two).
+- Non-critical interceptor follow-ups should be raised as GitHub issues for explicit owner approval.
+- Autonomous maintenance work must be deterministic and metric-gated (keep/discard discipline, no uncontrolled retries).

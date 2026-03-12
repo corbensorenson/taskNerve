@@ -254,6 +254,46 @@ describe("codex TaskNerve host runtime", () => {
     expect(result.after.push_tracking.tasks_before_push_history.at(-1)).toBe(4);
   });
 
+  it("dedupes concurrent smart git sync runs per repo", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-git-sync-dedupe-"));
+    const host = mockHostServices();
+    host.pullRepository = vi.fn(
+      async () =>
+        await new Promise((resolve) => {
+          setTimeout(() => resolve({ ok: true }), 25);
+        }),
+    );
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    const [first, second] = await Promise.all([
+      runtime.syncProjectGit({
+        repoRoot,
+        tasks: [
+          { task_id: "t1", title: "done one", status: "done" },
+          { task_id: "t2", title: "done two", status: "done" },
+          { task_id: "t3", title: "done three", status: "done" },
+          { task_id: "t4", title: "done four", status: "done" },
+        ],
+        mode: "smart",
+      }),
+      runtime.syncProjectGit({
+        repoRoot,
+        tasks: [
+          { task_id: "t1", title: "done one", status: "done" },
+          { task_id: "t2", title: "done two", status: "done" },
+          { task_id: "t3", title: "done three", status: "done" },
+          { task_id: "t4", title: "done four", status: "done" },
+        ],
+        mode: "smart",
+      }),
+    ]);
+
+    expect(first.integration_mode).toBe("codex-native-host");
+    expect(second.integration_mode).toBe("codex-native-host");
+    expect(host.pullRepository).toHaveBeenCalledTimes(1);
+    expect(host.pushRepository).toHaveBeenCalledTimes(1);
+  });
+
   it("auto-switches to preferred branch before git sync when branch policy is configured", async () => {
     const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-git-sync-auto-branch-"));
     const host = mockHostServices();
@@ -300,6 +340,123 @@ describe("codex TaskNerve host runtime", () => {
     expect(result.executed.push).toBe(true);
   });
 
+  it("escalates git pull failures to a controller remediation task automatically", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-git-sync-pull-failure-"));
+    const host = mockHostServices();
+    host.pullRepository = vi.fn(async () => {
+      throw new Error("network unavailable");
+    });
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    const result = await runtime.syncProjectGit({
+      repoRoot,
+      mode: "pull",
+      nowIsoUtc: "2026-03-11T04:13:00.000Z",
+    });
+
+    expect(result.executed.pull).toBe(false);
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("Pull failed: network unavailable")]),
+    );
+    expect(host.upsertTaskNerveProjectTasks).toHaveBeenCalledWith({
+      repoRoot,
+      tasks: [
+        expect.objectContaining({
+          task_id: "task.git-remediation.controller",
+          claimed_by_agent_id: "agent.controller",
+          subsystem: "git-sync",
+        }),
+      ],
+    });
+    expect(host.dispatchTaskNerveTasks).toHaveBeenCalledWith({
+      repoRoot,
+      task_ids: ["task.git-remediation.controller"],
+    });
+  });
+
+  it("escalates smart push-blocked git policy states to controller remediation", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-git-sync-push-blocked-"));
+    const host = mockHostServices();
+    host.readRepositoryGitState = vi.fn(async () => ({
+      branch: "tasknerve/main",
+      remote: "",
+      ahead_count: 3,
+      behind_count: 0,
+      changed_file_count: 0,
+      staged_file_count: 0,
+      untracked_file_count: 0,
+      clean: true,
+    }));
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+    const service = createTaskNerveService();
+    await service.writeProjectSettings(repoRoot, {
+      git_tasks_per_push_target: 1,
+      git_done_task_count_at_last_push: 0,
+    });
+
+    const result = await runtime.syncProjectGit({
+      repoRoot,
+      tasks: [{ task_id: "t1", title: "done one", status: "done" }],
+      mode: "smart",
+      nowIsoUtc: "2026-03-11T04:13:30.000Z",
+    });
+
+    expect(result.plan_reason).toBe("smart-push-blocked");
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("Git sync blocked: missing-remote")]),
+    );
+    expect(host.pullRepository).not.toHaveBeenCalled();
+    expect(host.pushRepository).not.toHaveBeenCalled();
+    expect(host.upsertTaskNerveProjectTasks).toHaveBeenCalledWith({
+      repoRoot,
+      tasks: [
+        expect.objectContaining({
+          task_id: "task.git-remediation.controller",
+        }),
+      ],
+    });
+    expect(host.dispatchTaskNerveTasks).toHaveBeenCalledWith({
+      repoRoot,
+      task_ids: ["task.git-remediation.controller"],
+    });
+  });
+
+  it("does not re-dispatch unchanged active git remediation tasks", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-git-sync-remediation-dedupe-"));
+    const host = mockHostServices();
+    host.pullRepository = vi.fn(async () => {
+      throw new Error("fetch timeout");
+    });
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    await runtime.syncProjectGit({
+      repoRoot,
+      mode: "pull",
+      nowIsoUtc: "2026-03-11T04:14:00.000Z",
+    });
+    const firstTask =
+      (host.upsertTaskNerveProjectTasks as any).mock.calls?.[0]?.[0]?.tasks?.[0] ?? null;
+    expect(firstTask).toBeTruthy();
+
+    (host.upsertTaskNerveProjectTasks as any).mockClear();
+    (host.dispatchTaskNerveTasks as any).mockClear();
+
+    const second = await runtime.syncProjectGit({
+      repoRoot,
+      mode: "pull",
+      tasks: [firstTask],
+      nowIsoUtc: "2026-03-11T04:14:30.000Z",
+    });
+
+    expect(second.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Git remediation is already active for the current issue fingerprint"),
+      ]),
+    );
+    expect(host.upsertTaskNerveProjectTasks).not.toHaveBeenCalled();
+    expect(host.dispatchTaskNerveTasks).not.toHaveBeenCalled();
+  });
+
   it("builds per-project CI sync snapshots with task upsert plans", async () => {
     const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-ci-sync-runtime-"));
     const host = mockHostServices();
@@ -339,6 +496,34 @@ describe("codex TaskNerve host runtime", () => {
       repoRoot,
       task_ids: result.dispatched_task_ids,
     });
+  });
+
+  it("dedupes concurrent CI sync runs per repo", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-ci-sync-dedupe-"));
+    const host = mockHostServices();
+    host.upsertTaskNerveProjectTasks = vi.fn(
+      async () =>
+        await new Promise((resolve) => {
+          setTimeout(() => resolve({ ok: true }), 25);
+        }),
+    );
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    const [first, second] = await Promise.all([
+      runtime.syncProjectCi({
+        repoRoot,
+        tasks: [],
+      }),
+      runtime.syncProjectCi({
+        repoRoot,
+        tasks: [],
+      }),
+    ]);
+
+    expect(first.integration_mode).toBe("codex-native-host");
+    expect(second.integration_mode).toBe("codex-native-host");
+    expect(host.upsertTaskNerveProjectTasks).toHaveBeenCalledTimes(1);
+    expect(host.dispatchTaskNerveTasks).toHaveBeenCalledTimes(1);
   });
 
   it("memoizes CI agent discovery across rapid CI sync snapshots", async () => {
@@ -431,6 +616,251 @@ describe("codex TaskNerve host runtime", () => {
     expect(traceRaw).toContain("\"thread_id\":\"thread-controller\"");
   });
 
+  it("resets stalled worker threads deterministically without controller escalation", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-watchdog-worker-reset-"));
+    const host = mockHostServices();
+    host.startThread = vi
+      .fn()
+      .mockResolvedValueOnce({ thread_id: "thread-agent-recovery" })
+      .mockResolvedValue({ thread_id: "thread-agent-recovery-2" });
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    const result = await runtime.syncAgentWatchdog({
+      repoRoot,
+      nowIsoUtc: "2026-03-12T16:00:00.000Z",
+      tasks: [
+        {
+          task_id: "task-stalled-worker",
+          title: "Implement parser",
+          status: "claimed",
+          claimed_by_agent_id: "agent.beta",
+          objective: "Finish parser implementation",
+          files_in_scope: ["src/parser.ts"],
+          acceptance_criteria: ["Parser handles baseline input"],
+          deliverables: ["Updated parser implementation"],
+          verification_steps: ["Run parser unit test"],
+        },
+      ],
+      settings: {
+        worker_default_model: "gpt-5-codex",
+      },
+      threadsPayload: {
+        threads: [
+          {
+            thread_id: "thread-agent-stalled",
+            role: "agent",
+            agent_id: "agent.beta",
+            title: "agent.beta",
+            created_at: "2026-03-12T15:00:00.000Z",
+            updated_at: "2026-03-12T15:30:00.000Z",
+            turns: [
+              {
+                id: "turn-1",
+                role: "assistant",
+                created_at: "2026-03-12T15:05:00.000Z",
+                text: "Starting task.",
+              },
+              {
+                id: "turn-2",
+                role: "user",
+                created_at: "2026-03-12T15:30:00.000Z",
+                text: "Any progress?",
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(result.worker_resets).toBe(1);
+    expect(result.controller_resets).toBe(0);
+    expect(result.recovered_task_ids).toContain("task-stalled-worker");
+    expect(host.startThread).toHaveBeenCalledWith(
+      expect.objectContaining({
+        role: "agent",
+        agent_id: "agent.beta",
+      }),
+    );
+    expect(host.startTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        thread_id: "thread-agent-recovery",
+        agent_id: "agent.beta",
+      }),
+    );
+    expect(host.upsertTaskNerveProjectTasks).toHaveBeenCalledWith({
+      repoRoot,
+      tasks: [
+        expect.objectContaining({
+          task_id: "task-stalled-worker",
+          claimed_by_agent_id: "agent.beta",
+          status: "claimed",
+        }),
+      ],
+    });
+    expect(host.dispatchTaskNerveTasks).not.toHaveBeenCalled();
+  });
+
+  it("resets stalled controller thread directly instead of escalating", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-watchdog-controller-reset-"));
+    const host = mockHostServices();
+    host.startThread = vi.fn(async () => ({ thread_id: "thread-controller-recovery" }));
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    const result = await runtime.syncAgentWatchdog({
+      repoRoot,
+      nowIsoUtc: "2026-03-12T16:00:00.000Z",
+      settings: {
+        controller_default_model: "gpt-5-codex-controller",
+      },
+      threadsPayload: {
+        threads: [
+          {
+            thread_id: "thread-controller-stalled",
+            role: "controller",
+            agent_id: "agent.controller",
+            title: "TaskNerve Controller",
+            status: "running",
+            created_at: "2026-03-12T14:30:00.000Z",
+            updated_at: "2026-03-12T15:20:00.000Z",
+            turns: [
+              {
+                id: "turn-1",
+                role: "user",
+                created_at: "2026-03-12T15:20:00.000Z",
+                text: "Keep coordinating tasks",
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(result.worker_resets).toBe(0);
+    expect(result.controller_resets).toBe(1);
+    expect(host.startThread).toHaveBeenCalledWith(
+      expect.objectContaining({
+        role: "controller",
+        agent_id: "agent.controller",
+      }),
+    );
+    expect(host.startTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        thread_id: "thread-controller-recovery",
+        agent_id: "agent.controller",
+      }),
+    );
+    expect(host.upsertTaskNerveProjectTasks).not.toHaveBeenCalled();
+    expect(host.dispatchTaskNerveTasks).not.toHaveBeenCalled();
+  });
+
+  it("suppresses worker reset during deterministic waiting-hint grace windows", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-watchdog-wait-hint-grace-"));
+    const host = mockHostServices();
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    const result = await runtime.syncAgentWatchdog({
+      repoRoot,
+      nowIsoUtc: "2026-03-12T16:00:00.000Z",
+      tasks: [
+        {
+          task_id: "task-monitor-training",
+          title: "Monitor model training run",
+          status: "claimed",
+          claimed_by_agent_id: "agent.beta",
+        },
+      ],
+      threadsPayload: {
+        threads: [
+          {
+            thread_id: "thread-agent-monitoring",
+            role: "agent",
+            agent_id: "agent.beta",
+            title: "agent.beta",
+            status: "running",
+            created_at: "2026-03-12T15:00:00.000Z",
+            updated_at: "2026-03-12T15:20:00.000Z",
+            turns: [
+              {
+                id: "turn-1",
+                role: "assistant",
+                created_at: "2026-03-12T15:00:00.000Z",
+                text: "Starting training monitor task.",
+              },
+              {
+                id: "turn-2",
+                role: "assistant",
+                created_at: "2026-03-12T15:20:00.000Z",
+                text: "Monitoring training run now. This may take 30 minutes, I will update when complete.",
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(result.worker_resets).toBe(0);
+    expect(result.stalled_worker_candidates).toBe(0);
+    expect(result.controller_resets).toBe(0);
+    expect(host.startThread).not.toHaveBeenCalled();
+    expect(host.startTurn).not.toHaveBeenCalled();
+    expect(host.upsertTaskNerveProjectTasks).not.toHaveBeenCalled();
+  });
+
+  it("extends watchdog waiting grace from declared long-run duration", async () => {
+    const repoRoot = await mkdtemp(
+      path.join(os.tmpdir(), "tasknerve-watchdog-wait-hint-duration-grace-"),
+    );
+    const host = mockHostServices();
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    const result = await runtime.syncAgentWatchdog({
+      repoRoot,
+      nowIsoUtc: "2026-03-12T16:00:00.000Z",
+      tasks: [
+        {
+          task_id: "task-monitor-long-eval",
+          title: "Monitor long evaluation run",
+          status: "claimed",
+          claimed_by_agent_id: "agent.gamma",
+        },
+      ],
+      threadsPayload: {
+        threads: [
+          {
+            thread_id: "thread-agent-long-eval",
+            role: "agent",
+            agent_id: "agent.gamma",
+            title: "agent.gamma",
+            status: "running",
+            created_at: "2026-03-12T12:00:00.000Z",
+            updated_at: "2026-03-12T13:55:00.000Z",
+            turns: [
+              {
+                id: "turn-1",
+                role: "assistant",
+                created_at: "2026-03-12T12:05:00.000Z",
+                text: "Starting evaluation monitor task.",
+              },
+              {
+                id: "turn-2",
+                role: "assistant",
+                created_at: "2026-03-12T13:55:00.000Z",
+                text: "Monitoring evaluation pipeline now. This may take 3 hours; I will update when complete.",
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(result.worker_resets).toBe(0);
+    expect(result.stalled_worker_candidates).toBe(0);
+    expect(result.controller_resets).toBe(0);
+    expect(host.startThread).not.toHaveBeenCalled();
+    expect(host.startTurn).not.toHaveBeenCalled();
+    expect(host.upsertTaskNerveProjectTasks).not.toHaveBeenCalled();
+  });
+
   it("runs production sync as one native flow for CI tasking and git sync", async () => {
     const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-production-sync-"));
     const host = mockHostServices();
@@ -453,7 +883,10 @@ describe("codex TaskNerve host runtime", () => {
     expect(result.executed.push).toBe(true);
     expect(result.executed.ci_task_upserts).toBe(1);
     expect(result.executed.ci_dispatch_count).toBe(1);
+    expect(result.executed.watchdog_worker_resets).toBe(0);
+    expect(result.executed.watchdog_controller_resets).toBe(0);
     expect(result.timings_ms.total).toBeGreaterThanOrEqual(0);
+    expect(result.watchdog.integration_mode).toBe("codex-native-host");
     expect(result.trace_sync.integration_mode).toBe("codex-native-host");
     expect(result.trace_sync.trace_path).toContain("/taskNerve/project_trace.ndjson");
     expect(host.upsertTaskNerveProjectTasks).toHaveBeenCalledWith({
@@ -470,6 +903,105 @@ describe("codex TaskNerve host runtime", () => {
     });
     expect(host.pushRepository).toHaveBeenCalledWith({
       repoRoot,
+    });
+  });
+
+  it("dedupes concurrent smart production sync runs per repo", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-production-sync-dedupe-"));
+    const host = mockHostServices();
+    host.pullRepository = vi.fn(
+      async () =>
+        await new Promise((resolve) => {
+          setTimeout(() => resolve({ ok: true }), 25);
+        }),
+    );
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+    const service = createTaskNerveService();
+    await service.writeProjectSettings(repoRoot, {
+      git_tasks_per_push_target: 1,
+      git_done_task_count_at_last_push: 0,
+    });
+
+    const [first, second] = await Promise.all([
+      runtime.syncProjectProduction({
+        repoRoot,
+        tasks: [{ task_id: "t1", title: "done one", status: "done" }],
+        mode: "smart",
+      }),
+      runtime.syncProjectProduction({
+        repoRoot,
+        tasks: [{ task_id: "t1", title: "done one", status: "done" }],
+        mode: "smart",
+      }),
+    ]);
+
+    expect(first.integration_mode).toBe("codex-native-host");
+    expect(second.integration_mode).toBe("codex-native-host");
+    expect(host.pullRepository).toHaveBeenCalledTimes(1);
+    expect(host.pushRepository).toHaveBeenCalledTimes(1);
+  });
+
+  it("reuses short-lived trace sync cache for burst refreshes and supports force refresh", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-trace-sync-cache-"));
+    const host = mockHostServices();
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    const first = await runtime.syncProjectTrace({ repoRoot });
+    const second = await runtime.syncProjectTrace({ repoRoot });
+    const forced = await runtime.syncProjectTrace({ repoRoot, force: true });
+
+    expect(first.integration_mode).toBe("codex-native-host");
+    expect(second.integration_mode).toBe("codex-native-host");
+    expect(forced.integration_mode).toBe("codex-native-host");
+    expect(host.listProjectThreads).toHaveBeenCalledTimes(2);
+  });
+
+  it("de-dupes concurrent forced trace sync runs for the same repo", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-trace-sync-force-dedupe-"));
+    const host = mockHostServices();
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    const [first, second] = await Promise.all([
+      runtime.syncProjectTrace({ repoRoot, force: true }),
+      runtime.syncProjectTrace({ repoRoot, force: true }),
+    ]);
+
+    expect(first.integration_mode).toBe("codex-native-host");
+    expect(second.integration_mode).toBe("codex-native-host");
+    expect(host.listProjectThreads).toHaveBeenCalledTimes(1);
+  });
+
+  it("escalates production git pull failures through controller remediation automation", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-production-git-remediation-"));
+    const host = mockHostServices();
+    host.pullRepository = vi.fn(async () => {
+      throw new Error("remote rejected");
+    });
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    const result = await runtime.syncProjectProduction({
+      repoRoot,
+      mode: "pull",
+      persistCiTasks: false,
+      dispatchCiTasks: false,
+      nowIsoUtc: "2026-03-11T04:10:30.000Z",
+    });
+
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("Pull failed: remote rejected")]),
+    );
+    expect(host.upsertTaskNerveProjectTasks).toHaveBeenCalledWith({
+      repoRoot,
+      tasks: [
+        expect.objectContaining({
+          task_id: "task.git-remediation.controller",
+          claimed_by_agent_id: "agent.controller",
+        }),
+      ],
+    });
+    expect(host.dispatchTaskNerveTasks).toHaveBeenCalledWith({
+      repoRoot,
+      task_ids: ["task.git-remediation.controller"],
     });
   });
 
@@ -496,6 +1028,41 @@ describe("codex TaskNerve host runtime", () => {
       repoRoot,
       autostash: true,
     });
+  });
+
+  it("dedupes concurrent controller automation runs per repo", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-controller-auto-dedupe-"));
+    const host = mockHostServices();
+    host.pullRepository = vi.fn(
+      async () =>
+        await new Promise((resolve) => {
+          setTimeout(() => resolve({ ok: true }), 25);
+        }),
+    );
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+    const service = createTaskNerveService();
+    await service.writeProjectSettings(repoRoot, {
+      git_tasks_per_push_target: 1,
+      git_done_task_count_at_last_push: 0,
+    });
+
+    const [first, second] = await Promise.all([
+      runtime.controllerProjectAutomation({
+        repoRoot,
+        gitOriginUrl: "git@github.com:acme/tasknerve.git",
+        tasks: [{ task_id: "t1", title: "done one", status: "done" }],
+      }),
+      runtime.controllerProjectAutomation({
+        repoRoot,
+        gitOriginUrl: "git@github.com:acme/tasknerve.git",
+        tasks: [{ task_id: "t1", title: "done one", status: "done" }],
+      }),
+    ]);
+
+    expect(first.integration_mode).toBe("codex-native-host");
+    expect(second.integration_mode).toBe("codex-native-host");
+    expect(host.pullRepository).toHaveBeenCalledTimes(1);
+    expect(host.pushRepository).toHaveBeenCalledTimes(1);
   });
 
   it("hydrates git binding from workspace context when settings are missing", async () => {

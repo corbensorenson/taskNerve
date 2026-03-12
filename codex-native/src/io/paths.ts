@@ -58,3 +58,7 @@ export function projectTraceManifestPath(repoRoot: string): string {
 export function timelineProjectTraceStatePath(repoRoot: string): string {
   return path.join(timelineRoot(repoRoot), "codex", "project_trace_state.json");
 }
+
+export function timelineProjectAgentWatchdogStatePath(repoRoot: string): string {
+  return path.join(timelineRoot(repoRoot), "codex", "project_agent_watchdog_state.json");
+}

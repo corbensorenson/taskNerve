@@ -86,9 +86,9 @@ Run checks:
 
 ```bash
 cd /Users/adimus/Documents/taskNerve/codex-native
-npm install
-npm run typecheck
-npm test
+pnpm install
+pnpm run tsc
+pnpm run test:quiet
 ```
 
 Run repo checks:
@@ -96,6 +96,12 @@ Run repo checks:
 ```bash
 bash ./scripts/public-release-check.sh
 bash ./scripts/vigorous-e2e.sh
+```
+
+If you need CI to fail whenever full native compile/tests are unavailable in the current checkout, run:
+
+```bash
+TASKNERVE_REQUIRE_FULL_NATIVE_CHECKS=1 bash ./scripts/public-release-check.sh
 ```
 
 Prune heavyweight local build/install artifacts in `target/` (deterministic retention):
@@ -143,6 +149,56 @@ This script:
 Optional env vars:
 - `TASKNERVE_SKIP_DMG=1` to skip DMG packaging
 - `TASKNERVE_DMG_OUTPUT_DIR=/custom/path` to change installer output directory
+- `TASKNERVE_SPARKLE_FEED_URL=https://.../appcast.xml` to override update feed during deploy
+
+## Update Interceptor (Two-Phase)
+
+TaskNerve now includes an upstream update interceptor so users are protected from direct upstream Codex updates that may break TaskNerve customization.
+
+Contract:
+- Phase 1 (critical-fast): compatibility-critical areas are auto-processed first.
+- Phase 2 (owner approval): non-critical follow-up changes are sent to GitHub Issues for owner review/approval.
+
+Policy/state files:
+- `taskNerve/update/update_interceptor_policy.json`
+- `taskNerve/update/upstream_codex_state.json`
+- `taskNerve/update/update_channel_manifest.json`
+- `taskNerve/update/critical_update_queue.json`
+- `taskNerve/update/review_update_queue.json`
+
+Run one interceptor cycle manually:
+
+```bash
+python3 ./scripts/codex-update-interceptor.py --repo-root /Users/adimus/Documents/taskNerve
+```
+
+GitHub issue routing auth:
+- Preferred: export `GITHUB_TOKEN` (or `GH_TOKEN` / `TASKNERVE_UPDATE_GITHUB_TOKEN`) with repo `issues:write`.
+- Fallback: `gh auth login` (CLI mode) if token env vars are not set.
+
+Install background daemon on macOS (launchd, runs every 15 minutes by default):
+
+```bash
+bash ./scripts/install-tasknerve-update-daemon.sh
+```
+
+Check daemon status:
+
+```bash
+bash ./scripts/tasknerve-update-daemon-status.sh
+```
+
+Uninstall daemon:
+
+```bash
+bash ./scripts/uninstall-tasknerve-update-daemon.sh
+```
+
+Phase-2 approval helper (marks queue item owner-approved; optional issue close):
+
+```bash
+python3 ./scripts/tasknerve-approve-phase2-update.py --repo-root /Users/adimus/Documents/taskNerve --fingerprint <fingerprint> --close-issue
+```
 
 Project onboarding UX (desktop live extract):
 - In the project drawer header, use `Clone project from GitHub` to paste a clone URL.
