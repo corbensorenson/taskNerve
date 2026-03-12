@@ -2,6 +2,18 @@
 
 TaskNerve is now a direct Codex-native orchestration layer.
 
+## Required macOS Permissions
+
+To use Codex TaskNerve reliably on macOS, users should approve the required system prompts during first launch/setup:
+
+- Keychain access (step 1)
+- Keychain access (step 2)
+- Documents folder access
+
+![Keychain access step 1](approval%20images/keychain%20access%201.png)
+![Keychain access step 2](approval%20images/keychain%20access%202.png)
+![Documents access](approval%20images/documents%20access.png)
+
 On branch `codex/codex-native`, the live product path is:
 - direct in-process integration modules under `codex-native/src/integration`
 - shared domain logic under `codex-native/src/domain`
@@ -82,6 +94,12 @@ This script:
 - updates `Info.plist` Electron ASAR integrity hash
 - re-signs and verifies the app bundle
 - writes backups and extracted verification files under `target/install-backups/<timestamp>/`
+- builds a timestamped macOS installer DMG at `target/installers/`
+- refreshes `target/installers/Codex-TaskNerve-latest.dmg` for easy sharing
+
+Optional env vars:
+- `TASKNERVE_SKIP_DMG=1` to skip DMG packaging
+- `TASKNERVE_DMG_OUTPUT_DIR=/custom/path` to change installer output directory
 
 Install/refresh bundled skill in Codex:
 

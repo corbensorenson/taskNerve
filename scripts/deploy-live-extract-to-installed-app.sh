@@ -4,6 +4,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIVE_EXTRACT_DIR="${TASKNERVE_LIVE_EXTRACT_DIR:-$REPO_ROOT/target/codex-tasknerve-app-live-extract}"
 APP_PATH="${1:-${TASKNERVE_APP_PATH:-/Applications/Codex TaskNerve.app}}"
+SKIP_DMG="${TASKNERVE_SKIP_DMG:-0}"
 
 RESOURCES_DIR="$APP_PATH/Contents/Resources"
 ASAR_PATH="$RESOURCES_DIR/app.asar"
@@ -14,6 +15,14 @@ TIMESTAMP="$(date -u +%Y%m%d-%H%M%S)"
 BACKUP_DIR="$REPO_ROOT/target/install-backups/$TIMESTAMP"
 TMP_DIR="$REPO_ROOT/target/tmp-deploy-$TIMESTAMP"
 TMP_ASAR="$TMP_DIR/app.asar"
+DMG_STAGE_DIR="$TMP_DIR/dmg-stage"
+APP_BUNDLE_NAME="$(basename "$APP_PATH")"
+APP_DISPLAY_NAME="${APP_BUNDLE_NAME%.app}"
+DMG_SAFE_NAME="${APP_DISPLAY_NAME// /-}"
+DMG_OUTPUT_DIR="${TASKNERVE_DMG_OUTPUT_DIR:-$REPO_ROOT/target/installers}"
+DMG_TIMESTAMPED_PATH="$DMG_OUTPUT_DIR/${DMG_SAFE_NAME}-${TIMESTAMP}.dmg"
+DMG_LATEST_PATH="$DMG_OUTPUT_DIR/${DMG_SAFE_NAME}-latest.dmg"
+DMG_SHA256=""
 
 if [[ ! -d "$LIVE_EXTRACT_DIR" ]]; then
   echo "missing live extract: $LIVE_EXTRACT_DIR" >&2
@@ -49,6 +58,11 @@ fi
 
 if ! command -v codesign >/dev/null 2>&1; then
   echo "codesign is required to re-sign the app bundle" >&2
+  exit 1
+fi
+
+if [[ "$SKIP_DMG" != "1" ]] && ! command -v hdiutil >/dev/null 2>&1; then
+  echo "hdiutil is required to build a macOS .dmg installer" >&2
   exit 1
 fi
 
@@ -116,6 +130,23 @@ popd >/dev/null
 
 ASAR_SHA256="$(shasum -a 256 "$ASAR_PATH" | awk '{print $1}')"
 
+if [[ "$SKIP_DMG" != "1" ]]; then
+  mkdir -p "$DMG_OUTPUT_DIR" "$DMG_STAGE_DIR"
+  rm -rf "$DMG_STAGE_DIR"/*
+  ditto "$APP_PATH" "$DMG_STAGE_DIR/$APP_BUNDLE_NAME"
+  ln -s /Applications "$DMG_STAGE_DIR/Applications"
+  rm -f "$DMG_TIMESTAMPED_PATH" "$DMG_LATEST_PATH"
+  hdiutil create \
+    -volname "$APP_DISPLAY_NAME" \
+    -srcfolder "$DMG_STAGE_DIR" \
+    -format UDZO \
+    "$DMG_TIMESTAMPED_PATH" >/dev/null
+  cp "$DMG_TIMESTAMPED_PATH" "$DMG_LATEST_PATH"
+  DMG_SHA256="$(shasum -a 256 "$DMG_TIMESTAMPED_PATH" | awk '{print $1}')"
+  printf '%s  %s\n' "$DMG_SHA256" "$(basename "$DMG_TIMESTAMPED_PATH")" > "$DMG_TIMESTAMPED_PATH.sha256"
+  printf '%s  %s\n' "$DMG_SHA256" "$(basename "$DMG_LATEST_PATH")" > "$DMG_LATEST_PATH.sha256"
+fi
+
 echo "deployed live extract to installed app"
 echo "app: $APP_PATH"
 echo "asar sha256: $ASAR_SHA256"
@@ -125,4 +156,9 @@ echo "verify files:"
 echo "  $MAIN_VERIFY_FILE"
 if [[ -n "$INDEX_VERIFY_FILE" ]]; then
   echo "  $INDEX_VERIFY_FILE"
+fi
+if [[ "$SKIP_DMG" != "1" ]]; then
+  echo "dmg: $DMG_TIMESTAMPED_PATH"
+  echo "dmg latest: $DMG_LATEST_PATH"
+  echo "dmg sha256: $DMG_SHA256"
 fi
