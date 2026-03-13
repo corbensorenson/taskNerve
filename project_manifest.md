@@ -45,12 +45,12 @@ This file locks the technical contract for how `project_goals.md` will be achiev
 - Libraries or patterns to avoid: new live Rust dependencies, sidecar-first architectures, runtime injection layers, app-bundle patch tooling
 
 ### Architecture and software patterns
-- Module boundaries: domain logic in `codex-native/src/domain`, persistence in `codex-native/src/io`, host integration in `codex-native/src/integration`
+- Module boundaries: domain logic in `codex-native/src/domain`, persistence in `codex-native/src/io`, TaskNerve runtime integration in `codex-native/src/integration`
 - State rules: repo-local `.tasknerve/` plus root project markdown contracts remain the durable source of truth
 - Error handling: fail clearly and keep deterministic validation around settings/registry state
 - Concurrency model: Codex-hosted services with project-scoped orchestration helpers
-- UI patterns: TaskNerve UI should be host-rendered using Codex components/styles, not custom DOM overlays
-- Alpha pipeline rule: maintain one implementation target (`codex-native/src`) and treat runtime extracts as non-source artifacts
+- UI patterns: TaskNerve UI should be host-rendered using Codex components/styles, not custom DOM overlays, bundle patching, or generated-asset edits
+- Alpha pipeline rule: maintain one real source path per behavior and treat runtime extracts as non-source artifacts; if behavior is trapped in generated output, recover source before iterating
 
 ### Quality gates
 - Required commands:
@@ -66,7 +66,7 @@ This file locks the technical contract for how `project_goals.md` will be achiev
 - Required docs updates: README, skill docs, and project contracts whenever workflow changes materially
 
 ### Delivery rules
-- Migration strategy: all new work targets direct host integration modules
+- Migration strategy: all new work targets maintained source modules, and any leftover non-canonical path is migration debt to remove rather than extend
 - Performance, security, and cost constraints: prefer Codex-native inference and in-process integration boundaries
 - Dependency rule: new dependencies must fit the Codex-native TypeScript direction
 - Human-controlled workflow rule: optimize for throughput and direct native integration, not duplicate branch/process ceremony.

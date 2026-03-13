@@ -1,6 +1,6 @@
 # TaskNerve
 
-TaskNerve is now a direct Codex-native orchestration layer.
+TaskNerve is intended to be a clean Codex 2.0 style integration: one maintained source path, one deterministic deploy path, no patchwork.
 
 ## Required macOS Permissions
 
@@ -14,8 +14,8 @@ To use Codex TaskNerve reliably on macOS, users should approve the required syst
 ![Keychain access step 2](approval%20images/keychain%20access%202.png)
 ![Documents access](approval%20images/documents%20access.png)
 
-On branch `codex/codex-native`, the live product path is:
-- direct in-process integration modules under `codex-native/src/integration`
+The intended live product path is:
+- direct in-process TaskNerve runtime modules under `codex-native/src/integration`
 - shared domain logic under `codex-native/src/domain`
 - shared persistence under `codex-native/src/io`
 - repo-local state under `.tasknerve/`
@@ -32,15 +32,23 @@ On branch `codex/codex-native`, the live product path is:
   - TaskNerve issue filter controls should be used to block malicious/noise inputs before task creation
   - issue-to-task promotion should require explicit approve/reject decisions unless trusted auto-approve is intentionally enabled
 
-No app-bundle patching, script injection, or localhost bridge runtime is supported.
+Required architecture:
+- no app-bundle patching
+- no script injection
+- no localhost bridge as part of the product architecture
+- no duplicate runtime paths
+- no behavior implemented only inside generated artifacts
+- if code is no longer part of the clean integrated product, move it to `/deprecated`
 
 Single development target:
-- `codex-native/src` is the only implementation path.
+- `codex-native/src` is the only accepted source-of-truth implementation path for product behavior.
 - `codex-native/test` is verification coverage, not a second runtime branch.
 - Generated/extracted bundle artifacts are not maintained as source-of-truth code.
 - Never hand-edit generated bundle artifacts in `target/*` (for example `target/codex-tasknerve-app-live-extract/webview/assets/index-*.js`).
 - Alpha policy: do not run dual implementation pipelines (no parallel dev/test runtime trees, no duplicate editable bundle copies for the same change).
 - If runtime artifacts are needed for verification, keep one canonical generated tree: `target/codex-tasknerve-app-live-extract` (alias: `target/codex-tasknerve-app-src`).
+- If a UI behavior only exists inside generated renderer output, stop and recover a maintained source path before changing product behavior.
+- If a live behavior still depends on anything outside the canonical source path, treat that as migration debt to eliminate before layering on more features.
 
 ## Integration Surface
 
@@ -50,6 +58,7 @@ Primary entrypoints:
 - [modelTransport.ts](/Users/adimus/Documents/taskNerve/codex-native/src/integration/modelTransport.ts)
 
 These are designed to be called directly from Codex host code so TaskNerve uses Codex threads, models, settings, and styling surfaces.
+Any deviation from that rule is a cleanup task, not a permanent architecture choice.
 
 Model transport readiness:
 - TaskNerve now includes a websocket-ready start-turn transport selector with safe HTTP fallback.

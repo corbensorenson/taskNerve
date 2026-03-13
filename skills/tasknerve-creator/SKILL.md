@@ -23,17 +23,20 @@ Use `tasknerve` instead when the request is primarily operating project work thr
 
 ## Source-of-Truth Rules
 
-- Single implementation target: `codex-native/src`.
+- `codex-native/src` is the only accepted source-of-truth implementation path for TaskNerve product behavior.
 - `codex-native/test` is validation coverage, not a second runtime branch.
 - Treat `target/*` extracts and built bundles as artifacts, not source.
 - Never hand-edit generated bundle artifacts (for example `target/codex-tasknerve-app-live-extract/webview/assets/index-*.js`).
 - Do not maintain duplicate runtime pipelines or parallel editable bundle trees.
 - Do not add patching/injection workflows as normal product behavior.
 - When validating UI/runtime changes in a local installed app, always deploy from one canonical extract tree: `target/codex-tasknerve-app-live-extract`.
+- If the only visible implementation for a UI behavior is trapped inside a generated renderer asset, first recover or promote that behavior into a maintained source path before making product changes.
+- Treat any active localhost bridge path as migration debt. The required architecture is direct host integration through maintained source modules.
+- If a path cannot meet this contract, move it to `/deprecated` instead of extending it.
 
 ## Implementation Workflow
 
-1. Locate the narrowest native module boundary for the requested change:
+1. Locate the narrowest maintained source boundary for the requested change:
 - [codex-native/src/integration/](/Users/adimus/Documents/taskNerve/codex-native/src/integration)
 - [codex-native/src/domain/](/Users/adimus/Documents/taskNerve/codex-native/src/domain)
 - [codex-native/src/io/](/Users/adimus/Documents/taskNerve/codex-native/src/io)
@@ -43,9 +46,11 @@ Use `tasknerve` instead when the request is primarily operating project work thr
 - reduce redundant file reads and object churn
 - keep host/renderer payloads minimal and deterministic
 
-3. Implement in one path only, then verify behavior with targeted checks first.
+3. Before editing, verify the behavior lives in a maintained source file rather than only in generated artifacts. If not, migrate the behavior first.
 
-4. Validate before closure:
+4. Implement in one maintained path only, then verify behavior with targeted checks first.
+
+5. Validate before closure:
 ```bash
 cd /Users/adimus/Documents/taskNerve/codex-native
 npm install
@@ -53,7 +58,7 @@ npm run typecheck
 npm test
 ```
 
-5. If adding chat-bridge integrations (Discord, etc.):
+6. If adding chat-bridge integrations (Discord, etc.):
 - keep per-project config in TaskNerve project settings
 - keep outbound notifications optional and easy to mute
 - clearly separate outbound webhook capability from inbound relay/bot requirements
@@ -68,6 +73,7 @@ npm test
 When the user expects visible desktop app changes immediately, run this flow before claiming completion:
 
 1. Apply changes in source (`codex-native/src`) and any required canonical extract updates.
+   - If the behavior is not yet represented in maintained source, create or migrate that source representation first.
 2. Deploy the deterministic source-first local build:
 ```bash
 bash /Users/adimus/Documents/taskNerve/scripts/deploy-tasknerve-from-source.sh
