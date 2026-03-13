@@ -9,8 +9,8 @@ Usage:
   bash scripts/install-unix.sh
 
 Notes:
-  - Builds a Codex TaskNerve integration bundle for A/B testing.
-  - App-bundle patching/injection is not supported.
+  - On macOS: runs deterministic source->app->dmg deploy.
+  - On non-macOS Unix: builds Codex TaskNerve integration bundle only.
 USAGE
 }
 
@@ -20,4 +20,8 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-bash "$REPO_ROOT/scripts/build-codex-tasknerve-app.sh"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  bash "$REPO_ROOT/scripts/deploy-tasknerve-from-source.sh"
+else
+  bash "$REPO_ROOT/scripts/build-codex-tasknerve-app.sh"
+fi

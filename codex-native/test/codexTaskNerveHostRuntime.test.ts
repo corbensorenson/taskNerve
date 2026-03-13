@@ -498,6 +498,33 @@ describe("codex TaskNerve host runtime", () => {
     });
   });
 
+  it("blocks CI dispatch when the assignee already has unfinished work", async () => {
+    const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-ci-sync-completion-gate-"));
+    const host = mockHostServices();
+    const runtime = createCodexTaskNerveHostRuntime({ host });
+
+    const result = await runtime.syncProjectCi({
+      repoRoot,
+      tasks: [
+        {
+          task_id: "task-active-agent-ci",
+          title: "Active worker task",
+          status: "claimed",
+          claimed_by_agent_id: "agent.ci",
+        },
+      ],
+      availableAgentIds: ["agent.ci"],
+      nowIsoUtc: "2026-03-11T04:06:30.000Z",
+    });
+
+    expect(result.persisted_task_upserts).toBe(1);
+    expect(result.dispatched_task_ids).toEqual([]);
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("Task completion gate blocked")]),
+    );
+    expect(host.dispatchTaskNerveTasks).not.toHaveBeenCalled();
+  });
+
   it("dedupes concurrent CI sync runs per repo", async () => {
     const repoRoot = await mkdtemp(path.join(os.tmpdir(), "tasknerve-ci-sync-dedupe-"));
     const host = mockHostServices();
@@ -1178,8 +1205,8 @@ describe("codex TaskNerve host runtime", () => {
       turnKey: "user:turn-2",
     });
     expect(interaction.commands[1]).toMatchObject({
-      type: "scroll-to-turn",
-      turnKey: "user:turn-2",
+      type: "scroll-to-top",
+      scrollTopPx: 264,
     });
   });
 
@@ -1217,12 +1244,11 @@ describe("codex TaskNerve host runtime", () => {
     expect(applied.apply_summary.applied).toBe(2);
     expect(applied.apply_summary.skipped).toBe(0);
     expect(host.setConversationCurrentTurnKey).toHaveBeenCalledWith("user:turn-2");
-    expect(host.scrollConversationToTurn).toHaveBeenCalledWith("user:turn-2", {
+    expect(host.scrollConversationToTop).toHaveBeenCalledWith(264, {
       behavior: "smooth",
-      align: "start",
     });
     expect(host.setConversationCurrentTurnKey.mock.invocationCallOrder[0]).toBeLessThan(
-      host.scrollConversationToTurn.mock.invocationCallOrder[0],
+      host.scrollConversationToTop.mock.invocationCallOrder[0],
     );
   });
 

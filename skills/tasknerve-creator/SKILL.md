@@ -26,6 +26,7 @@ Use `tasknerve` instead when the request is primarily operating project work thr
 - Single implementation target: `codex-native/src`.
 - `codex-native/test` is validation coverage, not a second runtime branch.
 - Treat `target/*` extracts and built bundles as artifacts, not source.
+- Never hand-edit generated bundle artifacts (for example `target/codex-tasknerve-app-live-extract/webview/assets/index-*.js`).
 - Do not maintain duplicate runtime pipelines or parallel editable bundle trees.
 - Do not add patching/injection workflows as normal product behavior.
 - When validating UI/runtime changes in a local installed app, always deploy from one canonical extract tree: `target/codex-tasknerve-app-live-extract`.
@@ -60,21 +61,16 @@ npm test
 ## Packaging and Recovery Guardrails
 
 - Normal path: change source, rebuild, and package; do not hand-edit installed app bundles.
-- If emergency recovery is required for a broken local install:
-- patch from one canonical extract tree
-- repack once
-- set `Info.plist` `ElectronAsarIntegrity:Resources/app.asar:hash` to Electron's ASAR header SHA-256 hex (hash bytes `app.asar[16..16+len]`, where `len = u32le(app.asar[12..16])`)
-- re-sign the `.app`
-- Before shipping that recovery build, confirm `.vite/build/main.js` has no unresolved placeholders (for example `__TASKNERVE_WINDOW_MANAGER__`).
+- Emergency recovery may repackage canonical generated artifacts, but still never hand-edit minified bundle files.
 
 ## Local Visibility Workflow (Required)
 
 When the user expects visible desktop app changes immediately, run this flow before claiming completion:
 
 1. Apply changes in source (`codex-native/src`) and any required canonical extract updates.
-2. Deploy the canonical extract into the installed app:
+2. Deploy the deterministic source-first local build:
 ```bash
-bash /Users/adimus/Documents/taskNerve/scripts/deploy-live-extract-to-installed-app.sh
+bash /Users/adimus/Documents/taskNerve/scripts/deploy-tasknerve-from-source.sh
 ```
 3. Verify installed artifact contains expected markers using extracted verify files under `target/install-backups/<timestamp>/verify-installed`.
 4. Relaunch the app and confirm the changed UI/behavior is visible.

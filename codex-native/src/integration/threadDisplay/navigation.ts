@@ -74,11 +74,21 @@ function anchorIndex(index: UserTurnKeyIndex, currentTurnKey?: string | null): n
 
 export function buildPromptJumpControls(
   navigation: PromptNavigationTarget,
+  scrollTargets?: {
+    up_scroll_top_px?: number | null;
+    down_scroll_top_px?: number | null;
+  },
 ): PromptJumpControls {
   return {
     placement: "left-of-send-voice",
     up_turn_key: navigation.previous_turn_key,
     down_turn_key: navigation.next_turn_key,
+    up_scroll_top_px: Number.isFinite(scrollTargets?.up_scroll_top_px)
+      ? Number(scrollTargets?.up_scroll_top_px)
+      : null,
+    down_scroll_top_px: Number.isFinite(scrollTargets?.down_scroll_top_px)
+      ? Number(scrollTargets?.down_scroll_top_px)
+      : null,
     can_jump_up: Boolean(navigation.previous_turn_key),
     can_jump_down: Boolean(navigation.next_turn_key),
     up_action: "jump-prev-user-message",

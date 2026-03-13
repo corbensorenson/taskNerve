@@ -16,3 +16,8 @@ interface:
     structured task fields for worker clarity: objective, task_type, subsystem,
     files_in_scope, out_of_scope, acceptance_criteria, deliverables,
     verification_steps, implementation_notes, risk_notes, and estimated_effort.
+    Require worker check-ins to end with STATUS: CONTINUE or STATUS: FINISHED,
+    and never assign a new task while prior assigned work is unfinished. Never
+    hand-edit generated bundle artifacts under target/*; source-of-truth code
+    changes must be made in codex-native/src and shipped through deterministic
+    source-first deploy scripts.

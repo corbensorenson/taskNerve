@@ -43,6 +43,10 @@ interface MeasuredLayout {
   totalHeight: number;
 }
 
+function fallbackHeightPx(defaultRowHeightPx?: number): number {
+  return Math.max(48, Math.round(defaultRowHeightPx ?? DEFAULT_ROW_HEIGHT_PX));
+}
+
 const measuredLayoutCache = new WeakMap<
   ThreadDisplayEntry[],
   WeakMap<Readonly<Record<string, number>>, Map<number, MeasuredLayout>>
@@ -100,7 +104,7 @@ export function buildThreadVirtualWindow(options: {
 }): ThreadVirtualWindow {
   const entries = options.entries;
   const count = entries.length;
-  const fallbackHeight = Math.max(48, Math.round(options.defaultRowHeightPx ?? DEFAULT_ROW_HEIGHT_PX));
+  const fallbackHeight = fallbackHeightPx(options.defaultRowHeightPx);
   const overscanRows = Math.max(1, Math.round(options.overscanRows ?? DEFAULT_OVERSCAN_ROWS));
 
   if (count === 0) {
@@ -179,4 +183,33 @@ export function buildThreadVirtualWindow(options: {
     bottom_spacer_px: bottomSpacer,
     estimated_total_height_px: layout.totalHeight,
   };
+}
+
+export function estimateTurnScrollTopPx(options: {
+  entries: ThreadDisplayEntry[];
+  turnKey?: string | null;
+  measuredHeightsPx?: Readonly<Record<string, number>>;
+  defaultRowHeightPx?: number;
+}): number | null {
+  const turnKey = typeof options.turnKey === "string" ? options.turnKey.trim() : "";
+  if (!turnKey) {
+    return null;
+  }
+
+  const entryIndex = options.entries.findIndex((entry) => entry.turn_key === turnKey);
+  if (entryIndex < 0) {
+    return null;
+  }
+
+  const fallbackHeight = fallbackHeightPx(options.defaultRowHeightPx);
+  if (!hasMeasuredHeights(options.measuredHeightsPx)) {
+    return entryIndex * fallbackHeight;
+  }
+
+  const layout = measuredLayoutFor({
+    entries: options.entries,
+    measuredHeightsPx: options.measuredHeightsPx,
+    fallbackHeight,
+  });
+  return layout.offsets[entryIndex] ?? null;
 }

@@ -68,6 +68,9 @@ Project operating policy:
 - Use this heartbeat core for workers unless the project overrides it later: ${
     options.heartbeatCore || "use the project default heartbeat core"
   }.
+- Worker completion handshake is deterministic:
+- Every worker check-in must end with a final line exactly \`STATUS: CONTINUE\` or \`STATUS: FINISHED\`.
+- Do not assign a new task to a worker when the previous assigned task is still incomplete.
 - Treat git as a TaskNerve-managed subsystem: user sets repository binding once, then controller/agents continue through TaskNerve surfaces only.
 - When the queue runs low, use this controller refill prompt as the baseline behavior: ${
     options.lowQueuePrompt || DEFAULT_LOW_QUEUE_CONTROLLER_PROMPT

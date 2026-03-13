@@ -29,6 +29,8 @@ export interface CodexConversationDisplayJumpControls {
   placement: "left-of-send-voice";
   upTurnKey: string | null;
   downTurnKey: string | null;
+  upScrollTopPx: number | null;
+  downScrollTopPx: number | null;
   canJumpUp: boolean;
   canJumpDown: boolean;
   upAction: "jump-prev-user-message";
@@ -85,6 +87,8 @@ function toCodexSnapshot(snapshot: ThreadDisplaySnapshot): CodexConversationDisp
       placement: snapshot.jump_controls.placement,
       upTurnKey: snapshot.jump_controls.up_turn_key,
       downTurnKey: snapshot.jump_controls.down_turn_key,
+      upScrollTopPx: snapshot.jump_controls.up_scroll_top_px,
+      downScrollTopPx: snapshot.jump_controls.down_scroll_top_px,
       canJumpUp: snapshot.jump_controls.can_jump_up,
       canJumpDown: snapshot.jump_controls.can_jump_down,
       upAction: snapshot.jump_controls.up_action,

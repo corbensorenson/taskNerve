@@ -4,7 +4,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 cat <<MSG
-Building Codex TaskNerve integration bundle (no patching/injection)...
+Running deterministic TaskNerve source->app->dmg deploy...
 MSG
 
-bash "$REPO_ROOT/scripts/build-codex-tasknerve-app.sh"
+bash "$REPO_ROOT/scripts/deploy-tasknerve-from-source.sh" "$@"

@@ -3,6 +3,7 @@ import type { ThreadViewportState } from "./threadDisplay/index.js";
 
 const MIN_SCROLL_COMMAND_INTERVAL_MS = 72;
 const SCROLL_TOP_EPSILON_PX = 1;
+const JUMP_SCROLL_SUPPRESSION_MS = 260;
 
 export type CodexConversationInteractionEvent =
   | {
@@ -38,6 +39,7 @@ export interface CodexConversationInteractionState {
   lastScrollCommandAtMs: number | null;
   lastScrollTopPx: number | null;
   lastScrollTurnKey: string | null;
+  suppressAutoScrollUntilMs: number | null;
 }
 
 export type CodexConversationInteractionCommand =
@@ -57,7 +59,7 @@ export type CodexConversationInteractionCommand =
       type: "scroll-to-top";
       scrollTopPx: number;
       behavior: "auto" | "smooth";
-      reason: "stick-to-bottom" | "preserve-offset";
+      reason: "stick-to-bottom" | "preserve-offset" | "jump-button";
     };
 
 export interface CodexConversationInteractionInput {
@@ -104,6 +106,9 @@ function normalizeState(
       : null,
     lastScrollTopPx: Number.isFinite(state?.lastScrollTopPx) ? Number(state?.lastScrollTopPx) : null,
     lastScrollTurnKey: normalizeTurnKey(state?.lastScrollTurnKey),
+    suppressAutoScrollUntilMs: Number.isFinite(state?.suppressAutoScrollUntilMs)
+      ? Number(state?.suppressAutoScrollUntilMs)
+      : null,
   };
 }
 
@@ -143,6 +148,23 @@ function resolveJumpTarget(
   return null;
 }
 
+function resolveJumpScrollTopPx(
+  snapshot: CodexConversationDisplaySnapshot,
+  eventType: CodexConversationInteractionEvent["type"],
+): number | null {
+  if (eventType === snapshot.jumpControls.upAction) {
+    return Number.isFinite(snapshot.jumpControls.upScrollTopPx)
+      ? Number(snapshot.jumpControls.upScrollTopPx)
+      : null;
+  }
+  if (eventType === snapshot.jumpControls.downAction) {
+    return Number.isFinite(snapshot.jumpControls.downScrollTopPx)
+      ? Number(snapshot.jumpControls.downScrollTopPx)
+      : null;
+  }
+  return null;
+}
+
 function setScrollApplied(
   state: CodexConversationInteractionState,
   nowMs: number,
@@ -164,21 +186,30 @@ function applyJumpCommand(options: {
   if (!turnKey) {
     return [];
   }
+  const jumpScrollTopPx = resolveJumpScrollTopPx(options.snapshot, options.eventType);
   options.state.currentTurnKey = turnKey;
-  setScrollApplied(options.state, options.nowMs, null, turnKey);
+  options.state.suppressAutoScrollUntilMs = options.nowMs + JUMP_SCROLL_SUPPRESSION_MS;
+  setScrollApplied(options.state, options.nowMs, jumpScrollTopPx, turnKey);
   return [
     {
       type: "set-current-turn-key",
       turnKey,
       reason: "jump-button",
     },
-    {
-      type: "scroll-to-turn",
-      turnKey,
-      behavior: "smooth",
-      align: "start",
-      reason: "jump-button",
-    },
+    Number.isFinite(jumpScrollTopPx)
+      ? {
+          type: "scroll-to-top",
+          scrollTopPx: Number(jumpScrollTopPx),
+          behavior: "smooth",
+          reason: "jump-button",
+        }
+      : {
+          type: "scroll-to-turn",
+          turnKey,
+          behavior: "smooth",
+          align: "start",
+          reason: "jump-button",
+        },
   ];
 }
 
@@ -189,6 +220,12 @@ function applyDecisionCommand(options: {
 }): CodexConversationInteractionCommand[] {
   const decision = options.snapshot.scrollDecision;
   if (options.state.userScrolling || decision.mode === "no-op") {
+    return [];
+  }
+  if (
+    Number.isFinite(options.state.suppressAutoScrollUntilMs) &&
+    options.nowMs < Number(options.state.suppressAutoScrollUntilMs)
+  ) {
     return [];
   }
 
@@ -270,6 +307,7 @@ export function conversationInteractionStep(
 
   if (input.event.type === "user-scroll-start") {
     state.userScrolling = true;
+    state.suppressAutoScrollUntilMs = null;
     return {
       integrationMode: "codex-native-host",
       state,
@@ -279,6 +317,7 @@ export function conversationInteractionStep(
 
   if (input.event.type === "user-scroll-end") {
     state.userScrolling = false;
+    state.suppressAutoScrollUntilMs = null;
     return {
       integrationMode: "codex-native-host",
       state,

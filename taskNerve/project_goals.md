@@ -20,7 +20,7 @@ Deliver a Codex-native TaskNerve runtime that stays responsive under heavy multi
 - Keep bridge calls resilient to startup races and transient local failures.
 
 ## Reliability Outcomes
-- No gray-screen or startup crash regressions from runtime patches.
+- No gray-screen or startup crash regressions from source-first releases.
 - Deterministic project onboarding and import path every time.
 - Controller reset/recovery path is explicit and safe.
 - Required docs and launch script are auto-provisioned.

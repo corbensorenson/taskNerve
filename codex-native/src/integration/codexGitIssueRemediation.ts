@@ -1,6 +1,7 @@
 import { CONTROLLER_AGENT_ID, nowIsoUtc } from "../constants.js";
 import type { CodexHostServices } from "../host/codexHostServices.js";
 import type { ProjectCodexSettings, TaskRecord } from "../schemas.js";
+import { dispatchTaskNerveTasksWithPolicy } from "./codexTaskDispatchRuntime.js";
 import type { TaskNerveService } from "./taskNerveService.js";
 
 const GIT_REMEDIATION_TASK_ID = "task.git-remediation.controller";
@@ -306,49 +307,23 @@ export async function escalateGitIssuesToController(
     tasks: [remediationTask],
   });
 
-  if (typeof options.host.dispatchTaskNerveTasks !== "function") {
-    warnings.push(
-      "Codex host method dispatchTaskNerveTasks is unavailable; git remediation task was persisted but not dispatched",
-    );
-    return {
-      task_id: remediationTask.task_id,
-      issue_count: normalizedIssues.length,
-      persisted: true,
-      dispatched: false,
-      skipped: false,
-      warnings,
-    };
-  }
-
-  const qualityGate = options.taskNerve.gateDispatchTaskIdsByQuality({
-    settings: options.settings,
-    task_ids: [remediationTask.task_id],
-    tasks: [remediationTask],
-  });
-  if (qualityGate.blocked_task_ids.length > 0) {
-    warnings.push(
-      `Task quality gate blocked git remediation dispatch: ${qualityGate.blocked_task_ids.join(", ")}`,
-    );
-    return {
-      task_id: remediationTask.task_id,
-      issue_count: normalizedIssues.length,
-      persisted: true,
-      dispatched: false,
-      skipped: false,
-      warnings,
-    };
-  }
-
-  await options.host.dispatchTaskNerveTasks({
+  const dispatchResult = await dispatchTaskNerveTasksWithPolicy({
+    host: options.host,
+    taskNerve: options.taskNerve,
     repoRoot: options.repoRoot,
-    task_ids: [remediationTask.task_id],
+    settings: options.settings,
+    taskIds: [remediationTask.task_id],
+    projectTasks: options.tasks || [],
+    candidateTasks: [remediationTask],
+    label: "git remediation",
   });
+  warnings.push(...dispatchResult.warnings);
 
   return {
     task_id: remediationTask.task_id,
     issue_count: normalizedIssues.length,
     persisted: true,
-    dispatched: true,
+    dispatched: dispatchResult.dispatched_task_ids.length > 0,
     skipped: false,
     warnings,
   };

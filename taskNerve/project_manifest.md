@@ -4,7 +4,8 @@ Project: taskNerve
 Status: active
 
 ## Runtime Contract
-- Canonical runtime target: live extract at `target/codex-tasknerve-app-live-extract`.
+- Canonical implementation target: `codex-native/src`.
+- Canonical generated runtime artifact: `target/codex-tasknerve-app-live-extract` (deployment artifact only).
 - Desktop host: Electron main process + Codex webview bundle.
 - Local bridge: TaskNerve HTTP routes on loopback for native project operations.
 - Persisted state: project-local `.tasknerve/` + repo contracts.
@@ -40,7 +41,8 @@ TaskNerve folder docs:
 - Keep self-improvement loops bounded with deterministic limits (max tasks/run, open-task cap, dispatch cooldown).
 
 ## Safety Contract
-- Validate patched runtime JS before deploy.
+- Never hand-edit generated bundle artifacts.
+- Validate source build/typecheck/tests before deploy.
 - Keep bridge routes idempotent when possible.
 - Fail clearly with actionable errors; avoid silent broken states.
 - Route upstream Codex updates through TaskNerve update interceptor (critical-fast phase + owner-approved phase-two).

@@ -38,8 +38,9 @@ Single development target:
 - `codex-native/src` is the only implementation path.
 - `codex-native/test` is verification coverage, not a second runtime branch.
 - Generated/extracted bundle artifacts are not maintained as source-of-truth code.
+- Never hand-edit generated bundle artifacts in `target/*` (for example `target/codex-tasknerve-app-live-extract/webview/assets/index-*.js`).
 - Alpha policy: do not run dual implementation pipelines (no parallel dev/test runtime trees, no duplicate editable bundle copies for the same change).
-- If runtime extracts are needed for verification, keep one canonical live tree: `target/codex-tasknerve-app-live-extract` (alias: `target/codex-tasknerve-app-src`).
+- If runtime artifacts are needed for verification, keep one canonical generated tree: `target/codex-tasknerve-app-live-extract` (alias: `target/codex-tasknerve-app-src`).
 
 ## Integration Surface
 
@@ -116,35 +117,49 @@ To aggressively reclaim local disk from transient build outputs:
 bash ./scripts/clean-target-retention.sh --drop-debug-release
 ```
 
-If local runtime extracts exist under `target/`, collapse duplicate extract trees to one canonical live tree:
+If local runtime artifacts exist under `target/`, collapse duplicate trees to one canonical generated tree:
 
 ```bash
 bash ./scripts/enforce-single-runtime-extract.sh
 ```
 
-Build A/B test integration bundle:
+Single deterministic local deploy (source -> installed app -> latest DMG):
 
 ```bash
 bash ./install-macos.sh
 ```
 
-This produces a timestamped artifact under `target/codex-tasknerve-app-build/` containing compiled integration modules, an npm package tarball, bundled skill files, and a build manifest.
+Equivalent direct entrypoint:
+
+```bash
+bash ./scripts/deploy-tasknerve-from-source.sh
+```
+
+This flow:
+- enforces one canonical generated runtime artifact path (`target/codex-tasknerve-app-live-extract`)
+- runs native source checks/build from `codex-native/src`
+- packs/signs the installed app from canonical generated artifact
+- builds/refreshes the latest DMG installer
 
 ## Local App Deploy And Visibility Check
 
-When validating desktop UI/runtime changes locally, deploy from the canonical live extract to avoid stale `app.asar` mismatches:
+Low-level deploy helper (used by the deterministic entrypoint above):
 
 ```bash
-bash ./scripts/deploy-live-extract-to-installed-app.sh
+bash ./scripts/deploy-installed-app-from-canonical-build.sh
 ```
 
-This script:
-- repacks `target/codex-tasknerve-app-live-extract` into installed `app.asar`
+This helper script:
+- packs canonical generated runtime artifact into installed `app.asar`
 - updates `Info.plist` Electron ASAR integrity hash
 - re-signs and verifies the app bundle
 - writes backups and extracted verification files under `target/install-backups/<timestamp>/`
 - builds a timestamped macOS installer DMG at `target/installers/`
 - refreshes `target/installers/Codex-TaskNerve-latest.dmg` for easy sharing
+
+Deprecated direct entrypoint:
+- `scripts/deploy-live-extract-to-installed-app.sh` is now a compatibility wrapper and should not be used for new workflows.
+- Historical legacy behavior/scripts are archived under `deprecated/legacy-scripts/`.
 
 Optional env vars:
 - `TASKNERVE_SKIP_DMG=1` to skip DMG packaging
@@ -200,7 +215,7 @@ Phase-2 approval helper (marks queue item owner-approved; optional issue close):
 python3 ./scripts/tasknerve-approve-phase2-update.py --repo-root /Users/adimus/Documents/taskNerve --fingerprint <fingerprint> --close-issue
 ```
 
-Project onboarding UX (desktop live extract):
+Project onboarding UX (desktop native app):
 - In the project drawer header, use `Clone project from GitHub` to paste a clone URL.
 - TaskNerve will clone into a deterministic project folder, register/import the project, ensure required TaskNerve docs/artifacts, and bootstrap the controller thread automatically.
 - TaskNerve now also ensures a `taskNerve/` contract pack per project:

@@ -2,7 +2,7 @@ import { buildPromptJumpControls, buildPromptNavigationTarget } from "./navigati
 import { extractThreadDisplayEntries } from "./extract.js";
 import { decideThreadScrollBehavior } from "./scrollPolicy.js";
 import type { BuildThreadDisplayOptions, ThreadDisplaySnapshot } from "./types.js";
-import { buildThreadVirtualWindow } from "./virtualization.js";
+import { buildThreadVirtualWindow, estimateTurnScrollTopPx } from "./virtualization.js";
 
 interface SnapshotMemo {
   generatedAtUtc: string;
@@ -181,7 +181,20 @@ export function buildThreadDisplaySnapshot(
   const jumpControls =
     previousMemo && previousMemo.promptNavigation === promptNavigation
       ? previousMemo.jumpControls
-      : buildPromptJumpControls(promptNavigation);
+      : buildPromptJumpControls(promptNavigation, {
+          up_scroll_top_px: estimateTurnScrollTopPx({
+            entries,
+            turnKey: promptNavigation.previous_turn_key,
+            measuredHeightsPx: options.measured_heights_px,
+            defaultRowHeightPx: options.default_row_height_px,
+          }),
+          down_scroll_top_px: estimateTurnScrollTopPx({
+            entries,
+            turnKey: promptNavigation.next_turn_key,
+            measuredHeightsPx: options.measured_heights_px,
+            defaultRowHeightPx: options.default_row_height_px,
+          }),
+        });
   const virtualWindow =
     previousMemo &&
     previousMemo.entries === entries &&

@@ -358,8 +358,8 @@ describe("taskNerve service integration surface", () => {
       turnKey: "user:turn-3",
     });
     expect(interaction.commands[1]).toMatchObject({
-      type: "scroll-to-turn",
-      turnKey: "user:turn-3",
+      type: "scroll-to-top",
+      scrollTopPx: 528,
       behavior: "smooth",
     });
   });

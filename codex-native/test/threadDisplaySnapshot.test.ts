@@ -257,6 +257,8 @@ describe("thread display integration", () => {
     expect(snapshot.prompt_navigation.previous_turn_key).toBe("user:t1");
     expect(snapshot.prompt_navigation.next_turn_key).toBe("user:t3");
     expect(snapshot.jump_controls.placement).toBe("left-of-send-voice");
+    expect(snapshot.jump_controls.up_scroll_top_px).toBe(0);
+    expect(snapshot.jump_controls.down_scroll_top_px).toBe(528);
     expect(snapshot.jump_controls.up_action).toBe("jump-prev-user-message");
     expect(snapshot.jump_controls.down_action).toBe("jump-next-user-message");
   });

@@ -19,6 +19,7 @@ import {
   buildCodexProjectProductionSnapshot,
   type CodexProjectProductionSnapshot,
 } from "./codexProjectProduction.js";
+import { dispatchTaskNerveTasksWithPolicy } from "./codexTaskDispatchRuntime.js";
 import type { TaskNerveService } from "./taskNerveService.js";
 
 export interface CodexProjectProductionSnapshotOptions {
@@ -198,28 +199,18 @@ export async function syncCodexProjectProduction(
     // Auto-tasking disabled; dispatch is intentionally suppressed.
   } else if (persistedTaskUpserts <= 0 || context.ciSnapshot.dispatch_task_ids.length === 0) {
     // Nothing new to dispatch.
-  } else if (typeof dependencies.host.dispatchTaskNerveTasks !== "function") {
-    warnings.push("Codex host method dispatchTaskNerveTasks is unavailable");
   } else {
-    const qualityGate = dependencies.taskNerve.gateDispatchTaskIdsByQuality({
+    const dispatchResult = await dispatchTaskNerveTasksWithPolicy({
+      host: dependencies.host,
+      taskNerve: dependencies.taskNerve,
+      repoRoot: options.repoRoot,
       settings: effectiveSettings,
-      task_ids: context.ciSnapshot.dispatch_task_ids,
-      tasks: context.ciSnapshot.task_upserts.map((entry) => entry.task),
+      taskIds: context.ciSnapshot.dispatch_task_ids,
+      projectTasks: options.tasks || [],
+      candidateTasks: context.ciSnapshot.task_upserts.map((entry) => entry.task),
     });
-    if (qualityGate.blocked_task_ids.length > 0) {
-      warnings.push(
-        `Task quality gate blocked ${qualityGate.blocked_task_ids.length} dispatch item(s): ${qualityGate.blocked_task_ids.join(
-          ", ",
-        )}`,
-      );
-    }
-    dispatchedTaskIds = [...qualityGate.allowed_task_ids];
-    if (dispatchedTaskIds.length > 0) {
-      await dependencies.host.dispatchTaskNerveTasks({
-        repoRoot: options.repoRoot,
-        task_ids: dispatchedTaskIds,
-      });
-    }
+    warnings.push(...dispatchResult.warnings);
+    dispatchedTaskIds = [...dispatchResult.dispatched_task_ids];
   }
   timings.ci_sync = Date.now() - ciStartMs;
   dependencies.invalidateProjectCiFailureCache(options.repoRoot);
@@ -450,29 +441,18 @@ export async function syncCodexProjectProduction(
   }
 
   if (selfImprovementPlan.dispatch_task_ids.length > 0) {
-    if (typeof dependencies.host.dispatchTaskNerveTasks !== "function") {
-      warnings.push("Codex host method dispatchTaskNerveTasks is unavailable");
-    } else {
-      const qualityGate = dependencies.taskNerve.gateDispatchTaskIdsByQuality({
-        settings: settingsAfterSync,
-        task_ids: selfImprovementPlan.dispatch_task_ids,
-        tasks: selfImprovementPlan.task_upserts.map((entry) => entry.task),
-      });
-      if (qualityGate.blocked_task_ids.length > 0) {
-        warnings.push(
-          `Task quality gate blocked ${qualityGate.blocked_task_ids.length} self-improvement dispatch item(s): ${qualityGate.blocked_task_ids.join(
-            ", ",
-          )}`,
-        );
-      }
-      selfImprovementDispatchTaskIds = [...qualityGate.allowed_task_ids];
-      if (selfImprovementDispatchTaskIds.length > 0) {
-        await dependencies.host.dispatchTaskNerveTasks({
-          repoRoot: options.repoRoot,
-          task_ids: selfImprovementDispatchTaskIds,
-        });
-      }
-    }
+    const dispatchResult = await dispatchTaskNerveTasksWithPolicy({
+      host: dependencies.host,
+      taskNerve: dependencies.taskNerve,
+      repoRoot: options.repoRoot,
+      settings: settingsAfterSync,
+      taskIds: selfImprovementPlan.dispatch_task_ids,
+      projectTasks: options.tasks || [],
+      candidateTasks: selfImprovementPlan.task_upserts.map((entry) => entry.task),
+      label: "self-improvement",
+    });
+    warnings.push(...dispatchResult.warnings);
+    selfImprovementDispatchTaskIds = [...dispatchResult.dispatched_task_ids];
   }
 
   if (selfImprovementDispatchTaskIds.length > 0) {

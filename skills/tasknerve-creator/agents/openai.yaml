@@ -8,5 +8,6 @@ interface:
     codex-native/src, keep one implementation path, prioritize responsiveness
     and low overhead, avoid patch/injection workflows as normal architecture,
     keep TaskNerve skills split cleanly between usage and creator intent, and
-    when local desktop visibility is required deploy via
-    scripts/deploy-live-extract-to-installed-app.sh before declaring success.
+    never hand-edit generated bundles under target/*; when local desktop
+    visibility is required deploy via scripts/deploy-tasknerve-from-source.sh
+    before declaring success.

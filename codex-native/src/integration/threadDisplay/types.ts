@@ -24,6 +24,8 @@ export interface PromptJumpControls {
   placement: "left-of-send-voice";
   up_turn_key: string | null;
   down_turn_key: string | null;
+  up_scroll_top_px: number | null;
+  down_scroll_top_px: number | null;
   can_jump_up: boolean;
   can_jump_down: boolean;
   up_action: "jump-prev-user-message";

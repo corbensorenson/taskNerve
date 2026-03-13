@@ -40,8 +40,8 @@ describe("codex conversation interaction", () => {
       reason: "jump-button",
     });
     expect(result.commands[1]).toMatchObject({
-      type: "scroll-to-turn",
-      turnKey: "user:turn-2",
+      type: "scroll-to-top",
+      scrollTopPx: 264,
       behavior: "smooth",
       reason: "jump-button",
     });
@@ -94,6 +94,85 @@ describe("codex conversation interaction", () => {
     });
 
     expect(activeScroll.commands).toHaveLength(0);
+  });
+
+  it("does not snap back to bottom immediately after a jump from the tail", () => {
+    const snapshot = buildCodexConversationDisplaySnapshot({
+      thread: {
+        turns: [
+          {
+            id: "turn-1",
+            created_at: "2026-03-10T10:00:00.000Z",
+            input_items: [{ type: "message", text: "one" }],
+            output_items: [{ type: "message", text: "a" }],
+          },
+          {
+            id: "turn-2",
+            created_at: "2026-03-10T10:01:00.000Z",
+            input_items: [{ type: "message", text: "two" }],
+            output_items: [{ type: "message", text: "b" }],
+          },
+        ],
+      },
+      currentTurnKey: "assistant:turn-2",
+      previousEntryCount: 3,
+      previousViewport: {
+        scroll_top_px: 132,
+        scroll_height_px: 396,
+        viewport_height_px: 264,
+      },
+      viewport: {
+        scroll_top_px: 132,
+        scroll_height_px: 528,
+        viewport_height_px: 264,
+      },
+    });
+
+    const jumped = conversationInteractionStep({
+      snapshot,
+      state: {
+        integrationMode: "codex-native-host",
+        currentTurnKey: "assistant:turn-2",
+        userScrolling: false,
+        viewport: {
+          scroll_top_px: 264,
+          scroll_height_px: 528,
+          viewport_height_px: 264,
+        },
+        lastScrollCommandAtMs: null,
+        lastScrollTopPx: null,
+        lastScrollTurnKey: null,
+        suppressAutoScrollUntilMs: null,
+      },
+      event: {
+        type: "jump-prev-user-message",
+        nowMs: 1000,
+      },
+    });
+
+    expect(jumped.commands).toHaveLength(2);
+    expect(jumped.commands[1]).toMatchObject({
+      type: "scroll-to-top",
+      scrollTopPx: 0,
+      reason: "jump-button",
+    });
+
+    const afterJumpDisplay = conversationInteractionStep({
+      snapshot,
+      state: jumped.state,
+      event: {
+        type: "display-updated",
+        viewport: {
+          scroll_top_px: 264,
+          scroll_height_px: 528,
+          viewport_height_px: 264,
+        },
+        userScrolling: false,
+        nowMs: 1010,
+      },
+    });
+
+    expect(afterJumpDisplay.commands).toEqual([]);
   });
 
   it("throttles repeated auto-scroll commands to avoid jitter", () => {

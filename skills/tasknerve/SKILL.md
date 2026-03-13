@@ -28,6 +28,9 @@ Use `tasknerve-creator` instead when the request is to build/modify TaskNerve it
 - Operate through native Codex TaskNerve surfaces first.
 - Keep orchestration state repo-local and project-contract driven.
 - Do not introduce alternate runtime paths while performing usage/orchestration work.
+- Never hand-edit generated bundle/runtime artifacts under `target/*`.
+- Never ship "bundle patching" or injection-style workflows in active runtime paths.
+- If legacy patch scripts/artifacts are discovered, move them to `/deprecated` and document the source-first replacement.
 
 ## Native Workflow
 
@@ -67,6 +70,10 @@ The controller should:
 - alternate development and maintenance/debt-reduction passes according to project policy
 - run deterministic self-improvement passes based on runtime signals (watchdog resets, quality-gate blocks, git-sync instability) with bounded cadence
 - break work into mostly xs/s tasks by default; split anything broad until each task has clear, verifiable done conditions
+- enforce worker completion before reassignment:
+  - workers must end each check-in with `STATUS: CONTINUE` or `STATUS: FINISHED`
+  - if `STATUS: CONTINUE`, do not assign a new task; continue the current one
+  - only assign a new task after `STATUS: FINISHED` and queue state confirms completion
 - use a structured task template so workers have enough context to execute without ambiguity:
   - `title`
   - `objective`

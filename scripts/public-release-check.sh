@@ -248,7 +248,7 @@ if git -C "$REPO_ROOT" ls-files | rg -q '\.DS_Store$'; then
 fi
 
 if rg -n --glob '!**/node_modules/**' \
-  "sync-codex-tasknerve\\.mjs|allow-legacy-patching|legacy:sync:app|TASKNERVE_CODEX_MAIN_BRIDGE|TASKNERVE_CODEX_PANEL" \
+  "sync-codex-tasknerve\\.mjs|allow-legacy-patching|legacy:sync:app|TASKNERVE_CODEX_MAIN_BRIDGE|TASKNERVE_CODEX_PANEL|runtime patch deploy|patched runtime JS" \
   "$REPO_ROOT/README.md" \
   "$REPO_ROOT/CONTRIBUTING.md" \
   "$REPO_ROOT/project_goals.md" \

@@ -17,6 +17,7 @@ Define day-to-day execution through controller + agents with project contracts a
 - Report outputs, risks, and blockers quickly.
 - Avoid speculative side quests outside assigned scope.
 - Write back research/learnings to project contracts when relevant.
+- End every check-in with a final line: `STATUS: CONTINUE` or `STATUS: FINISHED`.
 
 ## Operational Rules
 - Prefer deterministic actions and explicit state transitions.
@@ -31,6 +32,8 @@ Define day-to-day execution through controller + agents with project contracts a
 - single-task scoped changes with explicit metrics
 - keep/discard behavior driven by deterministic gates
 - bounded automation (cooldown + open-task limits) to prevent queue spam
+- Never assign a new task to an agent that still has unfinished assigned work; send a continue message for the current task instead.
+- Never patch generated/minified app bundles; all implementation changes must land in `codex-native/src` and deploy through source-first scripts.
 
 ## Quality Rules
 - Prioritize correctness and recoverability over novelty.

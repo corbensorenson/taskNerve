@@ -58,6 +58,7 @@ import {
   escalateGitIssuesToController,
   type GitIssueSignal,
 } from "./codexGitIssueRemediation.js";
+import { dispatchTaskNerveTasksWithPolicy } from "./codexTaskDispatchRuntime.js";
 import { createTaskNerveService, type TaskNerveService } from "./taskNerveService.js";
 import type {
   BuildThreadDisplayOptions,
@@ -1350,28 +1351,18 @@ export function createCodexTaskNerveHostRuntime(options: {
           // Auto-tasking disabled; dispatch is intentionally suppressed.
         } else if (persistedTaskUpserts <= 0 || context.snapshot.dispatch_task_ids.length === 0) {
           // Nothing new to dispatch.
-        } else if (typeof host.dispatchTaskNerveTasks !== "function") {
-          warnings.push("Codex host method dispatchTaskNerveTasks is unavailable");
         } else {
-          const qualityGate = taskNerve.gateDispatchTaskIdsByQuality({
+          const dispatchResult = await dispatchTaskNerveTasksWithPolicy({
+            host,
+            taskNerve,
+            repoRoot: syncOptions.repoRoot,
             settings: settingsAfterSync,
-            task_ids: context.snapshot.dispatch_task_ids,
-            tasks: context.snapshot.task_upserts.map((entry) => entry.task),
+            taskIds: context.snapshot.dispatch_task_ids,
+            projectTasks: syncOptions.tasks || [],
+            candidateTasks: context.snapshot.task_upserts.map((entry) => entry.task),
           });
-          if (qualityGate.blocked_task_ids.length > 0) {
-            warnings.push(
-              `Task quality gate blocked ${qualityGate.blocked_task_ids.length} dispatch item(s): ${qualityGate.blocked_task_ids.join(
-                ", ",
-              )}`,
-            );
-          }
-          dispatchedTaskIds = [...qualityGate.allowed_task_ids];
-          if (dispatchedTaskIds.length > 0) {
-            await host.dispatchTaskNerveTasks({
-              repoRoot: syncOptions.repoRoot,
-              task_ids: dispatchedTaskIds,
-            });
-          }
+          warnings.push(...dispatchResult.warnings);
+          dispatchedTaskIds = [...dispatchResult.dispatched_task_ids];
         }
 
         invalidateProjectCiFailureCache(syncOptions.repoRoot);

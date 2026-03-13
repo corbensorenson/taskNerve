@@ -7,6 +7,9 @@ The legacy Rust runtime lives under [deprecated/rust/](/Users/adimus/Documents/t
 Bundled runtime artifacts that are not source-of-truth code live under
 [deprecated/bundle-artifacts/](/Users/adimus/Documents/taskNerve/deprecated/bundle-artifacts/).
 
+Legacy deployment/patch entrypoints live under
+[deprecated/legacy-scripts/](/Users/adimus/Documents/taskNerve/deprecated/legacy-scripts/).
+
 The live TaskNerve path on `codex/codex-native` is direct TypeScript integration from:
 - `/Users/adimus/Documents/taskNerve/codex-native/src/integration/`
 

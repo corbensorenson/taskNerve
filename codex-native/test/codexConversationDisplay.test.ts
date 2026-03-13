@@ -30,6 +30,8 @@ describe("codex conversation display", () => {
     expect(snapshot.promptNavigation.previousTurnKey).toBe(null);
     expect(snapshot.promptNavigation.nextTurnKey).toBe(null);
     expect(snapshot.jumpControls.placement).toBe("left-of-send-voice");
+    expect(snapshot.jumpControls.upScrollTopPx).toBe(null);
+    expect(snapshot.jumpControls.downScrollTopPx).toBe(null);
     expect(snapshot.jumpControls.upAction).toBe("jump-prev-user-message");
     expect(snapshot.jumpControls.downAction).toBe("jump-next-user-message");
     expect(snapshot.scrollDecision.mode).toBe("jump-to-turn");
